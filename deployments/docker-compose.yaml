@@ -1,0 +1,25 @@
+services:
+  # MongoDB for Config Storage
+  mongodb:
+    image: mongo:latest
+    container_name: gate-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Rate Limiting & Pub/Sub
+  redis:
+    image: redis:7-alpine
+    container_name: gate-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+
+volumes:
+  mongo_data:
