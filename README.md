@@ -20,7 +20,7 @@ The system is built on the Sidecar/Reverse Proxy pattern, ensuring that downstre
 
 * **The Backbone (Go):** Stateless proxy nodes that intercept traffic.
 * **State Layer (Redis):** Distributed locking and high-speed counters for rate limiting.
-* **Persistence (MongoDB):** Storage for service configurations and user-tier mappings.
+* **Persistence (SQL):** Storage for service configurations and user-tier mappings.
 * **Control Plane (Next.js):** A unified UI for managing limits and viewing performance metrics.
 
 ---
