@@ -23,11 +23,11 @@ func main() {
 	// 2. Infrastructure (Mongo)
 	mongoClient, err := mongo.Connect(ctx, options.Client().ApplyURI(getEnv("MONGO_URI", "mongodb://localhost:27017")))
 	if err != nil {
-		log.Fatalf("❌ Mongo Connect Error: %v", err)
+		log.Fatalf("Mongo Connect Error: %v", err)
 	}
 	// CRITICAL: Ensure Mongo is actually reachable
 	if err := mongoClient.Ping(ctx, nil); err != nil {
-		log.Fatalf("❌ Mongo Ping Error: %v", err)
+		log.Fatalf("Mongo Ping Error: %v", err)
 	}
 	defer mongoClient.Disconnect(context.Background())
 	db := mongoClient.Database(getEnv("DB_NAME", "gateway_db"))
@@ -40,10 +40,11 @@ func main() {
 
 	// 5. Initialize Server
 	server := hub.NewHubServer(db, rdb,
-		os.Getenv("ANALYTICS_URL"),
-		os.Getenv("ANALYTICS_TOKEN"),
-		os.Getenv("ANALYTICS_ORG"),
-		os.Getenv("ANALYTICS_BUCKET"),
+		getEnv("CONFIG_FILE_PATH", "/cmd/config.json"),
+		getEnv("ANALYTICS_URL", "http://localhost:3000"),
+		getEnv("ANALYTICS_TOKEN", ""),
+		getEnv("ANALYTICS_ORG", ""),
+		getEnv("ANALYTICS_BUCKET", ""),
 	)
 
 	// 7. Server Execution

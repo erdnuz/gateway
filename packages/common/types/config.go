@@ -18,15 +18,13 @@ type PrefixConfig struct {
 
 // ServiceConfig defines the specific behavior for an individual upstream service.
 type ServiceConfig struct {
-	ServiceID string `bson:"_id" json:"service_id" validate:"required,kebab-case"`
-	TargetURL string `bson:"target_url" json:"target_url"`
-	Status    string `bson:"status" json:"status"` // "enabled", "disabled", "deprecated"
-
-	Tiers map[string]TierConfig `bson:"tiers" json:"tiers"`
+	ServiceID string       `bson:"_id" json:"service_id" validate:"required,kebab-case"`
+	TargetURL string       `bson:"target_url" json:"target_url"`
+	Tiers     []TierConfig `bson:"tiers" json:"tiers"`
 
 	// Middleware Policy Blocks
 	Transform  TransformConfig   `bson:"transform" json:"transform"`
-	Security   SecurityConfig    `bson:"security" json:"security"`
+	CORS       *CORSConfig       `bson:"cors" json:"cors,omitempty"`
 	Analytics  AnalyticsConfig   `bson:"analytics" json:"analytics"`
 	Cache      *CacheConfig      `bson:"cache" json:"cache,omitempty"`
 	Resilience *ResilienceConfig `bson:"resilience" json:"resilience,omitempty"`

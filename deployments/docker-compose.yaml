@@ -36,6 +36,7 @@ services:
       - REDIS_ADDR=hub-redis:6379
       - MONGO_URI=mongodb://hub-mongo:27017
       - DB_NAME=gateway_db
+      - CONFIG_FILE_PATH=/cmd/config.json
     ports:
       - "8080:8080"
 

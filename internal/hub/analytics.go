@@ -2,7 +2,6 @@ package hub
 
 import (
 	"fmt"
-	"time"
 
 	"gateway/packages/common/types"
 
@@ -49,7 +48,7 @@ func (am *AnalyticsManager) IngestEntry(entry types.AnalyticsEntry) {
 			"response_size":    entry.ResponseSize,
 			"limit_used":       entry.LimitUsed,
 		},
-		time.Unix(entry.Timestamp, 0),
+		entry.Timestamp,
 	)
 	am.writeAPI.WritePoint(p)
 }
