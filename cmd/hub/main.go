@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"gateway/internal/hub"
+	"gateway/packages/hub"
 	"log"
 	"net/http"
 	"os"
