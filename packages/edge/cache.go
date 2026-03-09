@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,6 +18,12 @@ type CacheManager struct {
 	cfg types.CacheConfig
 }
 
+type CachedResponse struct {
+	StatusCode  int    `json:"status_code"`
+	ContentType string `json:"content_type,omitempty"`
+	Body        []byte `json:"body"`
+}
+
 func NewCacheManager(rdb *redis.Client, cfg types.CacheConfig) *CacheManager {
 	return &CacheManager{
 		rdb: rdb,
@@ -24,8 +31,8 @@ func NewCacheManager(rdb *redis.Client, cfg types.CacheConfig) *CacheManager {
 	}
 }
 
-// CheckCache retrieves data from Redis.
-func (cm *CacheManager) CheckCache(ctx context.Context, request *http.Request, apiKey string) ([]byte, bool, error) {
+// CheckCache retrieves cached response metadata from Redis.
+func (cm *CacheManager) CheckCache(ctx context.Context, request *http.Request, apiKey string) (*CachedResponse, bool, error) {
 	key := cm.generateCacheKey(request, apiKey)
 	val, err := cm.rdb.Get(ctx, key).Bytes()
 	if err == redis.Nil {
@@ -34,13 +41,36 @@ func (cm *CacheManager) CheckCache(ctx context.Context, request *http.Request, a
 	if err != nil {
 		return nil, false, err
 	}
-	return val, true, nil
+
+	var cached CachedResponse
+	if err := json.Unmarshal(val, &cached); err != nil {
+		// Backward compatibility with older cache format (raw body only).
+		return &CachedResponse{StatusCode: http.StatusOK, ContentType: "application/json", Body: val}, true, nil
+	}
+	if len(cached.Body) == 0 && cached.StatusCode == 0 && cached.ContentType == "" {
+		// Backward compatibility for valid JSON payloads that are not cache envelopes.
+		return &CachedResponse{StatusCode: http.StatusOK, ContentType: "application/json", Body: val}, true, nil
+	}
+	if cached.StatusCode == 0 {
+		cached.StatusCode = http.StatusOK
+	}
+	if cached.ContentType == "" {
+		cached.ContentType = "application/json"
+	}
+	return &cached, true, nil
 }
 
-// SetCache stores the upstream response bytes using the configured TTL.
-func (cm *CacheManager) SetCache(ctx context.Context, request *http.Request, apiKey string, data []byte) error {
+// SetCache stores the upstream response metadata using the configured TTL.
+func (cm *CacheManager) SetCache(ctx context.Context, request *http.Request, apiKey string, cached *CachedResponse) error {
 	key := cm.generateCacheKey(request, apiKey)
-	return cm.rdb.Set(ctx, key, data, cm.cfg.TTL).Err()
+	if cached == nil {
+		return nil
+	}
+	b, err := json.Marshal(cached)
+	if err != nil {
+		return err
+	}
+	return cm.rdb.Set(ctx, key, b, cm.cfg.TTL).Err()
 }
 
 func (cm *CacheManager) generateCacheKey(r *http.Request, apiKey string) string {
@@ -48,10 +78,16 @@ func (cm *CacheManager) generateCacheKey(r *http.Request, apiKey string) string 
 	query := r.URL.Query().Encode()
 
 	replacements := map[string]string{
-		"$PATH":  r.URL.Path,
-		"$QUERY": query,
-		"$KEY":   apiKey,
-		"$ENC":   r.Header.Get("Accept-Encoding"),
+		"$PATH":   r.URL.Path,
+		"$path":   r.URL.Path,
+		"$QUERY":  query,
+		"$query":  query,
+		"$KEY":    apiKey,
+		"$key":    apiKey,
+		"$ENC":    r.Header.Get("Accept-Encoding"),
+		"$enc":    r.Header.Get("Accept-Encoding"),
+		"$METHOD": r.Method,
+		"$method": r.Method,
 	}
 
 	generated := cm.cfg.CacheKey

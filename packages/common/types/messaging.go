@@ -7,6 +7,7 @@ type UsageDelta struct {
 	Prefix string `json:"prefix"`
 	APIKey string `json:"api_key"`
 	Delta  int64  `json:"delta"`
+	Seq    int64  `json:"seq"`
 }
 
 // SOTMsg (State-of-Truth) carries the authoritative total for a prefix/api key.

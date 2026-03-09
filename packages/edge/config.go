@@ -1,30 +1,74 @@
 package edge
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"os"
 	"sync/atomic"
+	"time"
 
 	"gateway/packages/common/types"
 )
 
 type ConfigManager struct {
-	active atomic.Pointer[types.GatewayConfig]
+	active    atomic.Pointer[types.GatewayConfig]
+	hubAddr   string
+	authToken string
+	client    *http.Client
 }
 
 // NewConfigManager performs a one-time hydration from the Hub on startup.
-func NewConfigManager(hubAddr string) (*ConfigManager, error) {
-	cm := &ConfigManager{}
+func NewConfigManager(hubAddr, authToken string) (*ConfigManager, error) {
+	return NewConfigManagerWithClient(hubAddr, authToken, nil)
+}
 
-	// Initial (and only) Hydration
-	cfg, err := fetchConfig(hubAddr)
+func NewConfigManagerWithClient(hubAddr, authToken string, client *http.Client) (*ConfigManager, error) {
+	return NewConfigManagerWithFallback(hubAddr, authToken, client, "")
+}
+
+func NewConfigManagerWithFallback(hubAddr, authToken string, client *http.Client, bootstrapFile string) (*ConfigManager, error) {
+	if client == nil {
+		client = newHubHTTPClient(0)
+	}
+	cm := &ConfigManager{hubAddr: hubAddr, authToken: authToken, client: client}
+
+	// Initial hydration from hub, with optional bootstrap fallback.
+	cfg, err := cm.fetchConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to hydrate config on startup: %w", err)
+		if bootstrapFile == "" {
+			return nil, fmt.Errorf("failed to hydrate config on startup: %w", err)
+		}
+		fallbackCfg, fallbackErr := loadConfigFromFile(bootstrapFile)
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("failed to hydrate config on startup from hub (%v) and bootstrap file (%v)", err, fallbackErr)
+		}
+		cfg = fallbackCfg
+		log.Printf("edge config bootstrap fallback activated: using %s", bootstrapFile)
 	}
 
 	cm.active.Store(cfg)
 	return cm, nil
+}
+
+func loadConfigFromFile(path string) (*types.GatewayConfig, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	bytes, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	var cfg types.GatewayConfig
+	if err := json.Unmarshal(bytes, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 // Get returns the immutable GatewayConfig.
@@ -71,8 +115,16 @@ func GetTier(svc *types.ServiceConfig, tierID string) (*types.TierConfig, bool) 
 	return nil, false
 }
 
-func fetchConfig(hubAddr string) (*types.GatewayConfig, error) {
-	resp, err := http.Get(hubAddr + "/config")
+func (cm *ConfigManager) fetchConfig() (*types.GatewayConfig, error) {
+	req, err := http.NewRequest(http.MethodGet, cm.hubAddr+"/config", nil)
+	if err != nil {
+		return nil, err
+	}
+	if cm.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cm.authToken)
+	}
+
+	resp, err := cm.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -88,4 +140,29 @@ func fetchConfig(hubAddr string) (*types.GatewayConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+// StartAutoRefresh periodically refreshes config from hub and atomically swaps
+// the active snapshot on successful fetches.
+func (cm *ConfigManager) StartAutoRefresh(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				cfg, err := cm.fetchConfig()
+				if err != nil {
+					log.Printf("edge config refresh failed: %v", err)
+					continue
+				}
+				cm.active.Store(cfg)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }

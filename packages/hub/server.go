@@ -4,44 +4,147 @@ import (
 	"context"
 	"encoding/json"
 	"gateway/packages/common/types"
+	"gateway/packages/common/workers"
+	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9" // Updated to v9
+	"github.com/segmentio/kafka-go"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type HubServer struct {
-	mongoDB          *mongo.Database
 	rdb              *redis.Client
-	cfgManager       *ConfigManager
-	tierManager      *TierManager
-	rateManager      *RateManager
-	analyticsManager *AnalyticsManager
+	cfgManager       ConfigStore
+	tierManager      TierStore
+	rateManager      RateLimiter
+	authToken        string
+	maxDelta         int64
+	hubUpdatesChan   string
+	asyncQueue       *workers.BoundedQueue
+	queueWorkers     int
+	submitTimeout    time.Duration
+	retryMax         int
+	retryBackoff     time.Duration
+	tierUpdateWriter *kafka.Writer
+	tierUpdateTopic  string
 }
 
-func NewHubServer(mdb *mongo.Database, rdb *redis.Client, configFilePath, analyticsURL, analyticsToken, analyticsOrg, analyticsBucket string) *HubServer {
+var apiKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{3,128}$`)
+
+func NewHubServer(mdb *mongo.Database, rdb *redis.Client, configFilePath, authToken string, maxDelta int64, rateUpdateChannel, rateSOTChannel, hubUpdatesChannel string) *HubServer {
 	cfg, err := NewConfigManager(configFilePath) // Load initial config from file
 	if err != nil {
 		panic("Failed to load config: " + err.Error())
 	}
-
-	hs := &HubServer{
-		mongoDB:          mdb,
-		rdb:              rdb,
-		cfgManager:       cfg,
-		tierManager:      NewTierManager(mdb, rdb),
-		rateManager:      NewRateManager(rdb, cfg),
-		analyticsManager: NewAnalyticsManager(analyticsURL, analyticsToken, analyticsOrg, analyticsBucket),
+	if maxDelta <= 0 {
+		maxDelta = 10000
+	}
+	if rateUpdateChannel == "" {
+		rateUpdateChannel = types.DefaultRateUpdateChannel
+	}
+	if rateSOTChannel == "" {
+		rateSOTChannel = types.DefaultRateSOTChannel
+	}
+	if hubUpdatesChannel == "" {
+		hubUpdatesChannel = types.DefaultHubUpdatesChannel
 	}
 
-	// begin listening for asynchronous rate updates from edges
-	if hs.rateManager != nil {
-		_ = hs.rateManager.StartDeltaListener(context.Background())
-	}
+	return NewHubServerWithManagers(
+		rdb,
+		cfg,
+		NewTierManager(mdb, rdb),
+		NewRateManager(rdb, cfg, rateUpdateChannel, rateSOTChannel),
+		authToken,
+		maxDelta,
+		hubUpdatesChannel,
+	)
+}
 
-	return hs
+func NewHubServerWithManagers(
+	rdb *redis.Client,
+	cfg ConfigStore,
+	tierStore TierStore,
+	rateLimiter RateLimiter,
+	authToken string,
+	maxDelta int64,
+	hubUpdatesChannel string,
+) *HubServer {
+	if maxDelta <= 0 {
+		maxDelta = 10000
+	}
+	if hubUpdatesChannel == "" {
+		hubUpdatesChannel = types.DefaultHubUpdatesChannel
+	}
+	queue := workers.NewBoundedQueue(512)
+	return &HubServer{
+		rdb:            rdb,
+		cfgManager:     cfg,
+		tierManager:    tierStore,
+		rateManager:    rateLimiter,
+		authToken:      authToken,
+		maxDelta:       maxDelta,
+		hubUpdatesChan: hubUpdatesChannel,
+		asyncQueue:     queue,
+		queueWorkers:   2,
+		submitTimeout:  25 * time.Millisecond,
+		retryMax:       1,
+		retryBackoff:   10 * time.Millisecond,
+	}
+}
+
+func (s *HubServer) SetTierUpdateMessaging(brokers []string, topic string) {
+	clean := make([]string, 0, len(brokers))
+	for _, b := range brokers {
+		v := strings.TrimSpace(b)
+		if v != "" {
+			clean = append(clean, v)
+		}
+	}
+	if len(clean) == 0 {
+		clean = []string{"localhost:9092"}
+	}
+	if strings.TrimSpace(topic) == "" {
+		topic = "tier-updates"
+	}
+	s.tierUpdateTopic = topic
+	s.tierUpdateWriter = &kafka.Writer{
+		Addr:         kafka.TCP(clean...),
+		Topic:        topic,
+		Balancer:     &kafka.LeastBytes{},
+		BatchTimeout: 20 * time.Millisecond,
+		RequiredAcks: kafka.RequireOne,
+	}
+}
+
+func (s *HubServer) SetAsyncQueueConfig(workersCount int, submitTimeout time.Duration, retryMax int, retryBackoff time.Duration) {
+	if workersCount > 0 {
+		s.queueWorkers = workersCount
+	}
+	if submitTimeout > 0 {
+		s.submitTimeout = submitTimeout
+	}
+	if retryMax >= 0 {
+		s.retryMax = retryMax
+	}
+	if retryBackoff > 0 {
+		s.retryBackoff = retryBackoff
+	}
+}
+
+func (s *HubServer) StartBackgroundWorkers(ctx context.Context) {
+	if s.asyncQueue != nil {
+		s.asyncQueue.Start(ctx, s.queueWorkers)
+	}
+	if s.rateManager != nil {
+		if err := s.rateManager.StartDeltaListener(ctx); err != nil {
+			log.Printf("hub delta listener start failed: %v", err)
+		}
+	}
 }
 
 func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -58,14 +161,23 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch parts[0] {
+	case "health":
+		s.handleHealth(w, r)
+		return
+	}
+
+	if !s.authorize(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	switch parts[0] {
 	case "config":
 		s.handleConfig(w, r)
 	case "tiers":
 		s.handleTiers(w, r, ctx, parts[1:])
 	case "rate":
 		s.handleRate(w, r, ctx, parts[1:])
-	case "analytics":
-		s.handleAnalytics(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -80,6 +192,10 @@ func (s *HubServer) handleRate(w http.ResponseWriter, r *http.Request, ctx conte
 
 	prefix := params[0]
 	apiKey := params[1]
+	if !s.isAllowedPrefix(prefix) || !apiKeyPattern.MatchString(apiKey) {
+		http.Error(w, "invalid prefix or api key", http.StatusBadRequest)
+		return
+	}
 
 	var total int64
 	var err error
@@ -88,9 +204,13 @@ func (s *HubServer) handleRate(w http.ResponseWriter, r *http.Request, ctx conte
 	case http.MethodPost:
 		// 1. Parse Delta for Increment
 		delta := int64(1)
+		maxDelta := s.maxDelta
+		if maxDelta <= 0 {
+			maxDelta = 10000
+		}
 		if dStr := r.URL.Query().Get("delta"); dStr != "" {
 			d, err := strconv.ParseInt(dStr, 10, 64)
-			if err != nil || d <= 0 {
+			if err != nil || d <= 0 || d > maxDelta {
 				http.Error(w, "invalid delta", http.StatusBadRequest)
 				return
 			}
@@ -108,7 +228,7 @@ func (s *HubServer) handleRate(w http.ResponseWriter, r *http.Request, ctx conte
 	}
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeInternalError(w, "handleRate", err)
 		return
 	}
 
@@ -118,13 +238,27 @@ func (s *HubServer) handleRate(w http.ResponseWriter, r *http.Request, ctx conte
 }
 
 // --- Handler Implementations ---
+
+func (s *HubServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 func (s *HubServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	config := s.cfgManager.Get()
-	json.NewEncoder(w).Encode(config)
+	if err := json.NewEncoder(w).Encode(config); err != nil {
+		s.writeInternalError(w, "handleConfig", err)
+	}
 
 }
 
@@ -137,12 +271,16 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 
 	prefix := params[0]
 	apiKey := params[1]
+	if !s.isAllowedPrefix(prefix) || !apiKeyPattern.MatchString(apiKey) {
+		http.Error(w, "invalid prefix or api key", http.StatusBadRequest)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:
 		tier, err := s.tierManager.GetTier(ctx, prefix, apiKey)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.writeInternalError(w, "handleTiers.GetTier", err)
 			return
 		}
 
@@ -159,21 +297,22 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 		}
 
 		if err := s.tierManager.SetTier(ctx, prefix, apiKey, req.TierID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.writeInternalError(w, "handleTiers.SetTier", err)
 			return
 		}
 
-		// Broadcast invalidation so Edges drop stale cache for this user
-		s.rdb.Publish(ctx, "hub_updates", "INVALIDATE:"+prefix+":"+apiKey)
+		// Broadcast tier update so Edges can update cache directly.
+		s.publishTierUpdate(prefix, apiKey, req.TierID)
 		w.WriteHeader(http.StatusOK)
 
 	case http.MethodDelete:
 		if err := s.tierManager.DeleteTier(ctx, prefix, apiKey); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.writeInternalError(w, "handleTiers.DeleteTier", err)
 			return
 		}
 
-		s.rdb.Publish(ctx, "hub_updates", "INVALIDATE:"+prefix+":"+apiKey)
+		// Empty tier indicates deletion/eviction on edge caches.
+		s.publishTierUpdate(prefix, apiKey, "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -181,29 +320,76 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 	}
 }
 
-func (s *HubServer) handleAnalytics(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *HubServer) writeInternalError(w http.ResponseWriter, op string, err error) {
+	log.Printf("hub internal error op=%s err=%v", op, err)
+	http.Error(w, "internal server error", http.StatusInternalServerError)
+}
 
-	// 1. Decode the batch of entries from the Edge
-	var entries []types.AnalyticsEntry
-	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
+func (s *HubServer) authorize(r *http.Request) bool {
+	if s.authToken == "" {
+		return true
 	}
-	if len(entries) == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return
+	authz := r.Header.Get("Authorization")
+	const bearer = "Bearer "
+	if !strings.HasPrefix(authz, bearer) {
+		return false
 	}
+	return strings.TrimPrefix(authz, bearer) == s.authToken
+}
 
-	s.analyticsManager.IngestBatch(entries)
+func (s *HubServer) isAllowedPrefix(prefix string) bool {
+	cfg := s.cfgManager.Get()
+	if cfg == nil {
+		return false
+	}
+	for _, p := range cfg.Prefixes {
+		if p.Prefix == prefix {
+			return true
+		}
+	}
+	return false
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "success",
-		"count":   len(entries),
-		"message": "batch processed successfully",
-	})
+func (s *HubServer) publishTierUpdate(prefix, apiKey, tierID string) {
+	task := &tierUpdateTask{
+		prefix:   prefix,
+		apiKey:   apiKey,
+		tierID:   tierID,
+		retryMax: s.retryMax,
+		backoff:  s.retryBackoff,
+		writer:   s.tierUpdateWriter,
+		topic:    s.tierUpdateTopic,
+	}
+	if err := s.asyncQueue.Submit(task, s.submitTimeout); err != nil {
+		log.Printf("hub tier update queue submit failed prefix=%s api_key=%s tier=%s err=%v", prefix, apiKey, tierID, err)
+	}
+}
+
+type tierUpdateTask struct {
+	prefix   string
+	apiKey   string
+	tierID   string
+	retryMax int
+	backoff  time.Duration
+	writer   *kafka.Writer
+	topic    string
+}
+
+func (t *tierUpdateTask) Execute(ctx context.Context) error {
+	payload := "TIER_UPDATE:" + t.prefix + ":" + t.apiKey + ":" + t.tierID
+	publishCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if t.writer == nil {
+		return nil
+	}
+	msg := kafka.Message{Key: []byte(t.prefix + ":" + t.apiKey), Value: []byte(payload)}
+	if err := t.writer.WriteMessages(publishCtx, msg); err != nil {
+		log.Printf("hub tier update kafka publish failed prefix=%s api_key=%s tier=%s topic=%s err=%v", t.prefix, t.apiKey, t.tierID, t.topic, err)
+		return err
+	}
+	return nil
+}
+
+func (t *tierUpdateTask) RetryPolicy() *workers.RetryPolicy {
+	return &workers.RetryPolicy{MaxRetries: t.retryMax, Backoff: t.backoff}
 }

@@ -3,6 +3,7 @@ package edge
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"gateway/packages/common/types"
 	"io"
@@ -16,36 +17,50 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const maxCacheableResponseBytes = 1 << 20 // 1 MiB
+
 type contextKey int
 
 const (
-	svcCfgKey contextKey = iota
-	tierKey
-	analyticsKey
-	cacheKeyCtx
-	prefixIDCtx
-	serviceIDCtx
-	apiKeyCtx
+	requestStateCtxKey contextKey = iota
 )
+
+type requestState struct {
+	svcCfg       *types.ServiceConfig
+	tierPolicy   *types.TierConfig
+	analytics    *types.AnalyticsEntry
+	cacheManager *CacheManager
+	prefixID     string
+	serviceID    string
+	apiKey       string
+}
+
+func getRequestState(ctx context.Context) (*requestState, bool) {
+	state, ok := ctx.Value(requestStateCtxKey).(*requestState)
+	if !ok || state == nil {
+		return nil, false
+	}
+	return state, true
+}
 
 // EdgeServer acts as an HTTP gateway with a pipeline of middleware
 type EdgeServer struct {
-	configManager    *ConfigManager
-	tierManager      *TierManager
-	rateManager      *RateManager
-	analyticsManager *AnalyticsManager
-	rdb              *redis.Client
-	client           *http.Client
+	configManager *ConfigManager
+	tierManager   *TierManager
+	rateManager   *RateManager
+	analyticsSink AnalyticsSink
+	rdb           *redis.Client
+	client        *http.Client
 }
 
 // NewEdgeServer creates a new edge gateway server with necessary managers
-func NewEdgeServer(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *RateManager, analyticsMgr *AnalyticsManager, rdb *redis.Client) *EdgeServer {
+func NewEdgeServer(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *RateManager, analyticsSink AnalyticsSink, rdb *redis.Client) *EdgeServer {
 	es := &EdgeServer{
-		configManager:    configMgr,
-		tierManager:      tierMgr,
-		rateManager:      rateMgr,
-		analyticsManager: analyticsMgr,
-		rdb:              rdb,
+		configManager: configMgr,
+		tierManager:   tierMgr,
+		rateManager:   rateMgr,
+		analyticsSink: analyticsSink,
+		rdb:           rdb,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -57,25 +72,35 @@ func NewEdgeServer(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *Rate
 		},
 	}
 
-	// if the rate manager is present, start its SOT listener so the edge can
-	// keep the local sync keys up to date.
-	if rateMgr != nil {
-		// background context to run indefinitely
-		_ = rateMgr.StartSOTSubscriber(context.Background())
-	}
-
 	return es
 }
 
+func (s *EdgeServer) StartBackgroundWorkers(ctx context.Context) {
+	if s.rateManager != nil {
+		s.rateManager.StartBackgroundWorkers(ctx)
+		if err := s.rateManager.StartSOTSubscriber(ctx); err != nil {
+			log.Printf("edge SOT subscriber start failed: %v", err)
+		}
+	}
+	if s.tierManager != nil {
+		if err := s.tierManager.StartHubUpdateListener(ctx); err != nil {
+			log.Printf("edge tier invalidation listener start failed: %v", err)
+		}
+	}
+}
+
 func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	entry := &types.AnalyticsEntry{Timestamp: time.Now(), Method: r.Method}
-	ctx := context.WithValue(r.Context(), analyticsKey, entry)
+	state := &requestState{}
+	if s.analyticsSink != nil {
+		state.analytics = &types.AnalyticsEntry{Timestamp: time.Now(), Method: r.Method}
+	}
+	ctx := context.WithValue(r.Context(), requestStateCtxKey, state)
 
 	// Pipeline: Analytics -> CORS -> Cache -> Auth -> RateLimit -> Proxy
 	pipeline := s.analyticsMiddleware(
 		s.corsMiddleware(
-			s.cacheMiddleware(
-				s.authMiddleware(
+			s.authMiddleware(
+				s.cacheMiddleware(
 					s.rateLimitMiddleware(
 						http.HandlerFunc(s.proxyHandler),
 					),
@@ -88,6 +113,12 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *EdgeServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		state, ok := getRequestState(r.Context())
+		if !ok {
+			state = &requestState{}
+			r = r.WithContext(context.WithValue(r.Context(), requestStateCtxKey, state))
+		}
+
 		prefixID, serviceID := s.parsePath(r.URL.Path)
 		if prefixID == "" || serviceID == "" {
 			http.Error(w, "Invalid path format", http.StatusBadRequest)
@@ -108,8 +139,24 @@ func (s *EdgeServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		tierID, err := s.tierManager.GetUserTier(r.Context(), prefixID, apiKey)
 		if err != nil {
-			http.Error(w, "Tier lookup failed", http.StatusInternalServerError)
-			return
+			hubPolicy := cfg.Failure.EffectiveHubPolicy()
+			switch hubPolicy.TierLookupStrategy {
+			case "default-tier":
+				tierID = hubPolicy.DefaultTier
+			case "stale-or-default":
+				if staleTier, ok := s.tierManager.GetStaleTier(prefixID, apiKey, hubPolicy.StaleTierMaxAge); ok {
+					tierID = staleTier
+				} else {
+					tierID = hubPolicy.DefaultTier
+				}
+			default:
+				http.Error(w, "Tier lookup failed", http.StatusInternalServerError)
+				return
+			}
+			if tierID == "" {
+				http.Error(w, "Tier lookup failed", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		tierPolicy, found := GetTier(cfg, tierID)
@@ -118,49 +165,54 @@ func (s *EdgeServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Store request context
-		entry := r.Context().Value(analyticsKey).(*types.AnalyticsEntry)
-		if entry != nil {
-			entry.Prefix = prefixID
-			entry.Service = serviceID
-			entry.Tier = tierID
+		state.svcCfg = cfg
+		state.tierPolicy = tierPolicy
+		state.prefixID = prefixID
+		state.serviceID = serviceID
+		state.apiKey = apiKey
+
+		if state.analytics != nil {
+			state.analytics.Prefix = prefixID
+			state.analytics.Service = serviceID
+			state.analytics.Tier = tierID
 		}
 
-		// Build new context with all extracted values
-		ctx := context.WithValue(r.Context(), svcCfgKey, cfg)
-		ctx = context.WithValue(ctx, tierKey, tierPolicy)
-		ctx = context.WithValue(ctx, prefixIDCtx, prefixID)
-		ctx = context.WithValue(ctx, serviceIDCtx, serviceID)
-		ctx = context.WithValue(ctx, apiKeyCtx, apiKey)
-
-		next(w, r.WithContext(ctx))
+		next(w, r)
 	}
 }
 
 func (s *EdgeServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
-	cfg, ok := r.Context().Value(svcCfgKey).(*types.ServiceConfig)
-	if !ok {
+	state, ok := getRequestState(r.Context())
+	if !ok || state.svcCfg == nil {
 		http.Error(w, "Service config not found", http.StatusInternalServerError)
 		return
 	}
-
-	entry, ok := r.Context().Value(analyticsKey).(*types.AnalyticsEntry)
-	if !ok {
+	entry := state.analytics
+	if entry == nil {
 		entry = &types.AnalyticsEntry{}
 	}
 
-	s.executeProxy(w, r, cfg, entry)
+	s.executeProxy(w, r, state.svcCfg, entry)
 }
 
 func (s *EdgeServer) analyticsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.analyticsSink == nil {
+			next(w, r)
+			return
+		}
+		state, ok := getRequestState(r.Context())
+		if !ok || state.analytics == nil {
+			next(w, r)
+			return
+		}
 		rw := &responseWriterWrapper{ResponseWriter: w, statusCode: http.StatusOK}
-		entry := r.Context().Value(analyticsKey).(*types.AnalyticsEntry)
+		entry := state.analytics
 
 		defer func() {
 			entry.TotalLatency = time.Since(entry.Timestamp)
 			entry.ResponseCode = uint16(rw.statusCode)
-			s.analyticsManager.Capture(entry)
+			s.analyticsSink.Capture(entry)
 		}()
 		next(rw, r)
 	}
@@ -168,8 +220,20 @@ func (s *EdgeServer) analyticsMiddleware(next http.HandlerFunc) http.HandlerFunc
 
 func (s *EdgeServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Try to get config from context (set by authMiddleware)
-		cfg, ok := r.Context().Value(svcCfgKey).(*types.ServiceConfig)
+		state, stateOK := getRequestState(r.Context())
+		var cfg *types.ServiceConfig
+		ok := stateOK && state != nil && state.svcCfg != nil
+		if ok {
+			cfg = state.svcCfg
+		} else if s.configManager != nil {
+			prefixID, serviceID := s.parsePath(r.URL.Path)
+			if prefixID != "" && serviceID != "" {
+				if resolvedCfg, err := s.configManager.GetServiceConfig(prefixID, serviceID); err == nil {
+					cfg = resolvedCfg
+					ok = true
+				}
+			}
+		}
 		if ok && cfg != nil && cfg.CORS != nil {
 			// Handle CORS preflight
 			if r.Method == http.MethodOptions {
@@ -201,23 +265,31 @@ func (s *EdgeServer) cacheMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Retrieve service config to check if caching is enabled
-		cfg, ok := r.Context().Value(svcCfgKey).(*types.ServiceConfig)
-		if !ok || cfg == nil || cfg.Cache == nil || !cfg.Cache.Enabled {
+		state, ok := getRequestState(r.Context())
+		if !ok || state.svcCfg == nil || state.svcCfg.Cache == nil || !state.svcCfg.Cache.Enabled {
 			next(w, r)
 			return
 		}
+		cfg := state.svcCfg
 
-		apiKey := r.Header.Get("X-API-Key")
+		apiKey := state.apiKey
+		if apiKey == "" {
+			apiKey = r.Header.Get("X-API-Key")
+		}
 		cm := NewCacheManager(s.rdb, *cfg.Cache)
 
 		// Check if response is cached
-		val, found, err := cm.CheckCache(r.Context(), r, apiKey)
+		cached, found, err := cm.CheckCache(r.Context(), r, apiKey)
 		if err == nil && found {
+			if state.analytics != nil {
+				state.analytics.CacheHit = true
+			}
 			w.Header().Set("X-Cache", "HIT")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			w.Write(val)
+			if cached.ContentType != "" {
+				w.Header().Set("Content-Type", cached.ContentType)
+			}
+			w.WriteHeader(cached.StatusCode)
+			_, _ = w.Write(cached.Body)
 			return
 		}
 
@@ -227,37 +299,46 @@ func (s *EdgeServer) cacheMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			statusCode:     http.StatusOK,
 			body:           []byte{},
 		}
+		if state.analytics != nil {
+			state.analytics.CacheHit = false
+		}
 
-		// Add cache manager and key to context
-		ctx := context.WithValue(r.Context(), cacheKeyCtx, cm)
-		next(rw, r.WithContext(ctx))
+		state.cacheManager = cm
+		next(rw, r)
 	}
 }
 
 func (s *EdgeServer) rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tierPolicy, ok := r.Context().Value(tierKey).(*types.TierConfig)
-		if !ok || tierPolicy == nil {
+		state, ok := getRequestState(r.Context())
+		if !ok || state.tierPolicy == nil {
 			http.Error(w, "Tier policy not found", http.StatusInternalServerError)
 			return
 		}
+		tierPolicy := state.tierPolicy
 
-		prefixID, ok := r.Context().Value(prefixIDCtx).(string)
-		if !ok {
+		if state.prefixID == "" {
 			http.Error(w, "Prefix not found in context", http.StatusInternalServerError)
 			return
 		}
 
-		apiKey := r.Header.Get("X-API-Key")
+		apiKey := state.apiKey
+		if apiKey == "" {
+			apiKey = r.Header.Get("X-API-Key")
+		}
 		if apiKey == "" {
 			http.Error(w, "X-API-Key header required", http.StatusUnauthorized)
 			return
 		}
 
 		cost := s.getMethodCost(r.Method, tierPolicy)
-		usage, err := s.rateManager.Increment(r.Context(), prefixID, apiKey, int64(tierPolicy.Quota), int64(cost))
+		usage, err := s.rateManager.Increment(r.Context(), state.prefixID, apiKey, int64(tierPolicy.Quota), int64(cost))
 
 		if err != nil {
+			if state.svcCfg != nil && state.svcCfg.Failure.EffectiveHubPolicy().AllowOnRateServiceError {
+				next(w, r)
+				return
+			}
 			http.Error(w, "Rate limit service unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -267,11 +348,9 @@ func (s *EdgeServer) rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc
 			return
 		}
 
-		// Store usage in context for analytics
-		entry := r.Context().Value(analyticsKey).(*types.AnalyticsEntry)
-		if entry != nil {
-			entry.LimitUsed = uint64(usage)
-			entry.LimitUsedOfTotal = float64(usage) / float64(tierPolicy.Quota)
+		if state.analytics != nil {
+			state.analytics.LimitUsed = uint64(usage)
+			state.analytics.LimitUsedOfTotal = float64(usage) / float64(tierPolicy.Quota)
 		}
 
 		next(w, r)
@@ -308,6 +387,8 @@ func (s *EdgeServer) getMethodCost(method string, tier *types.TierConfig) uint8 
 
 // executeProxy handles the HTTP proxying to upstream service
 func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *types.ServiceConfig, entry *types.AnalyticsEntry) {
+	policy := cfg.Failure.EffectiveUpstreamPolicy()
+
 	// Parse target URL
 	targetURL, err := url.Parse(cfg.TargetURL)
 	if err != nil {
@@ -336,8 +417,8 @@ func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *t
 	// Record upstream start time
 	startTime := time.Now()
 
-	// Execute proxy request
-	resp, err := s.client.Do(proxyReq)
+	// Execute proxy request with resilience policy.
+	resp, err := s.doProxyWithPolicy(r.Context(), proxyReq, policy)
 	entry.UpstreamLatency = time.Since(startTime)
 
 	if err != nil {
@@ -346,13 +427,6 @@ func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *t
 		return
 	}
 	defer resp.Body.Close()
-
-	// Read response body
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "Failed to read response", http.StatusBadGateway)
-		return
-	}
 
 	// Copy response headers from upstream
 	for key, values := range resp.Header {
@@ -364,17 +438,119 @@ func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *t
 	// Apply response transforms (hide headers, etc.)
 	s.applyResponseTransforms(w, cfg.Transform)
 
-	// Try to cache the response if it's cacheable
-	s.cacheResponse(r, cfg, responseBody)
+	requestSize := uint64(0)
+	if r.ContentLength > 0 {
+		requestSize = uint64(r.ContentLength)
+	}
 
-	// Record response size
-	entry.ResponseSize = uint64(len(responseBody))
-	entry.RequestSize = uint64(r.ContentLength)
+	// Stream by default; only buffer when we need to make a bounded cache decision.
+	if r.Method != http.MethodGet || cfg.Cache == nil || !cfg.Cache.Enabled {
+		w.Header().Set("X-Cache", "MISS")
+		w.WriteHeader(resp.StatusCode)
+		written, copyErr := io.Copy(w, resp.Body)
+		if copyErr != nil {
+			http.Error(w, "Failed to stream response", http.StatusBadGateway)
+			return
+		}
+		entry.ResponseSize = uint64(written)
+		entry.RequestSize = requestSize
+		return
+	}
 
-	// Write response
+	// Cache-enabled GET path: read a bounded prefix first.
+	limitedBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCacheableResponseBytes+1))
+	if readErr != nil {
+		http.Error(w, "Failed to read response", http.StatusBadGateway)
+		return
+	}
+
 	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(resp.StatusCode)
-	w.Write(responseBody)
+
+	if len(limitedBody) <= maxCacheableResponseBytes {
+		// Entire body fits in cache bound; safe to cache and write once.
+		s.cacheResponse(r, cfg, resp.StatusCode, resp.Header.Get("Content-Type"), limitedBody)
+		if _, writeErr := w.Write(limitedBody); writeErr != nil {
+			return
+		}
+		entry.ResponseSize = uint64(len(limitedBody))
+		entry.RequestSize = requestSize
+		return
+	}
+
+	// Body exceeded cache bound: stream remaining bytes and skip cache write.
+	written, writeErr := w.Write(limitedBody)
+	if writeErr != nil {
+		return
+	}
+	streamedTail, tailErr := io.Copy(w, resp.Body)
+	if tailErr != nil && !errors.Is(tailErr, io.EOF) {
+		http.Error(w, "Failed to stream response", http.StatusBadGateway)
+		return
+	}
+	entry.ResponseSize = uint64(written) + uint64(streamedTail)
+	entry.RequestSize = requestSize
+}
+
+func (s *EdgeServer) doProxyWithPolicy(ctx context.Context, req *http.Request, policy types.UpstreamFailurePolicy) (*http.Response, error) {
+	attempts := 1 + policy.MaxRetries
+	if attempts < 1 {
+		attempts = 1
+	}
+	lastErr := error(nil)
+	for attempt := 0; attempt < attempts; attempt++ {
+		attemptReq := req.Clone(ctx)
+		attemptCtx := ctx
+		cancel := func() {}
+		if policy.AttemptTimeout > 0 {
+			attemptCtx, cancel = context.WithTimeout(ctx, policy.AttemptTimeout)
+			attemptReq = attemptReq.WithContext(attemptCtx)
+		}
+		resp, err := s.client.Do(attemptReq)
+		cancel()
+		if err != nil {
+			lastErr = err
+			if attempt < attempts-1 && s.canRetryMethod(req.Method, policy) {
+				time.Sleep(policy.RetryBackoff)
+				continue
+			}
+			return nil, err
+		}
+
+		if s.shouldRetryStatus(resp.StatusCode, policy) && attempt < attempts-1 && s.canRetryMethod(req.Method, policy) {
+			_ = resp.Body.Close()
+			time.Sleep(policy.RetryBackoff)
+			continue
+		}
+
+		if s.shouldRetryStatus(resp.StatusCode, policy) {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
+		}
+		return resp, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("proxy retries exhausted")
+	}
+	return nil, lastErr
+}
+
+func (s *EdgeServer) shouldRetryStatus(statusCode int, policy types.UpstreamFailurePolicy) bool {
+	for _, retryCode := range policy.RetryOnStatuses {
+		if retryCode == statusCode {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *EdgeServer) canRetryMethod(method string, policy types.UpstreamFailurePolicy) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPut, http.MethodDelete:
+		return true
+	default:
+		return policy.RetryNonIdempotentMethods
+	}
 }
 
 // buildProxyPath constructs the path for the proxy request
@@ -412,19 +588,26 @@ func (s *EdgeServer) applyResponseTransforms(w http.ResponseWriter, transform ty
 }
 
 // cacheResponse attempts to store the response in cache if configured
-func (s *EdgeServer) cacheResponse(r *http.Request, cfg *types.ServiceConfig, body []byte) {
+func (s *EdgeServer) cacheResponse(r *http.Request, cfg *types.ServiceConfig, statusCode int, contentType string, body []byte) {
 	if r.Method != http.MethodGet || cfg.Cache == nil || !cfg.Cache.Enabled {
 		return
 	}
+	cached := &CachedResponse{StatusCode: statusCode, ContentType: contentType, Body: body}
 
-	// Get cache manager from context if available
-	cm, ok := r.Context().Value(cacheKeyCtx).(*CacheManager)
-	if !ok {
-		cm = NewCacheManager(s.rdb, *cfg.Cache)
+	state, ok := getRequestState(r.Context())
+	if !ok || state.cacheManager == nil {
+		// Fall back to a temporary manager if middleware state is unavailable.
+		cm := NewCacheManager(s.rdb, *cfg.Cache)
+		apiKey := r.Header.Get("X-API-Key")
+		_ = cm.SetCache(r.Context(), r, apiKey, cached)
+		return
 	}
 
-	apiKey := r.Header.Get("X-API-Key")
-	_ = cm.SetCache(r.Context(), r, apiKey, body)
+	apiKey := state.apiKey
+	if apiKey == "" {
+		apiKey = r.Header.Get("X-API-Key")
+	}
+	_ = state.cacheManager.SetCache(r.Context(), r, apiKey, cached)
 }
 
 // handleProxyError handles upstream service failures
@@ -441,11 +624,16 @@ func (s *EdgeServer) handleProxyError(w http.ResponseWriter, failure types.Failu
 		entry.UpstreamError = true
 	}
 
-	if failure.FailOpen {
-		// On fail-open, allow the request to pass through with a warning header
-		w.Header().Set("X-Upstream-Error", "true")
-		w.Header().Set("X-Fallback-Tier", failure.FallbackTier)
-		http.Error(w, "Upstream service unavailable (fail-open)", http.StatusGatewayTimeout)
+	upstreamPolicy := failure.EffectiveUpstreamPolicy()
+	if upstreamPolicy.Mode == "fail-open" {
+		for key, value := range upstreamPolicy.FallbackHeaders {
+			w.Header().Set(key, value)
+		}
+		if failure.FallbackTier != "" {
+			w.Header().Set("X-Fallback-Tier", failure.FallbackTier)
+		}
+		w.WriteHeader(upstreamPolicy.FallbackStatusCode)
+		_, _ = w.Write([]byte(upstreamPolicy.FallbackBody))
 		return
 	}
 

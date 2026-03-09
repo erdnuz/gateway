@@ -6,7 +6,7 @@
       "services": [
         {
           "service_id": "auth-api",
-          "target_url": "http://auth-cluster.internal:8080",
+          "target_url": "https://httpbin.org/anything",
           "tiers": [
             {
               "tier_id": "free",
@@ -58,7 +58,26 @@
           },
           "failure": {
             "fail_open": false,
-            "fallback_tier": "free"
+            "fallback_tier": "free",
+            "hub": {
+              "tier_lookup_strategy": "stale-or-default",
+              "default_tier": "free",
+              "stale_tier_max_age": 21600000000000,
+              "allow_on_rate_service_error": false
+            },
+            "upstream": {
+              "mode": "fail-closed",
+              "max_retries": 2,
+              "retry_backoff": 50000000,
+              "retry_on_statuses": [502, 503, 504],
+              "retry_non_idempotent_methods": false,
+              "attempt_timeout": 5000000000,
+              "fallback_status_code": 503,
+              "fallback_body": "Service temporarily degraded",
+              "fallback_headers": {
+                "Content-Type": "text/plain"
+              }
+            }
           }
         }
       ]

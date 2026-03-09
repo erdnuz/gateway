@@ -1,5 +1,4 @@
 services:
-  # --- HUB INFRASTRUCTURE ---
   hub-mongo:
     image: mongo:7.0
     container_name: hub-mongo
@@ -13,9 +12,9 @@ services:
     image: redis:7-alpine
     container_name: hub-redis
     command: >
-      redis-server 
-      --appendonly yes 
-      --appendfsync everysec 
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
       --maxmemory-policy volatile-lfu
     volumes:
       - hub_redis_data:/data
@@ -28,17 +27,6 @@ services:
       --maxmemory-policy volatile-lfu
     volumes:
       - edge_redis_data:/data
-
-  analytics-redis:
-    image: redis:7-alpine
-    container_name: analytics-redis
-    command: >
-      redis-server
-      --appendonly yes 
-      --appendfsync everysec 
-      --maxmemory-policy volatile-lfu
-    volumes:
-      - analytics_redis_data:/data
 
   kafka:
     image: apache/kafka:3.9.0
@@ -58,7 +46,7 @@ services:
 
   hub-server:
     build:
-      context: ..                   # Points to the 'gate/' root directory
+      context: ..
       dockerfile: deployments/hub.Dockerfile
     container_name: hub-server
     depends_on:
@@ -93,37 +81,17 @@ services:
       - HUB_ADDR=http://hub-server:8080
       - HUB_AUTH_TOKEN=${HUB_AUTH_TOKEN:?HUB_AUTH_TOKEN is required}
       - EDGE_MAX_DELTA=${EDGE_MAX_DELTA:-100}
-      - ANALYTICS_BUFFER_SIZE=${ANALYTICS_BUFFER_SIZE:-1000}
+      - ANALYTICS_ENABLED=false
       - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
       - KAFKA_RATE_TOPIC=${KAFKA_RATE_TOPIC:-rate-updates}
       - KAFKA_SOT_TOPIC=${KAFKA_SOT_TOPIC:-rate-sot}
       - KAFKA_TIER_UPDATES_TOPIC=${KAFKA_TIER_UPDATES_TOPIC:-tier-updates}
       - KAFKA_EDGE_GROUP=${KAFKA_EDGE_GROUP:-edge-consumers}
-      - KAFKA_ANALYTICS_TOPIC=${KAFKA_ANALYTICS_TOPIC:-analytics-events}
       - PORT=:8080
     ports:
       - "8082:8080"
 
-  analytics:
-    build:
-      context: ..
-      dockerfile: deployments/analytics.Dockerfile
-    container_name: analytics-api
-    depends_on:
-      - kafka
-      - analytics-redis
-    environment:
-      - PORT=:8091
-      - REDIS_ADDR=analytics-redis:6379
-      - ANALYTICS_API_TOKEN=${ANALYTICS_API_TOKEN:?ANALYTICS_API_TOKEN is required}
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - KAFKA_ANALYTICS_TOPIC=${KAFKA_ANALYTICS_TOPIC:-analytics-events}
-      - KAFKA_ANALYTICS_GROUP=${KAFKA_ANALYTICS_GROUP:-analytics-subscribers}
-    ports:
-      - "8091:8091"
-
 volumes:
   hub_redis_data:
   edge_redis_data:
-  analytics_redis_data:
   mongo_data:

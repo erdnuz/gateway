@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"bytes"
 	"encoding/json"
 	"gateway/packages/common/types"
 	"gateway/packages/edge"
@@ -236,10 +235,9 @@ func newTestHubServer(t *testing.T) (*HubServer, func()) {
 	cfgMgr.active.Store(cfg)
 
 	hs := &HubServer{
-		rdb:              rdb,
-		cfgManager:       cfgMgr,
-		rateManager:      NewRateManager(rdb, cfgMgr),
-		analyticsManager: NewAnalyticsManager("", "", "", ""),
+		rdb:         rdb,
+		cfgManager:  cfgMgr,
+		rateManager: NewRateManager(rdb, cfgMgr),
 	}
 
 	cleanup := func() {
@@ -395,83 +393,6 @@ func TestHandleRate_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-// TestHandleAnalytics_OK verifies that a valid batch of analytics entries returns 200.
-func TestHandleAnalytics_OK(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	entries := []types.AnalyticsEntry{
-		*testutils.NewTestAnalyticsEntry("v1", "auth-api", "free", "GET"),
-		*testutils.NewTestAnalyticsEntry("v1", "auth-api", "gold", "POST"),
-	}
-	body, _ := json.Marshal(entries)
-
-	req := httptest.NewRequest(http.MethodPost, "/analytics", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
-	}
-
-	var resp map[string]interface{}
-	if err := json.NewDecoder(rw.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp["status"] != "success" {
-		t.Errorf("expected status=success, got %v", resp["status"])
-	}
-	if count, ok := resp["count"].(float64); !ok || int(count) != 2 {
-		t.Errorf("expected count=2, got %v", resp["count"])
-	}
-}
-
-// TestHandleAnalytics_Empty verifies that an empty batch returns 204.
-func TestHandleAnalytics_Empty(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	body, _ := json.Marshal([]types.AnalyticsEntry{})
-	req := httptest.NewRequest(http.MethodPost, "/analytics", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusNoContent {
-		t.Fatalf("expected 204, got %d", rw.Code)
-	}
-}
-
-// TestHandleAnalytics_InvalidBody verifies that malformed JSON returns 400.
-func TestHandleAnalytics_InvalidBody(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodPost, "/analytics", bytes.NewBufferString("not-json"))
-	req.Header.Set("Content-Type", "application/json")
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rw.Code)
-	}
-}
-
-// TestHandleAnalytics_MethodNotAllowed verifies that non-POST methods return 405.
-func TestHandleAnalytics_MethodNotAllowed(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodGet, "/analytics", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", rw.Code)
-	}
-}
-
 // TestServeHTTP_NotFound verifies that unrecognised routes return 404.
 func TestServeHTTP_NotFound(t *testing.T) {
 	hs, cleanup := newTestHubServer(t)
@@ -483,5 +404,69 @@ func TestServeHTTP_NotFound(t *testing.T) {
 
 	if rw.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rw.Code)
+	}
+}
+
+// TestHandleHealth_OK verifies that GET /health returns {"status":"ok"}.
+func TestHandleHealth_OK(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rw.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("expected status=ok, got %q", body["status"])
+	}
+}
+
+// TestHandleHealth_MethodNotAllowed verifies that non-GET methods return 405.
+func TestHandleHealth_MethodNotAllowed(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rw.Code)
+	}
+}
+
+func TestServeHTTP_AuthRequired(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+	hs.authToken = "secret-token"
+
+	req := httptest.NewRequest(http.MethodGet, "/config", nil)
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rw.Code)
+	}
+}
+
+func TestServeHTTP_HealthBypassesAuth(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+	hs.authToken = "secret-token"
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rw.Code)
 	}
 }

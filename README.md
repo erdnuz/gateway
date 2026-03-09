@@ -1,106 +1,206 @@
-# Backbone Facade: Distributed API Governance Layer
+# Gate: Distributed API Governance Layer
 
-A high-performance, language-agnostic API Gateway Facade built in Golang. This system provides centralized Rate Limiting, Dynamic Response Caching, and User Tiering for microservices deployed on AWS EKS.
+`gate` is a Go API governance platform with three runtime services:
 
-## Overview
+- `edge`: data-plane gateway (auth, tier lookup, local rate limiting, cache, proxy, analytics capture)
+- `hub`: control-plane authority (config, tier assignments, authoritative rate counters)
+- `analytics`: read API + embedded UI for analytics events persisted in Redis
 
-In a distributed environment, managing API traffic, security, and cost across multiple services (Python, Java, Node) is a complex challenge. Backbone Facade abstracts these concerns into a unified infrastructure layer.
+## Current Architecture
 
-* **Performance:** Sub-2ms latency overhead using Go and Redis.
-* **Intelligence:** Injects user-tier metadata (Free, Pro, Enterprise) directly into request headers.
-* **Control:** A real-time dashboard for live configuration updates and traffic analytics.
+### Runtime Binaries
 
----
+- `cmd/edge/main.go`
+- `cmd/hub/main.go`
+- `cmd/analytics/main.go`
 
-## System Architecture
+### Messaging and Storage
 
-The system is built on the Sidecar/Reverse Proxy pattern, ensuring that downstream services do not need to implement custom throttling or caching logic.
+- Kafka topics:
+  - `rate-updates` (edge -> hub usage deltas)
+  - `rate-sot` (hub -> edge state-of-truth totals)
+  - `tier-updates` (hub -> edge tier cache updates)
+  - `analytics-events` (edge -> analytics event stream)
+- Redis:
+  - edge local counters and tier/cache entries
+  - hub authoritative counters + sequence dedup keys
+  - analytics event list (default key `rate-analytics`)
+- MongoDB (hub optional): persistent tier store when `HUB_TIER_STORE=mongo`
 
+## Request Paths
 
+### Edge pipeline
 
-* **The Backbone (Go):** Stateless proxy nodes that intercept traffic.
-* **State Layer (Redis):** Distributed locking and high-speed counters for rate limiting.
-* **Persistence (SQL):** Storage for service configurations and user-tier mappings.
-* **Control Plane (Next.js):** A unified UI for managing limits and viewing performance metrics.
+Request shape: `/{prefix}/{service}/...`
 
----
+Middleware order in `packages/edge/server.go`:
 
-## Key Features
+1. `analyticsMiddleware`
+2. `corsMiddleware`
+3. `authMiddleware`
+4. `cacheMiddleware`
+5. `rateLimitMiddleware`
+6. `proxyHandler`
 
-### 1. Multi-Tiered Rate Limiting
-Implements the Token Bucket algorithm. Developers define custom limits per user-tier via the dashboard.
-* **Logic:** Config -> Tier -> Token Bucket -> Redis Counter.
+Key behavior:
 
+- Requires `X-API-Key`
+- Tier lookup first checks Redis cache, then hub
+- Hub outage behavior follows policy: `fail-closed`, `default-tier`, or `stale-or-default`
+- Upstream retries/fallback behavior is controlled by `failure.upstream.*`
+- Cache applies to GET only, includes API key in cache key generation
 
+### Hub API
 
-### 2. Intelligent Facade (Header Enrichment)
-Downstream services receive enriched requests. 
-* **Mechanism:** The facade attaches an `X-User-Context` header (Base64 JSON) containing Tier and Quota information.
+- `GET /health` (public)
+- `GET /config` (auth)
+- `GET|POST /rate/{prefix}/{api_key}` (auth)
+- `GET|POST|PUT|DELETE /tiers/{prefix}/{api_key}` (auth)
 
-### 3. Distributed Response Caching
-Avoids redundant data transfers by caching expensive API responses in Redis based on user-defined TTL (Time-To-Live).
+All routes except `/health` require:
 
----
+- `Authorization: Bearer <HUB_AUTH_TOKEN>`
 
-## Configuration Schema
+### Analytics API
 
-Services are configured via MongoDB using a hierarchical structure:
+- `GET /health`
+- `GET /analytics/events`
+- `GET /analytics/summary`
+- `GET /` and `/assets/*` serve embedded frontend
 
-```json
-{
-  "service_id": "payment-processor",
-  "tiers": {
-    "FREE":[
-        {"limit": 100, "window": "1h" }, 
-        {"limit": 10, "window": "1m" }
-    ],
-    "PRO":[
-        {"limit": 100, "window": "1h" }, 
-        {"limit": 10, "window": "1m" }
-    ],
-  },
-  "caching": {
-    "enabled": true,
-    "ttl_per_tier": {
-      "FREE": "300s",
-      "PRO": "60s"
-    }
-  },
-}
+If `ANALYTICS_API_TOKEN` is set, analytics endpoints require:
+
+- `Authorization: Bearer <ANALYTICS_API_TOKEN>`
+
+## Configuration
+
+Two config layers are active:
+
+1. Service runtime environment variables (`cmd/*/main.go`)
+2. Gateway policy JSON (`cmd/config.json`, served by hub)
+
+### Edge env vars (selected)
+
+- `PORT` (default `:8080`)
+- `REDIS_ADDR` (default `localhost:6379`)
+- `HUB_ADDR` (default `http://localhost:8081`)
+- `HUB_AUTH_TOKEN`
+- `HUB_HTTP_TIMEOUT_SECONDS` (default `5`)
+- `EDGE_BOOTSTRAP_CONFIG_FILE` (optional startup fallback)
+- `EDGE_CONFIG_REFRESH_SECONDS` (default `0`, disabled)
+- `EDGE_MAX_DELTA` (default `100`)
+- `RATE_QUEUE_CAPACITY`, `RATE_QUEUE_WORKERS`, `RATE_QUEUE_SUBMIT_TIMEOUT`
+- `RATE_QUEUE_RETRY_MAX`, `RATE_QUEUE_RETRY_BACKOFF`
+- `RATE_HARD_THRESHOLD_PERCENT` (default `90`)
+- `ANALYTICS_ENABLED` (default `true`)
+- `ANALYTICS_BUFFER_SIZE` (default `1000`)
+- `KAFKA_BROKERS`
+- `KAFKA_RATE_TOPIC`, `KAFKA_SOT_TOPIC`, `KAFKA_TIER_UPDATES_TOPIC`
+- `KAFKA_EDGE_GROUP`
+- `KAFKA_ANALYTICS_TOPIC`
+
+### Hub env vars (selected)
+
+- `PORT` (default `8080`)
+- `REDIS_ADDR` (default `localhost:6379`)
+- `HUB_AUTH_TOKEN` (required)
+- `CONFIG_FILE_PATH` (default `/cmd/config.json`)
+- `HUB_TIER_STORE` (`mongo` or `memory`, default `mongo`)
+- `MONGO_URI`, `DB_NAME` (needed for `mongo` store)
+- `MAX_DELTA` (default `10000`)
+- `HUB_QUEUE_WORKERS`, `HUB_QUEUE_SUBMIT_TIMEOUT`
+- `HUB_QUEUE_RETRY_MAX`, `HUB_QUEUE_RETRY_BACKOFF`
+- `KAFKA_BROKERS`
+- `KAFKA_RATE_TOPIC`, `KAFKA_RATE_GROUP`, `KAFKA_SOT_TOPIC`
+- `KAFKA_TIER_UPDATES_TOPIC`
+
+### Analytics env vars
+
+- `PORT` (default `:8091`)
+- `REDIS_ADDR` (default `localhost:6379`)
+- `ANALYTICS_REDIS_KEY` (default `rate-analytics`)
+- `ANALYTICS_API_TOKEN` (optional but recommended)
+- `KAFKA_BROKERS`
+- `KAFKA_ANALYTICS_TOPIC`
+- `KAFKA_ANALYTICS_GROUP`
+
+### Policy config (`cmd/config.json`)
+
+Per service policy supports:
+
+- `tiers`
+- `transform`
+- `cors`
+- `analytics`
+- `cache`
+- `failure`
+
+`failure` supports both legacy fields and explicit policies:
+
+- Legacy: `fail_open`, `fallback_tier`
+- Hub policy: `hub.tier_lookup_strategy`, `hub.default_tier`, `hub.stale_tier_max_age`, `hub.allow_on_rate_service_error`
+- Upstream policy: `upstream.mode`, `upstream.max_retries`, `upstream.retry_backoff`, `upstream.retry_on_statuses`, `upstream.retry_non_idempotent_methods`, `upstream.attempt_timeout`, `upstream.fallback_status_code`, `upstream.fallback_body`, `upstream.fallback_headers`
+
+## Local Run
+
+### Full stack (with analytics service)
+
+From repo root:
+
+```bash
+docker compose -f deployments/docker-compose.yaml up --build
 ```
 
-## Analytics and Observability
+Required environment variables for compose:
 
-The integrated dashboard provides real-time visibility into the following metrics:
+- `HUB_AUTH_TOKEN`
+- `ANALYTICS_API_TOKEN`
 
-* **Throughput:** Requests Per Second (RPS) per service.
+### Lite stack (no analytics deployment)
 
-* **Efficiency:** Cache Hit vs. Miss ratios.
+`lite` mode keeps edge + hub + Kafka + Redis + Mongo and explicitly disables edge analytics capture. The analytics API/UI service is not deployed.
 
-* **Reliability:** Distribution of 429 (Too Many Requests) vs 5xx (Server Error) status codes.
+```bash
+docker compose -f deployments/docker-compose.lite.yaml up --build
+```
 
-* **Latency:** P50, P90, and P99 latency heatmaps.
+Required environment variables for lite compose:
 
-## Getting Started
-### Prerequisites
+- `HUB_AUTH_TOKEN`
 
-* Docker and Docker Compose
+## Hub Config Validation
 
-* Kubernetes Cluster (Minikube or AWS EKS)
+Hub now validates the full gateway config before loading it into the in-memory source of truth.
 
-* Go >= 1.21
+Validation includes:
 
-### Local Development
+- required structure checks (prefixes, services, tiers)
+- duplicate detection for prefixes, services, and tiers
+- `target_url` must be valid `http` or `https`
+- policy checks for tier lookup strategy and upstream mode
+- retry status code range checks (`100-599`)
+- analytics sampling range checks (`0..1`)
 
-1. Clone the repository.
+Invalid configs are rejected at hub startup with a descriptive error.
 
-2. Execute ```docker-compose up -d``` to initialize infrastructure.
+## Tests
 
-3. Access the Facade on port 8080 and the Management Dashboard on port 3000.
+```bash
+go test ./...
+```
 
-### Deployment (AWS and K8s)
-* This project includes Terraform scripts and Helm charts for cloud deployment.
+## Repository Layout
 
-* Provision EKS infrastructure using Terraform.
-
-* Deploy the stack using the provided Helm chart: ```helm install backbone ./deployments/k8s/chart```.
+```text
+cmd/
+  edge/        edge runtime
+  hub/         hub runtime
+  analytics/   analytics runtime
+packages/
+  edge/        edge middleware, proxy, cache, rate sync
+  hub/         hub API, config, tiers, authoritative rates
+  analytics/   analytics query API + embedded UI
+  common/      shared env parser, types, worker queue
+testing/       test helpers and simulation scripts
+deployments/   Dockerfiles and compose
+```

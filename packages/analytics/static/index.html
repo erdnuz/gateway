@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gate Pulse Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Syne:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <div class="bg-gradient" aria-hidden="true"></div>
+  <header class="shell hero">
+    <p class="kicker">GATE PERFORMANCE</p>
+    <h1>Owner Dashboard</h1>
+    <p class="subtitle">Real-time visibility into rate limiting behavior, latency, and upstream health.</p>
+  </header>
+
+  <main class="shell layout">
+    <section class="panel controls">
+      <h2>Query Controls</h2>
+      <div class="grid">
+        <label>
+          API Base URL
+          <input id="apiBase" type="text" placeholder="http://localhost:8091" />
+        </label>
+        <label>
+          Bearer Token
+          <input id="token" type="password" placeholder="optional" />
+        </label>
+        <label>
+          Window Limit
+          <input id="limit" type="number" min="1" max="10000" value="500" />
+        </label>
+        <label>
+          Service Filter
+          <input id="service" type="text" placeholder="auth-api" />
+        </label>
+        <label>
+          Prefix Filter
+          <input id="prefix" type="text" placeholder="v1" />
+        </label>
+        <label>
+          Tier Filter
+          <input id="tier" type="text" placeholder="free" />
+        </label>
+        <label>
+          Method Filter
+          <input id="method" type="text" placeholder="GET" />
+        </label>
+        <label>
+          Response Code Min
+          <input id="responseCodeMin" type="number" min="100" max="599" placeholder="400" />
+        </label>
+        <label>
+          Response Code Max
+          <input id="responseCodeMax" type="number" min="100" max="599" placeholder="599" />
+        </label>
+        <label>
+          Cache Hit
+          <input id="cacheHit" type="text" placeholder="true / false" />
+        </label>
+        <label>
+          Upstream Error
+          <input id="upstreamError" type="text" placeholder="true / false" />
+        </label>
+        <label>
+          Min Total Latency (ms)
+          <input id="totalLatencyMin" type="number" min="0" step="0.1" placeholder="10" />
+        </label>
+        <label>
+          Max Total Latency (ms)
+          <input id="totalLatencyMax" type="number" min="0" step="0.1" placeholder="250" />
+        </label>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn">Refresh Dashboard</button>
+        <p id="status" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="stats" id="stats"></section>
+
+    <section class="chart-grid">
+      <article class="panel">
+        <h3>Latency Timeline (Recent Events)</h3>
+        <svg id="timelineChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
+      </article>
+      <article class="panel">
+        <h3>Requests by Service</h3>
+        <svg id="serviceChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
+      </article>
+      <article class="panel">
+        <h3>Rate Limited by Prefix</h3>
+        <svg id="prefixChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
+      </article>
+      <article class="panel">
+        <h3>Status Mix Over Time</h3>
+        <svg id="statusTimelineChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
+      </article>
+      <article class="panel">
+        <h3>Payload Size Over Time</h3>
+        <svg id="sizeTimelineChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h3>Slowest Request Patterns</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Service</th>
+              <th>Prefix</th>
+              <th>Method</th>
+              <th>Avg Total Latency</th>
+              <th>Rate Limited</th>
+              <th>Upstream Errors</th>
+            </tr>
+          </thead>
+          <tbody id="slowTable"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3>Recent Events (All Entry Fields)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Prefix</th>
+              <th>Service</th>
+              <th>Method</th>
+              <th>Tier</th>
+              <th>Total Latency</th>
+              <th>Upstream Latency</th>
+              <th>Cache Hit</th>
+              <th>Limit Used</th>
+              <th>Limit Used Ratio</th>
+              <th>Request Bytes</th>
+              <th>Response Bytes</th>
+              <th>Response Code</th>
+              <th>Upstream Error</th>
+            </tr>
+          </thead>
+          <tbody id="eventsTable"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

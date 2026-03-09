@@ -1,5 +1,5 @@
 # --- BUILD STAGE ---
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # git is often needed for private modules or specific dependencies
 RUN apk add --no-cache git
