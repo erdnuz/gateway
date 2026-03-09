@@ -64,6 +64,12 @@ func NewEdgeServer(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *Rate
 		_ = rateMgr.StartSOTSubscriber(context.Background())
 	}
 
+	// if the tier manager is present, subscribe to hub invalidation messages
+	// so stale tier cache entries are evicted immediately after hub updates.
+	if tierMgr != nil {
+		_ = tierMgr.StartHubUpdateListener(context.Background())
+	}
+
 	return es
 }
 

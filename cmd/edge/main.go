@@ -48,7 +48,12 @@ func main() {
 	// 4. Initialize Edge Server with all managers
 	edgeServer := edge.NewEdgeServer(configMgr, tierMgr, rateMgr, analyticsMgr, rdb)
 
-	// 5. Configure HTTP Server
+	// 5. Start analytics flusher — drains the buffer every 5 seconds and ships
+	//    batches to the hub. Runs until the main context is cancelled, then
+	//    performs a final flush before the process exits.
+	analyticsMgr.StartFlusher(ctx, getEnv("HUB_ADDR", "http://localhost:8081"), 5*time.Second)
+
+	// 6. Configure HTTP Server
 	port := getEnv("PORT", ":8080")
 	httpServer := &http.Server{
 		Addr:         port,

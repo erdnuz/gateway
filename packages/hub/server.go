@@ -60,6 +60,8 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch parts[0] {
 	case "config":
 		s.handleConfig(w, r)
+	case "health":
+		s.handleHealth(w, r)
 	case "tiers":
 		s.handleTiers(w, r, ctx, parts[1:])
 	case "rate":
@@ -118,6 +120,18 @@ func (s *HubServer) handleRate(w http.ResponseWriter, r *http.Request, ctx conte
 }
 
 // --- Handler Implementations ---
+
+func (s *HubServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 func (s *HubServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -485,3 +485,39 @@ func TestServeHTTP_NotFound(t *testing.T) {
 		t.Fatalf("expected 404, got %d", rw.Code)
 	}
 }
+
+// TestHandleHealth_OK verifies that GET /health returns {"status":"ok"}.
+func TestHandleHealth_OK(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rw.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("expected status=ok, got %q", body["status"])
+	}
+}
+
+// TestHandleHealth_MethodNotAllowed verifies that non-GET methods return 405.
+func TestHandleHealth_MethodNotAllowed(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rw.Code)
+	}
+}

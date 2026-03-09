@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -91,4 +92,36 @@ func (tm *TierManager) fetchFromHub(ctx context.Context, prefix, apiKey string) 
 
 func (tm *TierManager) getCacheKey(prefix, apiKey string) string {
 	return fmt.Sprintf("tier:%s:%s", prefix, apiKey)
+}
+
+// StartHubUpdateListener subscribes to the hub_updates channel and invalidates
+// the local Redis tier cache whenever the hub publishes an INVALIDATE message.
+// The listener spawns a goroutine; cancel the provided context to stop it.
+func (tm *TierManager) StartHubUpdateListener(ctx context.Context) error {
+	sub := tm.rdb.Subscribe(ctx, "hub_updates")
+	ch := sub.Channel()
+	go func() {
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				// Hub publishes: INVALIDATE:{prefix}:{apiKey}
+				if !strings.HasPrefix(msg.Payload, "INVALIDATE:") {
+					continue
+				}
+				// Split into at most 3 parts so prefixes that contain ":" are preserved
+				parts := strings.SplitN(msg.Payload, ":", 3)
+				if len(parts) != 3 {
+					continue
+				}
+				cacheKey := tm.getCacheKey(parts[1], parts[2])
+				tm.rdb.Del(ctx, cacheKey)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return nil
 }
