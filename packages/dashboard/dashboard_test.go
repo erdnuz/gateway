@@ -62,3 +62,56 @@ func TestDashboardStatsEndpoints(t *testing.T) {
 		t.Fatalf("expected 2 groups, got %d", len(grouped))
 	}
 }
+
+func TestDashboardHealth(t *testing.T) {
+	m, _ := miniredis.Run()
+	defer m.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ds := NewDashboardServer(rdb)
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rw := httptest.NewRecorder()
+	ds.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rw.Code)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(rw.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Errorf("expected status=ok, got %q", body["status"])
+	}
+}
+
+func TestDashboardHealth_MethodNotAllowed(t *testing.T) {
+	m, _ := miniredis.Run()
+	defer m.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ds := NewDashboardServer(rdb)
+
+	req := httptest.NewRequest(http.MethodPost, "/health", nil)
+	rw := httptest.NewRecorder()
+	ds.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rw.Code)
+	}
+}
+
+func TestDashboardNotFound(t *testing.T) {
+	m, _ := miniredis.Run()
+	defer m.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ds := NewDashboardServer(rdb)
+
+	req := httptest.NewRequest(http.MethodGet, "/nonexistent", nil)
+	rw := httptest.NewRecorder()
+	ds.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rw.Code)
+	}
+}
