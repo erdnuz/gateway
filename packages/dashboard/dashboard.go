@@ -26,9 +26,20 @@ func (ds *DashboardServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/analytics":
 		ds.handleAnalytics(w, r)
+	case "/health":
+		ds.handleHealth(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleHealth returns a simple liveness response.
+func (ds *DashboardServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 // handleAnalytics reads all RateAnalyticsEntry records and returns statistics.

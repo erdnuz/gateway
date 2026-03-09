@@ -6,6 +6,6 @@ import "errors"
 var (
 	ErrNotFound       = errors.New("not found")
 	ErrUnauthorized   = errors.New("unauthorized")
-	ErrTooManyRequest = errors.New("too many requests")
+	ErrTooManyRequests = errors.New("too many requests")
 	ErrInternalServer = errors.New("internal server error")
 )

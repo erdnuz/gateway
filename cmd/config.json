@@ -2,16 +2,15 @@
   "prefixes": [
     {
       "prefix": "v1",
-      "quota_period": 10000000000, 
+      "quota_period": 3600000000000,
       "services": [
         {
           "service_id": "auth-api",
           "target_url": "http://auth-cluster.internal:8080",
-          "status": "enabled",
           "tiers": [
             {
               "tier_id": "free",
-              "quota": 10,
+              "quota": 100,
               "get_cost": 1,
               "post_cost": 5,
               "put_cost": 10,
@@ -20,7 +19,7 @@
             },
             {
               "tier_id": "gold",
-              "quota": 100,
+              "quota": 1000,
               "get_cost": 1,
               "post_cost": 1,
               "put_cost": 1,
@@ -37,18 +36,16 @@
               "X-Backend-Server-ID"
             ]
           },
-          
           "cors": {
-              "allowed_origins": [
-                "https://console.myapp.com"
-              ],
-              "allowed_methods": [
-                "GET",
-                "POST"
-              ],
-              "max_age": 3600
-            }
-          ,
+            "allowed_origins": [
+              "https://console.myapp.com"
+            ],
+            "allowed_methods": [
+              "GET",
+              "POST"
+            ],
+            "max_age": 3600000000000
+          },
           "analytics": {
             "enabled": true,
             "flushing_interval": 5000000000,
@@ -59,14 +56,11 @@
             "ttl": 300000000000,
             "cache_key": "$method:$path"
           },
-          "resilience": {
-            "max_retries": 3,
-            "retry_interval": 500000000,
-            "read_timeout": 5000000000
-          },
-          "fail_open": false
+          "failure": {
+            "fail_open": false,
+            "fallback_tier": "free"
+          }
         }
-        
       ]
     }
   ],
