@@ -2,7 +2,7 @@ package hub
 
 import (
 	"gateway/packages/edge"
-	"gateway/testutils"
+	testutils "gateway/testing"
 	"testing"
 	"time"
 )

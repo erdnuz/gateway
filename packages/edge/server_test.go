@@ -3,7 +3,7 @@ package edge
 import (
 	"context"
 	"gateway/packages/common/types"
-	"gateway/testutils"
+	testutils "gateway/testing"
 	"net/http"
 	"testing"
 )
