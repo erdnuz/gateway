@@ -4,6 +4,7 @@ import "time"
 
 // TransformConfig modifies the request before it hits upstream or the client.
 type TransformConfig struct {
+	StripPrefix bool              `bson:"strip_prefix" json:"strip_prefix"`
 	AddHeaders  map[string]string `bson:"add_headers" json:"add_headers"`   // Injected for Upstream
 	HideHeaders []string          `bson:"hide_headers" json:"hide_headers"` // Removed from Client response
 }
@@ -27,13 +28,6 @@ type TierConfig struct {
 	OtherCost  uint8 `bson:"other_cost" json:"other_cost"`   // Cost per other request types
 }
 
-// ResilienceConfig handles retries and circuit breaking.
-type ResilienceConfig struct {
-	MaxRetries    uint8         `bson:"max_retries" json:"max_retries"`
-	RetryInterval time.Duration `bson:"retry_interval" json:"retry_interval"`
-	ReadTimeout   time.Duration `bson:"read_timeout" json:"read_timeout"`
-}
-
 // CacheConfig manages Edge-level response caching.
 type CacheConfig struct {
 	Enabled  bool          `bson:"enabled" json:"enabled"`
@@ -46,4 +40,11 @@ type AnalyticsConfig struct {
 	Enabled          bool          `bson:"enabled" json:"enabled"`
 	FlushingInterval time.Duration `bson:"flushing_interval" json:"flushing_interval"`
 	SamplingRate     float64       `bson:"sampling_rate" json:"sampling_rate"` // 0.0 to 1.0
+}
+
+type FailureConfig struct {
+	// Strategy: "fail-open" (allow) or "fail-closed" (block 503)
+	FailOpen bool `bson:"fail_open" json:"fail_open"`
+
+	FallbackTier string `bson:"fallback_tier" json:"fallback_tier"`
 }

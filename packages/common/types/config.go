@@ -23,12 +23,11 @@ type ServiceConfig struct {
 	Tiers     []TierConfig `bson:"tiers" json:"tiers"`
 
 	// Middleware Policy Blocks
-	Transform  TransformConfig   `bson:"transform" json:"transform"`
-	CORS       *CORSConfig       `bson:"cors" json:"cors,omitempty"`
-	Analytics  AnalyticsConfig   `bson:"analytics" json:"analytics"`
-	Cache      *CacheConfig      `bson:"cache" json:"cache,omitempty"`
-	Resilience *ResilienceConfig `bson:"resilience" json:"resilience,omitempty"`
+	Transform TransformConfig `bson:"transform" json:"transform"`
+	CORS      *CORSConfig     `bson:"cors" json:"cors,omitempty"`
+	Analytics AnalyticsConfig `bson:"analytics" json:"analytics"`
+	Cache     *CacheConfig    `bson:"cache" json:"cache,omitempty"`
 
 	// Reliability Strategy
-	FailOpen bool `bson:"fail_open" json:"fail_open"` // Allow traffic if Redis/Hub is unreachable?
+	Failure FailureConfig `bson:"failure" json:"failure"`
 }

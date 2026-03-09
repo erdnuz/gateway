@@ -1,0 +1,115 @@
+{
+  "prefixes": [
+    {
+      "prefix": "/api/v1",
+      "quota_period": "3600s",
+      "services": [
+        {
+          "service_id": "users-service",
+          "target_url": "http://users-api:3000",
+          "tiers": [
+            {
+              "tier_id": "free",
+              "quota": 1000,
+              "get_cost": 1,
+              "post_cost": 2,
+              "put_cost": 2,
+              "delete_cost": 3,
+              "other_cost": 1
+            },
+            {
+              "tier_id": "premium",
+              "quota": 10000,
+              "get_cost": 1,
+              "post_cost": 1,
+              "put_cost": 1,
+              "delete_cost": 1,
+              "other_cost": 1
+            }
+          ],
+          "transform": {
+            "strip_prefix": true,
+            "add_headers": {
+              "X-Service": "users-service"
+            },
+            "hide_headers": ["X-Internal-Auth"]
+          },
+          "cors": {
+            "allowed_origins": ["*"],
+            "allowed_methods": ["GET", "POST", "PUT", "DELETE"],
+            "max_age": "86400s"
+          },
+          "cache": {
+            "enabled": true,
+            "ttl": "300s",
+            "cache_key": "$method:$path:$key"
+          },
+          "analytics": {
+            "enabled": true,
+            "flushing_interval": "1s",
+            "sampling_rate": 1.0
+          },
+          "failure": {
+            "fail_open": false,
+            "fallback_tier": "free"
+          }
+        },
+        {
+          "service_id": "posts-service",
+          "target_url": "http://posts-api:3000",
+          "tiers": [
+            {
+              "tier_id": "free",
+              "quota": 500,
+              "get_cost": 1,
+              "post_cost": 3,
+              "put_cost": 2,
+              "delete_cost": 5,
+              "other_cost": 2
+            },
+            {
+              "tier_id": "premium",
+              "quota": 50000,
+              "get_cost": 1,
+              "post_cost": 1,
+              "put_cost": 1,
+              "delete_cost": 2,
+              "other_cost": 1
+            }
+          ],
+          "transform": {
+            "strip_prefix": true,
+            "add_headers": {
+              "X-Service": "posts-service"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "prefix": "/api/v2",
+      "quota_period": "3600s",
+      "services": [
+        {
+          "service_id": "users-v2-service",
+          "target_url": "http://users-api-v2:3000",
+          "tiers": [
+            {
+              "tier_id": "free",
+              "quota": 2000,
+              "get_cost": 1,
+              "post_cost": 1,
+              "put_cost": 1,
+              "delete_cost": 1,
+              "other_cost": 1
+            }
+          ],
+          "transform": {
+            "strip_prefix": true
+          }
+        }
+      ]
+    }
+  ],
+  "updated_at": "2026-03-08T12:00:00Z"
+}

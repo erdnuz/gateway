@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
+
+	"gateway/packages/common/types"
 
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
@@ -18,6 +21,13 @@ type RateManager struct {
 	group    singleflight.Group // Prevents multiple concurrent syncs for the same key
 }
 
+const (
+	RateUpdateChannel = "rate-updates"
+	RateSOTChannel    = "rate-sot"
+)
+
+// helper message types are defined in common/types/messaging.go
+
 func NewRateManager(hubAddr string, rdb *redis.Client, maxDelta int64) *RateManager {
 	return &RateManager{
 		rdb:      rdb,
@@ -28,41 +38,90 @@ func NewRateManager(hubAddr string, rdb *redis.Client, maxDelta int64) *RateMana
 
 func (rm *RateManager) Increment(ctx context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
 	localKey := rm.getLocalKey(prefix, apiKey)
-	syncKey := rm.getSyncKey(prefix, apiKey)
-
-	// 1. Atomically increment local delta
+	// increment delta locally
 	delta, err := rm.rdb.IncrBy(ctx, localKey, amount).Result()
 	if err != nil {
 		return 0, err
 	}
 
-	// 2. Get last known global total
-	lastGlobalStr, err := rm.rdb.Get(ctx, syncKey).Result()
-
-	// CRITICAL: If syncKey is missing, we MUST sync immediately to find the truth.
-	if err == redis.Nil {
-		return rm.syncWithHub(ctx, prefix, apiKey, delta)
+	// record analytic entry for dashboard
+	if amount > 0 {
+		entry := types.RateAnalyticsEntry{
+			Timestamp: time.Now(),
+			Prefix:    prefix,
+			APIKey:    apiKey,
+			Delta:     amount,
+		}
+		if b, err := json.Marshal(entry); err == nil {
+			_ = rm.rdb.RPush(ctx, "rate-analytics", b).Err()
+		}
 	}
 
-	lastGlobal, _ := strconv.ParseInt(lastGlobalStr, 10, 64)
+	// read last global total (may not exist yet)
+	syncKey := rm.getSyncKey(prefix, apiKey)
+	lastGlobal := int64(0)
+	if val, err := rm.rdb.Get(ctx, syncKey).Result(); err == nil {
+		lastGlobal, _ = strconv.ParseInt(val, 10, 64)
+	}
+
 	projected := lastGlobal + delta
 
-	// 3. Hard Check: > 90% limit or projected overflow
+	// send updates asynchronously when threshold hit or close to limit
 	if projected > int64(float64(limit)*0.9) {
-		return rm.syncWithHub(ctx, prefix, apiKey, delta)
-	}
-
-	// 4. Soft Check: Async flush using singleflight to prevent redundant HTTP calls
-	if delta >= rm.maxDelta {
-		go func() {
-			// Use background context for async flush
-			_, _ = rm.syncWithHub(context.Background(), prefix, apiKey, delta)
-		}()
+		// hard threshold, publish immediately
+		rm.publishDelta(ctx, prefix, apiKey, delta)
+	} else if delta >= rm.maxDelta {
+		// soft threshold, fire-and-forget
+		go rm.publishDelta(context.Background(), prefix, apiKey, delta)
 	}
 
 	return projected, nil
 }
 
+// publishDelta sends usage information to the hub asynchronously via Redis pub/sub.
+func (rm *RateManager) publishDelta(ctx context.Context, prefix, apiKey string, delta int64) {
+	if delta == 0 {
+		return
+	}
+	ud := types.UsageDelta{
+		Prefix: prefix,
+		APIKey: apiKey,
+		Delta:  delta,
+	}
+	b, _ := json.Marshal(ud)
+	_ = rm.rdb.Publish(ctx, RateUpdateChannel, b).Err()
+}
+
+// StartSOTSubscriber listens for hub "state of truth" messages and updates
+// the local sync key accordingly.  It returns immediately and spins up a
+// goroutine; caller should provide a context for cancellation.
+func (rm *RateManager) StartSOTSubscriber(ctx context.Context) error {
+	sub := rm.rdb.Subscribe(ctx, RateSOTChannel)
+	// subscription errors show up when using sub.Channel()
+	ch := sub.Channel()
+	go func() {
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				var sot types.SOTMsg
+				if err := json.Unmarshal([]byte(msg.Payload), &sot); err != nil {
+					continue
+				}
+				syncKey := rm.getSyncKey(sot.Prefix, sot.APIKey)
+				rm.rdb.Set(ctx, syncKey, sot.Total, 0)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+// the old http-based syncWithHub is kept for backwards compatibility but is
+// no longer called by Increment.
 func (rm *RateManager) syncWithHub(ctx context.Context, prefix, apiKey string, delta int64) (int64, error) {
 	cacheKey := rm.getSyncKey(prefix, apiKey)
 

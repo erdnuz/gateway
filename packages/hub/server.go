@@ -26,7 +26,8 @@ func NewHubServer(mdb *mongo.Database, rdb *redis.Client, configFilePath, analyt
 	if err != nil {
 		panic("Failed to load config: " + err.Error())
 	}
-	return &HubServer{
+
+	hs := &HubServer{
 		mongoDB:          mdb,
 		rdb:              rdb,
 		cfgManager:       cfg,
@@ -34,6 +35,13 @@ func NewHubServer(mdb *mongo.Database, rdb *redis.Client, configFilePath, analyt
 		rateManager:      NewRateManager(rdb, cfg),
 		analyticsManager: NewAnalyticsManager(analyticsURL, analyticsToken, analyticsOrg, analyticsBucket),
 	}
+
+	// begin listening for asynchronous rate updates from edges
+	if hs.rateManager != nil {
+		_ = hs.rateManager.StartDeltaListener(context.Background())
+	}
+
+	return hs
 }
 
 func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {

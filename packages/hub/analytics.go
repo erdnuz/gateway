@@ -34,12 +34,12 @@ func NewAnalyticsManager(url, token, org, bucket string) *AnalyticsManager {
 func (am *AnalyticsManager) IngestEntry(entry types.AnalyticsEntry) {
 	p := influxdb2.NewPoint("request_logs",
 		map[string]string{
-			"service_prefix": entry.ServicePrefix,
-			"service_id":     entry.ServiceID,
-			"method":         entry.Method,
-			"user_tier":      entry.UserTier,
-			"response_code":  fmt.Sprintf("%d", entry.ResponseCode),
-			"cache_hit":      fmt.Sprintf("%v", entry.CacheHit),
+			"prefix":        entry.Prefix,
+			"service":       entry.Service,
+			"method":        entry.Method,
+			"tier":          entry.Tier,
+			"response_code": fmt.Sprintf("%d", entry.ResponseCode),
+			"cache_hit":     fmt.Sprintf("%v", entry.CacheHit),
 		},
 		map[string]interface{}{
 			"total_latency":    entry.TotalLatency,

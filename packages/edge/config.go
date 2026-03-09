@@ -47,6 +47,30 @@ func (cm *ConfigManager) GetPrefix(path string) (*types.PrefixConfig, bool) {
 	return nil, false
 }
 
+// Helper to find a specific service config from the immutable state.
+func (cm *ConfigManager) GetServiceConfig(prefix, service string) (*types.ServiceConfig, error) {
+	prefixCfg, found := cm.GetPrefix(prefix)
+	if !found {
+		return nil, fmt.Errorf("prefix not found: %s", prefix)
+	}
+
+	for i := range prefixCfg.Services {
+		if prefixCfg.Services[i].ServiceID == service {
+			return &prefixCfg.Services[i], nil
+		}
+	}
+	return nil, fmt.Errorf("service not found: %s", service)
+}
+
+func GetTier(svc *types.ServiceConfig, tierID string) (*types.TierConfig, bool) {
+	for i := range svc.Tiers {
+		if svc.Tiers[i].TierID == tierID {
+			return &svc.Tiers[i], true
+		}
+	}
+	return nil, false
+}
+
 func fetchConfig(hubAddr string) (*types.GatewayConfig, error) {
 	resp, err := http.Get(hubAddr + "/config")
 	if err != nil {
