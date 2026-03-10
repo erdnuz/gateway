@@ -5,16 +5,16 @@ import (
 	"encoding/json"
 	"gateway/packages/common/types"
 	"log"
-	"strings"
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/nats-io/nats.go"
 )
 
 type AnalyticsManager struct {
 	// Buffer avoids blocking request path when broker is slow.
 	buffer chan *types.AnalyticsEntry
-	writer *kafka.Writer
+	nc     *nats.Conn
+	subj   string
 	write  func(context.Context, *types.AnalyticsEntry) error
 }
 
@@ -31,38 +31,29 @@ func (NoOpAnalyticsSink) Close() error { return nil }
 
 // NewAnalyticsManager creates a new analytics manager with the specified buffer size
 func NewAnalyticsManager(bufferSize int) *AnalyticsManager {
-	return NewAnalyticsManagerWithKafka(bufferSize, []string{"localhost:9092"}, "analytics-events")
+	return NewAnalyticsManagerWithNATS(bufferSize, nats.DefaultURL, "analytics.events")
 }
 
-func NewAnalyticsManagerWithKafka(bufferSize int, brokers []string, topic string) *AnalyticsManager {
+func NewAnalyticsManagerWithNATS(bufferSize int, natsURL, subject string) *AnalyticsManager {
 	if bufferSize <= 0 {
 		bufferSize = 1000 // Default buffer size
 	}
-	clean := make([]string, 0, len(brokers))
-	for _, b := range brokers {
-		v := strings.TrimSpace(b)
-		if v != "" {
-			clean = append(clean, v)
-		}
+	if subject == "" {
+		subject = "analytics.events"
 	}
-	if len(clean) == 0 {
-		clean = []string{"localhost:9092"}
+	if natsURL == "" {
+		natsURL = nats.DefaultURL
 	}
-	if strings.TrimSpace(topic) == "" {
-		topic = "analytics-events"
-	}
-	writer := &kafka.Writer{
-		Addr:         kafka.TCP(clean...),
-		Topic:        topic,
-		Balancer:     &kafka.LeastBytes{},
-		BatchTimeout: 10 * time.Millisecond,
-		RequiredAcks: kafka.RequireOne,
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		log.Printf("edge analytics nats connect failed url=%s err=%v", natsURL, err)
 	}
 	mgr := &AnalyticsManager{
 		buffer: make(chan *types.AnalyticsEntry, bufferSize),
-		writer: writer,
+		nc:     nc,
+		subj:   subject,
 	}
-	mgr.write = mgr.writeKafkaMessage
+	mgr.write = mgr.writeNATSMessage
 	return mgr
 }
 
@@ -76,21 +67,25 @@ func (m *AnalyticsManager) Capture(entry *types.AnalyticsEntry) {
 }
 
 func (m *AnalyticsManager) Close() error {
-	if m.writer != nil {
-		return m.writer.Close()
+	if m.nc != nil {
+		m.nc.Close()
 	}
 	return nil
 }
 
-func (m *AnalyticsManager) writeKafkaMessage(ctx context.Context, entry *types.AnalyticsEntry) error {
+func (m *AnalyticsManager) writeNATSMessage(ctx context.Context, entry *types.AnalyticsEntry) error {
+	_ = ctx
 	b, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
-	return m.writer.WriteMessages(ctx, kafka.Message{Value: b})
+	if m.nc == nil {
+		return nil
+	}
+	return m.nc.Publish(m.subj, b)
 }
 
-// StartPublisher forwards buffered analytics entries to Kafka as soon as they are captured.
+// StartPublisher forwards buffered analytics entries to NATS as soon as they are captured.
 func (m *AnalyticsManager) StartPublisher(ctx context.Context) {
 	go func() {
 		defer func() {
@@ -108,7 +103,7 @@ func (m *AnalyticsManager) StartPublisher(ctx context.Context) {
 				err := m.write(writeCtx, entry)
 				cancel()
 				if err != nil {
-					log.Printf("edge analytics kafka publish failed: %v", err)
+					log.Printf("edge analytics nats publish failed: %v", err)
 				}
 			case <-ctx.Done():
 				return

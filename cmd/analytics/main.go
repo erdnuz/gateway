@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -33,11 +32,11 @@ func main() {
 		config.String("ANALYTICS_API_TOKEN", ""),
 	)
 
-	kafkaBrokers := strings.Split(config.String("KAFKA_BROKERS", "kafka:9092"), ",")
-	kafkaTopic := config.String("KAFKA_ANALYTICS_TOPIC", "analytics-events")
-	kafkaGroup := config.String("KAFKA_ANALYTICS_GROUP", "analytics-subscribers")
-	if err := server.StartKafkaSubscriber(ctx, kafkaBrokers, kafkaTopic, kafkaGroup); err != nil {
-		log.Fatalf("analytics kafka subscriber start failed: %v", err)
+	natsURL := config.String("NATS_URL", "nats://localhost:4222")
+	natsSubject := config.String("NATS_ANALYTICS_SUBJECT", "analytics.events")
+	natsQueue := config.String("NATS_ANALYTICS_QUEUE", "analytics-subscribers")
+	if err := server.StartNATSSubscriber(ctx, natsURL, natsSubject, natsQueue); err != nil {
+		log.Fatalf("analytics nats subscriber start failed: %v", err)
 	}
 
 	httpServer := &http.Server{

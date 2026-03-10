@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -34,6 +35,19 @@ type requestState struct {
 	serviceID    string
 	apiKey       string
 }
+
+func (s *requestState) reset() {
+	s.svcCfg = nil
+	s.tierPolicy = nil
+	s.analytics = nil
+	s.cacheManager = nil
+	s.prefixID = ""
+	s.serviceID = ""
+	s.apiKey = ""
+}
+
+var requestStatePool = sync.Pool{New: func() interface{} { return &requestState{} }}
+var responseWriterPool = sync.Pool{New: func() interface{} { return &responseWriterWrapper{} }}
 
 func getRequestState(ctx context.Context) (*requestState, bool) {
 	state, ok := ctx.Value(requestStateCtxKey).(*requestState)
@@ -90,7 +104,29 @@ func (s *EdgeServer) StartBackgroundWorkers(ctx context.Context) {
 }
 
 func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	state := &requestState{}
+	if r.URL.Path == "/healthz" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		return
+	}
+	if r.URL.Path == "/readyz" {
+		if s.rdb != nil && s.rdb.Ping(r.Context()).Err() != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+		return
+	}
+
+	state := requestStatePool.Get().(*requestState)
+	state.reset()
+	defer func() {
+		state.reset()
+		requestStatePool.Put(state)
+	}()
 	if s.analyticsSink != nil {
 		state.analytics = &types.AnalyticsEntry{Timestamp: time.Now(), Method: r.Method}
 	}
@@ -115,7 +151,12 @@ func (s *EdgeServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		state, ok := getRequestState(r.Context())
 		if !ok {
-			state = &requestState{}
+			state = requestStatePool.Get().(*requestState)
+			state.reset()
+			defer func() {
+				state.reset()
+				requestStatePool.Put(state)
+			}()
 			r = r.WithContext(context.WithValue(r.Context(), requestStateCtxKey, state))
 		}
 
@@ -206,7 +247,9 @@ func (s *EdgeServer) analyticsMiddleware(next http.HandlerFunc) http.HandlerFunc
 			next(w, r)
 			return
 		}
-		rw := &responseWriterWrapper{ResponseWriter: w, statusCode: http.StatusOK}
+		rw := responseWriterPool.Get().(*responseWriterWrapper)
+		rw.reset(w)
+		defer responseWriterPool.Put(rw)
 		entry := state.analytics
 
 		defer func() {
@@ -294,11 +337,9 @@ func (s *EdgeServer) cacheMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		// Wrap response writer to capture response for caching
-		rw := &responseWriterWrapper{
-			ResponseWriter: w,
-			statusCode:     http.StatusOK,
-			body:           []byte{},
-		}
+		rw := responseWriterPool.Get().(*responseWriterWrapper)
+		rw.reset(w)
+		defer responseWriterPool.Put(rw)
 		if state.analytics != nil {
 			state.analytics.CacheHit = false
 		}
@@ -332,12 +373,19 @@ func (s *EdgeServer) rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc
 		}
 
 		cost := s.getMethodCost(r.Method, tierPolicy)
-		usage, err := s.rateManager.Increment(r.Context(), state.prefixID, apiKey, int64(tierPolicy.Quota), int64(cost))
+		usage, err := s.rateManager.IncrementWithService(r.Context(), state.prefixID, state.serviceID, apiKey, int64(tierPolicy.Quota), int64(cost))
 
 		if err != nil {
-			if state.svcCfg != nil && state.svcCfg.Failure.EffectiveHubPolicy().AllowOnRateServiceError {
-				next(w, r)
-				return
+			if state.svcCfg != nil {
+				hubPolicy := state.svcCfg.Failure.EffectiveHubPolicy()
+				if hubPolicy.AllowOnRateServiceError && state.svcCfg.SafetyTier != nil {
+					safetyCost := s.getMethodCost(r.Method, state.svcCfg.SafetyTier)
+					safetyUsage, safetyErr := s.rateManager.IncrementSafety(r.Context(), state.prefixID, apiKey, int64(state.svcCfg.SafetyTier.Quota), int64(safetyCost))
+					if safetyErr == nil && safetyUsage <= int64(state.svcCfg.SafetyTier.Quota) {
+						next(w, r)
+						return
+					}
+				}
 			}
 			http.Error(w, "Rate limit service unavailable", http.StatusServiceUnavailable)
 			return
@@ -568,6 +616,12 @@ func (s *EdgeServer) buildProxyPath(originalPath string, cfg *types.ServiceConfi
 
 // applyRequestTransforms modifies the proxy request based on configuration
 func (s *EdgeServer) applyRequestTransforms(req *http.Request, transform types.TransformConfig) {
+	for key := range req.Header {
+		if strings.HasPrefix(http.CanonicalHeaderKey(key), "X-Gate-") {
+			req.Header.Del(key)
+		}
+	}
+
 	// Add headers
 	for key, value := range transform.AddHeaders {
 		req.Header.Set(key, value)
@@ -646,6 +700,12 @@ type responseWriterWrapper struct {
 	http.ResponseWriter
 	statusCode int
 	body       []byte
+}
+
+func (rw *responseWriterWrapper) reset(w http.ResponseWriter) {
+	rw.ResponseWriter = w
+	rw.statusCode = http.StatusOK
+	rw.body = rw.body[:0]
 }
 
 func (rw *responseWriterWrapper) WriteHeader(statusCode int) {

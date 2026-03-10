@@ -16,16 +16,13 @@
 
 ### Messaging and Storage
 
-- Kafka topics:
-  - `rate-updates` (edge -> hub usage deltas)
-  - `rate-sot` (hub -> edge state-of-truth totals)
-  - `tier-updates` (hub -> edge tier cache updates)
-  - `analytics-events` (edge -> analytics event stream)
+- NATS subjects:
+  - `tier.updates` (hub -> edge tier cache updates)
+  - `analytics.events` (edge -> analytics event stream)
 - Redis:
   - edge local counters and tier/cache entries
-  - hub authoritative counters + sequence dedup keys
+  - hub authoritative counters and persistent user tier assignments (`hub:tier:*`)
   - analytics event list (default key `rate-analytics`)
-- MongoDB (hub optional): persistent tier store when `HUB_TIER_STORE=mongo`
 
 ## Request Paths
 
@@ -94,10 +91,10 @@ Two config layers are active:
 - `RATE_HARD_THRESHOLD_PERCENT` (default `90`)
 - `ANALYTICS_ENABLED` (default `true`)
 - `ANALYTICS_BUFFER_SIZE` (default `1000`)
-- `KAFKA_BROKERS`
-- `KAFKA_RATE_TOPIC`, `KAFKA_SOT_TOPIC`, `KAFKA_TIER_UPDATES_TOPIC`
-- `KAFKA_EDGE_GROUP`
-- `KAFKA_ANALYTICS_TOPIC`
+- `NATS_URL`
+- `NATS_TIER_UPDATES_SUBJECT`
+- `NATS_EDGE_QUEUE`
+- `NATS_ANALYTICS_SUBJECT`
 
 ### Hub env vars (selected)
 
@@ -105,14 +102,12 @@ Two config layers are active:
 - `REDIS_ADDR` (default `localhost:6379`)
 - `HUB_AUTH_TOKEN` (required)
 - `CONFIG_FILE_PATH` (default `/cmd/config.json`)
-- `HUB_TIER_STORE` (`mongo` or `memory`, default `mongo`)
-- `MONGO_URI`, `DB_NAME` (needed for `mongo` store)
+- `HUB_ENFORCE_REDIS_NOEVICTION` (default `true`)
 - `MAX_DELTA` (default `10000`)
 - `HUB_QUEUE_WORKERS`, `HUB_QUEUE_SUBMIT_TIMEOUT`
 - `HUB_QUEUE_RETRY_MAX`, `HUB_QUEUE_RETRY_BACKOFF`
-- `KAFKA_BROKERS`
-- `KAFKA_RATE_TOPIC`, `KAFKA_RATE_GROUP`, `KAFKA_SOT_TOPIC`
-- `KAFKA_TIER_UPDATES_TOPIC`
+- `NATS_URL`
+- `NATS_TIER_UPDATES_SUBJECT`
 
 ### Analytics env vars
 
@@ -120,9 +115,9 @@ Two config layers are active:
 - `REDIS_ADDR` (default `localhost:6379`)
 - `ANALYTICS_REDIS_KEY` (default `rate-analytics`)
 - `ANALYTICS_API_TOKEN` (optional but recommended)
-- `KAFKA_BROKERS`
-- `KAFKA_ANALYTICS_TOPIC`
-- `KAFKA_ANALYTICS_GROUP`
+- `NATS_URL`
+- `NATS_ANALYTICS_SUBJECT`
+- `NATS_ANALYTICS_QUEUE`
 
 ### Policy config (`cmd/config.json`)
 
@@ -158,7 +153,7 @@ Required environment variables for compose:
 
 ### Lite stack (no analytics deployment)
 
-`lite` mode keeps edge + hub + Kafka + Redis + Mongo and explicitly disables edge analytics capture. The analytics API/UI service is not deployed.
+`lite` mode keeps edge + hub + NATS + Redis and explicitly disables edge analytics capture. The analytics API/UI service is not deployed.
 
 ```bash
 docker compose -f deployments/docker-compose.lite.yaml up --build
@@ -188,6 +183,49 @@ Invalid configs are rejected at hub startup with a descriptive error.
 ```bash
 go test ./...
 ```
+
+### Integration Tests
+
+The advanced end-to-end suite runs under an `integration` build tag and boots a distributed topology with real infra:
+
+- one Hub instance (control plane + lease gRPC)
+- multiple Edge instances (simulating separate machines)
+- multiple Analytics API instances (simulating horizontal replicas)
+- containerized Redis/NATS/Mongo via testcontainers
+- upstream HTTP origin + mTLS lease gRPC
+
+```bash
+go test -tags=integration ./testing/integration/... -count=1
+```
+
+Or via Makefile targets:
+
+```bash
+make integration-test
+make integration-test-verbose
+```
+
+## Setup CLI
+
+Use the interactive setup wizard to generate service-specific `.env` files with validation and connectivity checks.
+
+```bash
+go run ./cmd/setup
+```
+
+The wizard asks which service you are configuring (`analytics`, `hub`, or `edge`) and supports:
+
+- simple mode with strong defaults (recommended)
+- advanced mode for extra knobs
+- optional dependency bootstrap via Docker Compose before configuration checks
+
+For Hub setup, the wizard now prompts for route/service details and generates a validated gateway config JSON automatically (no manual config file required).
+
+Then it:
+
+- validates required values (ports, URLs, files, config JSON)
+- checks connectivity to Redis/NATS and Hub health where relevant
+- writes an output env file (default `.env.<service>`)
 
 ## Repository Layout
 

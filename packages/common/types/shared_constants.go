@@ -1,8 +1,7 @@
 package types
 
 const (
-	DefaultRateUpdateChannel = "rate-updates"
-	DefaultRateSOTChannel    = "rate-sot"
-	DefaultHubUpdatesChannel = "hub_updates"
-	DefaultAnalyticsKey      = "rate-analytics"
+	DefaultHubUpdatesChannel   = "hub_updates"
+	DefaultAnalyticsKey        = "rate-analytics"
+	DefaultConfigReloadChannel = "gate:config:reload"
 )

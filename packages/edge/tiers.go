@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
-	"github.com/segmentio/kafka-go"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -27,13 +27,15 @@ type TierManager struct {
 	client      *http.Client
 	stale       sync.Map
 	group       singleflight.Group
-	kafkaReader *kafka.Reader
+	natsConn    *nats.Conn
+	natsSubject string
+	natsQueue   string
 }
 
 type TierManagerOptions struct {
-	KafkaBrokers []string
-	KafkaTopic   string
-	KafkaGroupID string
+	NATSURL   string
+	NATSSubj  string
+	NATSQueue string
 }
 
 type tierSnapshot struct {
@@ -64,37 +66,30 @@ func NewTierManagerWithOptions(hubAddr string, rdb *redis.Client, hubUpdatesChan
 	if hubUpdatesChannel == "" {
 		hubUpdatesChannel = types.DefaultHubUpdatesChannel
 	}
-	brokers := make([]string, 0, len(options.KafkaBrokers))
-	for _, b := range options.KafkaBrokers {
-		v := strings.TrimSpace(b)
-		if v != "" {
-			brokers = append(brokers, v)
-		}
+	natsURL := strings.TrimSpace(options.NATSURL)
+	if natsURL == "" {
+		natsURL = nats.DefaultURL
 	}
-	if len(brokers) == 0 {
-		brokers = []string{"localhost:9092"}
+	subject := strings.TrimSpace(options.NATSSubj)
+	if subject == "" {
+		subject = "tier.updates"
 	}
-	topic := strings.TrimSpace(options.KafkaTopic)
-	if topic == "" {
-		topic = "tier-updates"
+	queue := strings.TrimSpace(options.NATSQueue)
+	if queue == "" {
+		queue = "edge-tier-updates"
 	}
-	groupID := strings.TrimSpace(options.KafkaGroupID)
-	if groupID == "" {
-		groupID = "edge-tier-updates"
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		log.Printf("edge tier nats connect failed url=%s err=%v", natsURL, err)
 	}
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  brokers,
-		GroupID:  groupID,
-		Topic:    topic,
-		MinBytes: 1,
-		MaxBytes: 10e6,
-	})
 	return &TierManager{
 		hubAddr:     hubAddr,
 		rdb:         rdb,
 		authTok:     token,
 		client:      client,
-		kafkaReader: reader,
+		natsConn:    nc,
+		natsSubject: subject,
+		natsQueue:   queue,
 	}
 }
 
@@ -189,26 +184,27 @@ func (tm *TierManager) GetStaleTier(prefix, apiKey string, maxAge time.Duration)
 	return snapshot.tier, true
 }
 
-// StartHubUpdateListener subscribes to Kafka tier updates and applies
+// StartHubUpdateListener subscribes to NATS tier updates and applies
 // the tier snapshot directly to local Redis cache.
 // The listener spawns a goroutine; cancel the provided context to stop it.
 func (tm *TierManager) StartHubUpdateListener(ctx context.Context) error {
+	if tm.natsConn == nil {
+		return nil
+	}
+	sub, err := tm.natsConn.QueueSubscribe(tm.natsSubject, tm.natsQueue, func(msg *nats.Msg) {
+		tm.applyTierUpdatePayload(ctx, string(msg.Data))
+	})
+	if err != nil {
+		return err
+	}
+	if err := tm.natsConn.Flush(); err != nil {
+		_ = sub.Unsubscribe()
+		return err
+	}
 	go func() {
-		defer func() { _ = tm.kafkaReader.Close() }()
-		for {
-			msg, err := tm.kafkaReader.ReadMessage(ctx)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Printf("edge tier kafka read failed: %v", err)
-				continue
-			}
-			tm.applyTierUpdatePayload(ctx, string(msg.Value))
-			if ctx.Err() != nil {
-				return
-			}
-		}
+		<-ctx.Done()
+		_ = sub.Unsubscribe()
+		tm.natsConn.Close()
 	}()
 	return nil
 }

@@ -1,6 +1,18 @@
 package types
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
+
+const (
+	AnalyticsModeLite  = "lite"
+	AnalyticsModeHeavy = "heavy"
+)
+
+func errConfig(format string, args ...interface{}) error {
+	return fmt.Errorf(format, args...)
+}
 
 // TransformConfig modifies the request before it hits upstream or the client.
 type TransformConfig struct {
@@ -38,8 +50,30 @@ type CacheConfig struct {
 // AnalyticsConfig controls the sampling and shipping of data.
 type AnalyticsConfig struct {
 	Enabled          bool          `bson:"enabled" json:"enabled"`
+	Mode             string        `bson:"mode" json:"mode,omitempty"`
 	FlushingInterval time.Duration `bson:"flushing_interval" json:"flushing_interval"`
 	SamplingRate     float64       `bson:"sampling_rate" json:"sampling_rate"` // 0.0 to 1.0
+}
+
+func (a AnalyticsConfig) EffectiveMode() string {
+	if !a.Enabled {
+		return AnalyticsModeLite
+	}
+	if a.Mode == "" {
+		return AnalyticsModeHeavy
+	}
+	return a.Mode
+}
+
+func (a AnalyticsConfig) Validate() error {
+	mode := a.EffectiveMode()
+	if mode != AnalyticsModeLite && mode != AnalyticsModeHeavy {
+		return errConfig("mode must be one of %q or %q", AnalyticsModeLite, AnalyticsModeHeavy)
+	}
+	if a.SamplingRate < 0 || a.SamplingRate > 1 {
+		return errConfig("sampling_rate must be between 0 and 1")
+	}
+	return nil
 }
 
 type FailureConfig struct {

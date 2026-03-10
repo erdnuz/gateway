@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -31,29 +30,29 @@ func main() {
 	// 3. Initialize Managers
 	hubAddr := config.String("HUB_ADDR", "http://localhost:8081")
 	hubToken := config.String("HUB_AUTH_TOKEN", "")
-	rateUpdateChannel := config.String("RATE_UPDATE_CHANNEL", types.DefaultRateUpdateChannel)
-	rateSOTChannel := config.String("RATE_SOT_CHANNEL", types.DefaultRateSOTChannel)
 	hubUpdatesChannel := config.String("HUB_UPDATES_CHANNEL", types.DefaultHubUpdatesChannel)
 	maxDelta := config.Int64("EDGE_MAX_DELTA", 100)
 	analyticsBufferSize := config.Int("ANALYTICS_BUFFER_SIZE", 1000)
-	analyticsEnabled := config.Bool("ANALYTICS_ENABLED", true)
-	kafkaAnalyticsTopic := config.String("KAFKA_ANALYTICS_TOPIC", "analytics-events")
+	analyticsEnabled := config.Bool("GATE_ANALYTICS_ENABLED", config.Bool("ANALYTICS_ENABLED", true))
+	natsAnalyticsSubject := config.String("NATS_ANALYTICS_SUBJECT", "analytics.events")
 	hubHTTPTimeout := config.DurationSeconds("HUB_HTTP_TIMEOUT_SECONDS", 5)
 	hubHTTPClient := edge.NewHubHTTPClient(hubHTTPTimeout)
 	configRefreshSeconds := config.Int("EDGE_CONFIG_REFRESH_SECONDS", 0)
+	configReloadChannel := config.String("EDGE_CONFIG_RELOAD_CHANNEL", types.DefaultConfigReloadChannel)
 	bootstrapConfigFile := config.String("EDGE_BOOTSTRAP_CONFIG_FILE", "")
-	rateQueueCapacity := config.Int("RATE_QUEUE_CAPACITY", 512)
-	rateQueueWorkers := config.Int("RATE_QUEUE_WORKERS", 1)
-	rateQueueSubmitTimeout := config.Duration("RATE_QUEUE_SUBMIT_TIMEOUT", 25*time.Millisecond)
-	rateQueueRetryBackoff := config.Duration("RATE_QUEUE_RETRY_BACKOFF", 10*time.Millisecond)
 	rateHardThresholdPctRaw := config.Int("RATE_HARD_THRESHOLD_PERCENT", 90)
 	rateHardThresholdPct := float64(rateHardThresholdPctRaw) / 100.0
-	rateQueueRetryMax := config.Int("RATE_QUEUE_RETRY_MAX", 1)
-	kafkaBrokers := strings.Split(config.String("KAFKA_BROKERS", "kafka:9092"), ",")
-	kafkaRateTopic := config.String("KAFKA_RATE_TOPIC", "rate-updates")
-	kafkaSOTTopic := config.String("KAFKA_SOT_TOPIC", "rate-sot")
-	kafkaTierUpdatesTopic := config.String("KAFKA_TIER_UPDATES_TOPIC", "tier-updates")
-	kafkaEdgeGroup := config.String("KAFKA_EDGE_GROUP", "edge-consumers")
+	leaseSize := config.Int64("EDGE_LEASE_SIZE", 100)
+	leaseLowWaterPctRaw := config.Int("EDGE_LEASE_LOW_WATER_PERCENT", 20)
+	leaseLowWaterPct := float64(leaseLowWaterPctRaw) / 100.0
+	hubGRPCAddr := config.String("HUB_GRPC_ADDR", "localhost:9090")
+	hubGRPCServerName := config.String("HUB_GRPC_SERVER_NAME", "")
+	edgeTLSCertFile := config.String("EDGE_TLS_CERT_FILE", "")
+	edgeTLSKeyFile := config.String("EDGE_TLS_KEY_FILE", "")
+	edgeTLSCAFile := config.String("EDGE_TLS_CA_FILE", "")
+	natsURL := config.String("NATS_URL", "nats://localhost:4222")
+	natsTierUpdatesSubject := config.String("NATS_TIER_UPDATES_SUBJECT", "tier.updates")
+	natsEdgeQueue := config.String("NATS_EDGE_QUEUE", "edge-tier-updates")
 
 	// ConfigManager performs initial hydration from Hub
 	configMgr, err := edge.NewConfigManagerWithFallback(hubAddr, hubToken, hubHTTPClient, bootstrapConfigFile)
@@ -63,6 +62,7 @@ func main() {
 	if configRefreshSeconds > 0 {
 		configMgr.StartAutoRefresh(ctx, time.Duration(configRefreshSeconds)*time.Second)
 	}
+	configMgr.StartConfigReloadSubscriber(ctx, rdb, configReloadChannel)
 
 	// TierManager caches user tier information
 	tierMgr := edge.NewTierManagerWithOptions(
@@ -72,11 +72,20 @@ func main() {
 		hubToken,
 		hubHTTPClient,
 		edge.TierManagerOptions{
-			KafkaBrokers: kafkaBrokers,
-			KafkaTopic:   kafkaTierUpdatesTopic,
-			KafkaGroupID: kafkaEdgeGroup + "-tier",
+			NATSURL:   natsURL,
+			NATSSubj:  natsTierUpdatesSubject,
+			NATSQueue: natsEdgeQueue,
 		},
 	)
+
+	if edgeTLSCertFile == "" || edgeTLSKeyFile == "" || edgeTLSCAFile == "" || hubGRPCServerName == "" {
+		log.Fatal("EDGE_TLS_CERT_FILE, EDGE_TLS_KEY_FILE, EDGE_TLS_CA_FILE and HUB_GRPC_SERVER_NAME must be set")
+	}
+	leaseClient, err := edge.NewGRPCQuotaLeaseClient(hubGRPCAddr, hubGRPCServerName, edgeTLSCertFile, edgeTLSKeyFile, edgeTLSCAFile)
+	if err != nil {
+		log.Fatalf("Failed to initialize lease gRPC client: %v", err)
+	}
+	defer leaseClient.Close()
 
 	// RateManager handles local rate limiting with hub synchronization
 	rateMgr := edge.NewRateManagerWithOptions(
@@ -84,28 +93,19 @@ func main() {
 		rdb,
 		maxDelta,
 		edge.RateManagerOptions{
-			QueueCapacity:    rateQueueCapacity,
-			QueueWorkers:     rateQueueWorkers,
-			SubmitTimeout:    rateQueueSubmitTimeout,
-			RetryMax:         rateQueueRetryMax,
-			RetryBackoff:     rateQueueRetryBackoff,
 			HardThresholdPct: rateHardThresholdPct,
-			HubAuthToken:     hubToken,
-			HubHTTPClient:    hubHTTPClient,
-			KafkaBrokers:     kafkaBrokers,
-			KafkaTopic:       kafkaRateTopic,
-			KafkaSOTTopic:    kafkaSOTTopic,
-			KafkaGroupID:     kafkaEdgeGroup + "-sot",
+			LeaseSize:        leaseSize,
+			LowWaterPct:      leaseLowWaterPct,
 		},
-		rateUpdateChannel,
-		rateSOTChannel,
+		"",
 	)
+	rateMgr.SetLeaseClient(leaseClient)
 
 	// Analytics sink can be no-op to keep request path lightweight when disabled.
 	var analyticsSink edge.AnalyticsSink = edge.NoOpAnalyticsSink{}
 	var analyticsMgr *edge.AnalyticsManager
 	if analyticsEnabled {
-		analyticsMgr = edge.NewAnalyticsManagerWithKafka(analyticsBufferSize, kafkaBrokers, kafkaAnalyticsTopic)
+		analyticsMgr = edge.NewAnalyticsManagerWithNATS(analyticsBufferSize, natsURL, natsAnalyticsSubject)
 		analyticsSink = analyticsMgr
 	}
 
@@ -113,7 +113,7 @@ func main() {
 	edgeServer := edge.NewEdgeServer(configMgr, tierMgr, rateMgr, analyticsSink, rdb)
 	edgeServer.StartBackgroundWorkers(ctx)
 
-	// 5. Start analytics publisher — forwards captured events to Kafka immediately.
+	// 5. Start analytics publisher — forwards captured events to NATS immediately.
 	if analyticsEnabled && analyticsMgr != nil {
 		analyticsMgr.StartPublisher(ctx)
 	}

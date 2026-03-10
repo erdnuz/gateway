@@ -17,5 +17,4 @@ type TierStore interface {
 
 type RateLimiter interface {
 	Increment(ctx context.Context, prefix, key string, delta int64) (int64, error)
-	StartDeltaListener(ctx context.Context) error
 }

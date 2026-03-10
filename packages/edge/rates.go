@@ -2,147 +2,17 @@ package edge
 
 import (
 	"context"
-	"log"
-	"net/http"
-	"time"
+	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"gateway/packages/common/types"
-	"gateway/packages/common/workers"
-
-	"github.com/redis/go-redis/v9"
 )
 
-type RateManager struct {
-	store            CounterStore
-	maxDelta         int64
-	hardThresholdPct float64
-	queueWorkers     int
-	submitTimeout    time.Duration
-	retryMax         int
-	retryBackoff     time.Duration
-	sync             RateSync
-	queue            *workers.BoundedQueue
-}
-
-type RateManagerOptions struct {
-	QueueCapacity    int
-	QueueWorkers     int
-	SubmitTimeout    time.Duration
-	RetryMax         int
-	RetryBackoff     time.Duration
-	HardThresholdPct float64
-	HubAuthToken     string
-	HubHTTPClient    *http.Client
-	KafkaBrokers     []string
-	KafkaTopic       string
-	KafkaSOTTopic    string
-	KafkaGroupID     string
-}
-
-func DefaultRateManagerOptions() RateManagerOptions {
-	return RateManagerOptions{
-		QueueCapacity:    512,
-		QueueWorkers:     1,
-		SubmitTimeout:    25 * time.Millisecond,
-		RetryMax:         1,
-		RetryBackoff:     10 * time.Millisecond,
-		HardThresholdPct: 0.9,
-	}
-}
-
-var _ types.Limiter = (*RateManager)(nil)
-
-// helper message types are defined in common/types/messaging.go
-
-func NewRateManager(hubAddr string, rdb *redis.Client, maxDelta int64, channels ...string) *RateManager {
-	return NewRateManagerWithOptions(hubAddr, rdb, maxDelta, DefaultRateManagerOptions(), channels...)
-}
-
-func NewRateManagerWithOptions(hubAddr string, rdb *redis.Client, maxDelta int64, options RateManagerOptions, channels ...string) *RateManager {
-	if options.QueueCapacity <= 0 {
-		options.QueueCapacity = 512
-	}
-	if options.QueueWorkers <= 0 {
-		options.QueueWorkers = 1
-	}
-	if options.SubmitTimeout <= 0 {
-		options.SubmitTimeout = 25 * time.Millisecond
-	}
-	if options.RetryMax < 0 {
-		options.RetryMax = 1
-	}
-	if options.RetryBackoff <= 0 {
-		options.RetryBackoff = 10 * time.Millisecond
-	}
-	if options.HardThresholdPct <= 0 || options.HardThresholdPct > 1 {
-		options.HardThresholdPct = 0.9
-	}
-	var sync RateSync = NewKafkaRateSync(rdb, options.KafkaBrokers, options.KafkaTopic, options.KafkaSOTTopic, options.KafkaGroupID)
-
-	queue := workers.NewBoundedQueue(options.QueueCapacity)
-	return &RateManager{
-		store:            NewRedisCounterAdapter(rdb),
-		maxDelta:         maxDelta,
-		hardThresholdPct: options.HardThresholdPct,
-		queueWorkers:     options.QueueWorkers,
-		submitTimeout:    options.SubmitTimeout,
-		retryMax:         options.RetryMax,
-		retryBackoff:     options.RetryBackoff,
-		sync:             sync,
-		queue:            queue,
-	}
-}
-
-func (rm *RateManager) StartBackgroundWorkers(ctx context.Context) {
-	if rm.queue != nil {
-		rm.queue.Start(ctx, rm.queueWorkers)
-	}
-}
-
-func (rm *RateManager) Increment(ctx context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
-	localKey := rm.getLocalKey(prefix, apiKey)
-	// increment delta locally
-	delta, err := rm.store.IncrBy(ctx, localKey, amount)
-	if err != nil {
-		return 0, err
-	}
-
-	// track unsent local increments independently from the cumulative local key.
-	if amount > 0 {
-		if _, err := rm.store.IncrBy(ctx, rm.getPendingKey(prefix, apiKey), amount); err != nil {
-			return 0, err
-		}
-	}
-
-	// read last global total (may not exist yet)
-	syncKey := rm.getSyncKey(prefix, apiKey)
-	lastGlobal := int64(0)
-	if val, err := rm.store.Get(ctx, syncKey); err == nil {
-		lastGlobal = val
-	}
-
-	projected := lastGlobal + delta
-
-	// send updates asynchronously when threshold hit or close to limit
-	if projected > int64(float64(limit)*rm.hardThresholdPct) {
-		// hard threshold, publish immediately
-		rm.sync.FlushPendingDelta(ctx, prefix, apiKey)
-	} else if delta >= rm.maxDelta {
-		// soft threshold, schedule on bounded worker queue.
-		task := &flushDeltaTask{sync: rm.sync, prefix: prefix, apiKey: apiKey, retryMax: rm.retryMax, retryBackoff: rm.retryBackoff}
-		if err := rm.queue.Submit(task, rm.submitTimeout); err != nil {
-			log.Printf("rate flush queue submit failed prefix=%s api_key=%s err=%v", prefix, apiKey, err)
-		}
-	}
-
-	return projected, nil
-}
-
-// StartSOTSubscriber listens for hub "state of truth" messages and updates
-// the local sync key accordingly.  It returns immediately and spins up a
-// goroutine; caller should provide a context for cancellation.
-func (rm *RateManager) StartSOTSubscriber(ctx context.Context) error {
-	return rm.sync.StartSOTSubscriber(ctx)
+type leaseCounter struct {
+	remaining atomic.Int64
+	consumed  atomic.Int64
+	leaseSize int64
 }
 
 func rateLocalKey(p, k string) string   { return "rate-local:" + p + ":" + k }
@@ -150,25 +20,196 @@ func rateSyncKey(p, k string) string    { return "rate-sync:" + p + ":" + k }
 func ratePendingKey(p, k string) string { return "rate-pending:" + p + ":" + k }
 func rateSeqKey(p, k string) string     { return "rate-seq:" + p + ":" + k }
 
-func (rm *RateManager) getLocalKey(p, k string) string { return rateLocalKey(p, k) }
-func (rm *RateManager) getSyncKey(p, k string) string  { return rateSyncKey(p, k) }
-func (rm *RateManager) getPendingKey(p, k string) string {
-	return ratePendingKey(p, k)
-}
-func (rm *RateManager) getSeqKey(p, k string) string { return rateSeqKey(p, k) }
-
-type flushDeltaTask struct {
-	sync           RateSync
-	prefix, apiKey string
-	retryMax       int
-	retryBackoff   time.Duration
+type RateManager struct {
+	maxDelta         int64
+	hardThresholdPct float64
+	leaseClient      QuotaLeaseRequester
+	leaseSize        int64
+	lowWaterPct      float64
+	leaseMap         sync.Map
+	refillGroup      singleflightGroup
 }
 
-func (t *flushDeltaTask) Execute(ctx context.Context) error {
-	t.sync.FlushPendingDelta(ctx, t.prefix, t.apiKey)
+type RateManagerOptions struct {
+	HardThresholdPct float64
+	LeaseSize        int64
+	LowWaterPct      float64
+}
+
+func DefaultRateManagerOptions() RateManagerOptions {
+	return RateManagerOptions{
+		HardThresholdPct: 0.9,
+		LeaseSize:        100,
+		LowWaterPct:      0.2,
+	}
+}
+
+var _ types.Limiter = (*RateManager)(nil)
+
+func NewRateManager(_ string, _ interface{}, maxDelta int64, channels ...string) *RateManager {
+	return NewRateManagerWithOptions("", nil, maxDelta, DefaultRateManagerOptions(), channels...)
+}
+
+func NewRateManagerWithOptions(_ string, _ interface{}, maxDelta int64, options RateManagerOptions, _ ...string) *RateManager {
+	if options.HardThresholdPct <= 0 || options.HardThresholdPct > 1 {
+		options.HardThresholdPct = 0.9
+	}
+	if options.LeaseSize <= 0 {
+		options.LeaseSize = 100
+	}
+	if options.LowWaterPct <= 0 || options.LowWaterPct >= 1 {
+		options.LowWaterPct = 0.2
+	}
+	return &RateManager{
+		maxDelta:         maxDelta,
+		hardThresholdPct: options.HardThresholdPct,
+		leaseSize:        options.LeaseSize,
+		lowWaterPct:      options.LowWaterPct,
+	}
+}
+
+func (rm *RateManager) SetLeaseClient(client QuotaLeaseRequester) {
+	rm.leaseClient = client
+}
+
+func (rm *RateManager) StartBackgroundWorkers(context.Context) {}
+
+func (rm *RateManager) Increment(ctx context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
+	return rm.IncrementWithService(ctx, prefix, "", apiKey, limit, amount)
+}
+
+func (rm *RateManager) IncrementWithService(ctx context.Context, prefix, serviceID, apiKey string, limit, amount int64) (int64, error) {
+	if amount <= 0 {
+		amount = 1
+	}
+	counter := rm.getLeaseCounter(prefix, apiKey)
+	if rm.leaseClient == nil {
+		used := counter.consumed.Add(amount)
+		return used, nil
+	}
+	if err := rm.ensureLease(ctx, prefix, serviceID, apiKey, counter, amount); err != nil {
+		return 0, err
+	}
+	remaining := counter.remaining.Add(-amount)
+	if remaining < 0 {
+		counter.remaining.Add(amount)
+		if err := rm.ensureLease(ctx, prefix, serviceID, apiKey, counter, amount); err != nil {
+			return 0, err
+		}
+		remaining = counter.remaining.Add(-amount)
+		if remaining < 0 {
+			counter.remaining.Add(amount)
+			return limit + 1, nil
+		}
+	}
+	used := counter.consumed.Add(amount)
+
+	if counter.remaining.Load() <= int64(float64(counter.leaseSize)*rm.lowWaterPct) {
+		go func() {
+			_ = rm.ensureLease(context.Background(), prefix, serviceID, apiKey, counter, 1)
+		}()
+	}
+	if used > limit {
+		return used, nil
+	}
+	return used, nil
+}
+
+// StartSOTSubscriber listens for hub "state of truth" messages and updates
+// the local sync key accordingly.  It returns immediately and spins up a
+// goroutine; caller should provide a context for cancellation.
+func (rm *RateManager) StartSOTSubscriber(context.Context) error {
 	return nil
 }
 
-func (t *flushDeltaTask) RetryPolicy() *workers.RetryPolicy {
-	return &workers.RetryPolicy{MaxRetries: t.retryMax, Backoff: t.retryBackoff}
+func (rm *RateManager) IncrementSafety(_ context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
+	key := "safety:" + prefix
+	counter := rm.getLeaseCounter(key, apiKey)
+	if counter.remaining.Load() == 0 {
+		counter.remaining.Store(limit)
+	}
+	remaining := counter.remaining.Add(-amount)
+	if remaining < 0 {
+		counter.remaining.Add(amount)
+		return limit + 1, nil
+	}
+	used := counter.consumed.Add(amount)
+	return used, nil
+}
+
+func (rm *RateManager) ensureLease(ctx context.Context, prefix, serviceID, apiKey string, counter *leaseCounter, minimum int64) error {
+	if counter.remaining.Load() >= minimum {
+		return nil
+	}
+	if rm.leaseClient == nil {
+		return fmt.Errorf("lease client is not configured")
+	}
+	_, err, _ := rm.refillGroup.Do(prefix+":"+serviceID+":"+apiKey, func() (interface{}, error) {
+		if counter.remaining.Load() >= minimum {
+			return nil, nil
+		}
+		resp, err := rm.leaseClient.RequestQuotaLease(ctx, &types.QuotaLeaseRequest{
+			Prefix:          prefix,
+			ServiceId:       serviceID,
+			ApiKey:          apiKey,
+			RequestedTokens: rm.leaseSize,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if resp.GrantedTokens > 0 {
+			counter.remaining.Add(resp.GrantedTokens)
+		}
+		return nil, nil
+	})
+	return err
+}
+
+func (rm *RateManager) getLeaseCounter(prefix, apiKey string) *leaseCounter {
+	key := prefix + ":" + apiKey
+	if v, ok := rm.leaseMap.Load(key); ok {
+		return v.(*leaseCounter)
+	}
+	counter := &leaseCounter{leaseSize: rm.leaseSize}
+	actual, _ := rm.leaseMap.LoadOrStore(key, counter)
+	return actual.(*leaseCounter)
+}
+
+func (rm *RateManager) getSyncKey(p, k string) string {
+	return rateSyncKey(p, k)
+}
+
+type singleflightGroup struct {
+	mu sync.Mutex
+	m  map[string]*singleflightCall
+}
+
+type singleflightCall struct {
+	wg  sync.WaitGroup
+	val interface{}
+	err error
+}
+
+func (g *singleflightGroup) Do(key string, fn func() (interface{}, error)) (interface{}, error, bool) {
+	g.mu.Lock()
+	if g.m == nil {
+		g.m = make(map[string]*singleflightCall)
+	}
+	if c, ok := g.m[key]; ok {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err, true
+	}
+	c := &singleflightCall{}
+	c.wg.Add(1)
+	g.m[key] = c
+	g.mu.Unlock()
+
+	c.val, c.err = fn()
+	c.wg.Done()
+
+	g.mu.Lock()
+	delete(g.m, key)
+	g.mu.Unlock()
+	return c.val, c.err, false
 }

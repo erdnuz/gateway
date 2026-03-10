@@ -2,16 +2,13 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"gateway/packages/common/types"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/segmentio/kafka-go"
 )
 
 var hybridWindowLua = redis.NewScript(`
@@ -37,62 +34,20 @@ var hybridWindowLua = redis.NewScript(`
 `)
 
 type RateManager struct {
-	rdb       *redis.Client
-	config    *ConfigManager
-	consumer  DeltaConsumer
-	sotWriter *kafka.Writer
+	rdb    *redis.Client
+	config *ConfigManager
 }
 
-type RateManagerOptions struct {
-	KafkaBrokers  []string
-	KafkaTopic    string
-	KafkaGroupID  string
-	KafkaSOTTopic string
-}
+type RateManagerOptions struct{}
 
 var _ types.AuthoritativeStore = (*RateManager)(nil)
 
-// UsageDelta and SOTMsg exist in common/types/messaging.go
-
-func NewRateManager(rdb *redis.Client, config *ConfigManager, channels ...string) *RateManager {
-	return NewRateManagerWithOptions(rdb, config, RateManagerOptions{}, channels...)
+func NewRateManager(rdb *redis.Client, config *ConfigManager, _ ...string) *RateManager {
+	return &RateManager{rdb: rdb, config: config}
 }
 
-func NewRateManagerWithOptions(rdb *redis.Client, config *ConfigManager, options RateManagerOptions, channels ...string) *RateManager {
-	rm := &RateManager{
-		rdb:    rdb,
-		config: config,
-	}
-	updateTopic := types.DefaultRateUpdateChannel
-	if len(channels) > 0 && channels[0] != "" {
-		updateTopic = channels[0]
-	}
-	apply := func(ctx context.Context, prefix, apiKey string, delta int64) error {
-		_, err := rm.Increment(ctx, prefix, apiKey, delta)
-		return err
-	}
-	rm.consumer = NewKafkaDeltaConsumer(rdb, options.KafkaBrokers, updateTopic, options.KafkaGroupID, apply)
-	sotTopic := options.KafkaSOTTopic
-	if sotTopic == "" {
-		sotTopic = types.DefaultRateSOTChannel
-	}
-	brokers := make([]string, 0, len(options.KafkaBrokers))
-	for _, b := range options.KafkaBrokers {
-		if b != "" {
-			brokers = append(brokers, b)
-		}
-	}
-	if len(brokers) == 0 {
-		brokers = []string{"localhost:9092"}
-	}
-	rm.sotWriter = &kafka.Writer{
-		Addr:         kafka.TCP(brokers...),
-		Topic:        sotTopic,
-		Balancer:     &kafka.LeastBytes{},
-		BatchTimeout: 20 * time.Millisecond,
-		RequiredAcks: kafka.RequireOne,
-	}
-	return rm
+func NewRateManagerWithOptions(rdb *redis.Client, config *ConfigManager, _ RateManagerOptions, _ ...string) *RateManager {
+	return &RateManager{rdb: rdb, config: config}
 }
 
 // Increment adds to the quota and returns the new weighted total.
@@ -110,27 +65,7 @@ func (rm *RateManager) Increment(ctx context.Context, prefixStr, key string, amo
 		return 0, err
 	}
 
-	// after increment, publish state‑of‑truth message so edges can sync
-	sot := types.SOTMsg{Prefix: prefixStr, APIKey: key, Total: total}
-	b, err := json.Marshal(sot)
-	if err != nil {
-		return total, nil
-	}
-	if rm.sotWriter != nil {
-		msg := kafka.Message{Key: []byte(prefixStr + ":" + key), Value: b}
-		if err := rm.sotWriter.WriteMessages(ctx, msg); err != nil {
-			log.Printf("hub kafka sot publish failed prefix=%s api_key=%s err=%v", prefixStr, key, err)
-		}
-	}
-
 	return total, nil
-}
-
-func (rm *RateManager) StartDeltaListener(ctx context.Context) error {
-	if rm.consumer == nil {
-		return nil
-	}
-	return rm.consumer.Start(ctx)
 }
 
 // calculateWindow retrieves the quota period from the read-only L1 config and performs window math.

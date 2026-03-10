@@ -12,9 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9" // Updated to v9
-	"github.com/segmentio/kafka-go"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type HubServer struct {
@@ -30,25 +29,20 @@ type HubServer struct {
 	submitTimeout    time.Duration
 	retryMax         int
 	retryBackoff     time.Duration
-	tierUpdateWriter *kafka.Writer
-	tierUpdateTopic  string
+	tierUpdateConn   *nats.Conn
+	tierUpdateSubj   string
+	configReloadChan string
 }
 
 var apiKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{3,128}$`)
 
-func NewHubServer(mdb *mongo.Database, rdb *redis.Client, configFilePath, authToken string, maxDelta int64, rateUpdateChannel, rateSOTChannel, hubUpdatesChannel string) *HubServer {
+func NewHubServer(rdb *redis.Client, configFilePath, authToken string, maxDelta int64, hubUpdatesChannel string) *HubServer {
 	cfg, err := NewConfigManager(configFilePath) // Load initial config from file
 	if err != nil {
 		panic("Failed to load config: " + err.Error())
 	}
 	if maxDelta <= 0 {
 		maxDelta = 10000
-	}
-	if rateUpdateChannel == "" {
-		rateUpdateChannel = types.DefaultRateUpdateChannel
-	}
-	if rateSOTChannel == "" {
-		rateSOTChannel = types.DefaultRateSOTChannel
 	}
 	if hubUpdatesChannel == "" {
 		hubUpdatesChannel = types.DefaultHubUpdatesChannel
@@ -57,8 +51,8 @@ func NewHubServer(mdb *mongo.Database, rdb *redis.Client, configFilePath, authTo
 	return NewHubServerWithManagers(
 		rdb,
 		cfg,
-		NewTierManager(mdb, rdb),
-		NewRateManager(rdb, cfg, rateUpdateChannel, rateSOTChannel),
+		NewTierManager(rdb),
+		NewRateManager(rdb, cfg),
 		authToken,
 		maxDelta,
 		hubUpdatesChannel,
@@ -82,43 +76,43 @@ func NewHubServerWithManagers(
 	}
 	queue := workers.NewBoundedQueue(512)
 	return &HubServer{
-		rdb:            rdb,
-		cfgManager:     cfg,
-		tierManager:    tierStore,
-		rateManager:    rateLimiter,
-		authToken:      authToken,
-		maxDelta:       maxDelta,
-		hubUpdatesChan: hubUpdatesChannel,
-		asyncQueue:     queue,
-		queueWorkers:   2,
-		submitTimeout:  25 * time.Millisecond,
-		retryMax:       1,
-		retryBackoff:   10 * time.Millisecond,
+		rdb:              rdb,
+		cfgManager:       cfg,
+		tierManager:      tierStore,
+		rateManager:      rateLimiter,
+		authToken:        authToken,
+		maxDelta:         maxDelta,
+		hubUpdatesChan:   hubUpdatesChannel,
+		asyncQueue:       queue,
+		queueWorkers:     2,
+		submitTimeout:    25 * time.Millisecond,
+		retryMax:         1,
+		retryBackoff:     10 * time.Millisecond,
+		configReloadChan: types.DefaultConfigReloadChannel,
 	}
 }
 
-func (s *HubServer) SetTierUpdateMessaging(brokers []string, topic string) {
-	clean := make([]string, 0, len(brokers))
-	for _, b := range brokers {
-		v := strings.TrimSpace(b)
-		if v != "" {
-			clean = append(clean, v)
-		}
+func (s *HubServer) SetConfigReloadChannel(channel string) {
+	if strings.TrimSpace(channel) == "" {
+		return
 	}
-	if len(clean) == 0 {
-		clean = []string{"localhost:9092"}
+	s.configReloadChan = channel
+}
+
+func (s *HubServer) SetTierUpdateMessaging(natsURL, subject string) {
+	if strings.TrimSpace(natsURL) == "" {
+		natsURL = nats.DefaultURL
 	}
-	if strings.TrimSpace(topic) == "" {
-		topic = "tier-updates"
+	if strings.TrimSpace(subject) == "" {
+		subject = "tier.updates"
 	}
-	s.tierUpdateTopic = topic
-	s.tierUpdateWriter = &kafka.Writer{
-		Addr:         kafka.TCP(clean...),
-		Topic:        topic,
-		Balancer:     &kafka.LeastBytes{},
-		BatchTimeout: 20 * time.Millisecond,
-		RequiredAcks: kafka.RequireOne,
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		log.Printf("hub nats connect failed url=%s err=%v", natsURL, err)
+		return
 	}
+	s.tierUpdateConn = nc
+	s.tierUpdateSubj = subject
 }
 
 func (s *HubServer) SetAsyncQueueConfig(workersCount int, submitTimeout time.Duration, retryMax int, retryBackoff time.Duration) {
@@ -140,11 +134,6 @@ func (s *HubServer) StartBackgroundWorkers(ctx context.Context) {
 	if s.asyncQueue != nil {
 		s.asyncQueue.Start(ctx, s.queueWorkers)
 	}
-	if s.rateManager != nil {
-		if err := s.rateManager.StartDeltaListener(ctx); err != nil {
-			log.Printf("hub delta listener start failed: %v", err)
-		}
-	}
 }
 
 func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +153,12 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "health":
 		s.handleHealth(w, r)
 		return
+	case "healthz":
+		s.handleHealth(w, r)
+		return
+	case "readyz":
+		s.handleReady(w, r)
+		return
 	}
 
 	if !s.authorize(r) {
@@ -174,6 +169,8 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch parts[0] {
 	case "config":
 		s.handleConfig(w, r)
+	case "config-reload":
+		s.handleConfigReload(w, r)
 	case "tiers":
 		s.handleTiers(w, r, ctx, parts[1:])
 	case "rate":
@@ -260,6 +257,39 @@ func (s *HubServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, "handleConfig", err)
 	}
 
+}
+
+func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfgMgr, ok := s.cfgManager.(*ConfigManager)
+	if !ok {
+		http.Error(w, "config reload unsupported", http.StatusNotImplemented)
+		return
+	}
+	if err := cfgMgr.ReloadFromFile(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.rdb != nil {
+		_ = s.rdb.Publish(r.Context(), s.configReloadChan, time.Now().UTC().Format(time.RFC3339Nano)).Err()
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.rdb == nil || s.rdb.Ping(r.Context()).Err() != nil {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
 
 func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx context.Context, params []string) {
@@ -357,8 +387,8 @@ func (s *HubServer) publishTierUpdate(prefix, apiKey, tierID string) {
 		tierID:   tierID,
 		retryMax: s.retryMax,
 		backoff:  s.retryBackoff,
-		writer:   s.tierUpdateWriter,
-		topic:    s.tierUpdateTopic,
+		conn:     s.tierUpdateConn,
+		subject:  s.tierUpdateSubj,
 	}
 	if err := s.asyncQueue.Submit(task, s.submitTimeout); err != nil {
 		log.Printf("hub tier update queue submit failed prefix=%s api_key=%s tier=%s err=%v", prefix, apiKey, tierID, err)
@@ -371,20 +401,18 @@ type tierUpdateTask struct {
 	tierID   string
 	retryMax int
 	backoff  time.Duration
-	writer   *kafka.Writer
-	topic    string
+	conn     *nats.Conn
+	subject  string
 }
 
 func (t *tierUpdateTask) Execute(ctx context.Context) error {
+	_ = ctx
 	payload := "TIER_UPDATE:" + t.prefix + ":" + t.apiKey + ":" + t.tierID
-	publishCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	if t.writer == nil {
+	if t.conn == nil {
 		return nil
 	}
-	msg := kafka.Message{Key: []byte(t.prefix + ":" + t.apiKey), Value: []byte(payload)}
-	if err := t.writer.WriteMessages(publishCtx, msg); err != nil {
-		log.Printf("hub tier update kafka publish failed prefix=%s api_key=%s tier=%s topic=%s err=%v", t.prefix, t.apiKey, t.tierID, t.topic, err)
+	if err := t.conn.Publish(t.subject, []byte(payload)); err != nil {
+		log.Printf("hub tier update nats publish failed prefix=%s api_key=%s tier=%s subject=%s err=%v", t.prefix, t.apiKey, t.tierID, t.subject, err)
 		return err
 	}
 	return nil

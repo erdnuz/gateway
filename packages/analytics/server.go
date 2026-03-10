@@ -12,8 +12,8 @@ import (
 
 	"gateway/packages/common/types"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
-	"github.com/segmentio/kafka-go"
 )
 
 //go:embed static/index.html static/style.css static/app.js
@@ -40,6 +40,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveFrontend(w, r)
 	case "/health":
 		s.handleHealth(w, r)
+	case "/healthz":
+		s.handleHealth(w, r)
+	case "/readyz":
+		s.handleReady(w, r)
 	case "/analytics/events":
 		if !s.authorize(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -107,6 +111,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.rdb == nil || s.rdb.Ping(r.Context()).Err() != nil {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ready"})
+}
+
 func (s *Server) storeBatch(ctx context.Context, batch []types.AnalyticsEntry) error {
 	pipe := s.rdb.Pipeline()
 	for _, e := range batch {
@@ -120,52 +136,42 @@ func (s *Server) storeBatch(ctx context.Context, batch []types.AnalyticsEntry) e
 	return err
 }
 
-// StartKafkaSubscriber consumes analytics events from Kafka and persists them in Redis.
-func (s *Server) StartKafkaSubscriber(ctx context.Context, brokers []string, topic, groupID string) error {
-	clean := make([]string, 0, len(brokers))
-	for _, b := range brokers {
-		v := strings.TrimSpace(b)
-		if v != "" {
-			clean = append(clean, v)
+// StartNATSSubscriber consumes analytics events from NATS and persists them in Redis.
+func (s *Server) StartNATSSubscriber(ctx context.Context, natsURL, subject, queue string) error {
+	if strings.TrimSpace(natsURL) == "" {
+		natsURL = nats.DefaultURL
+	}
+	if strings.TrimSpace(subject) == "" {
+		subject = "analytics.events"
+	}
+	if strings.TrimSpace(queue) == "" {
+		queue = "analytics-subscribers"
+	}
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		return err
+	}
+	sub, err := nc.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
+		var e types.AnalyticsEntry
+		if err := json.Unmarshal(msg.Data, &e); err != nil {
+			return
 		}
-	}
-	if len(clean) == 0 {
-		clean = []string{"localhost:9092"}
-	}
-	if strings.TrimSpace(topic) == "" {
-		topic = "analytics-events"
-	}
-	if strings.TrimSpace(groupID) == "" {
-		groupID = "analytics-subscribers"
-	}
-
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:  clean,
-		Topic:    topic,
-		GroupID:  groupID,
-		MinBytes: 1,
-		MaxBytes: 10e6,
+		_ = s.storeBatch(ctx, []types.AnalyticsEntry{e})
 	})
-
+	if err != nil {
+		nc.Close()
+		return err
+	}
+	if err := nc.Flush(); err != nil {
+		_ = sub.Unsubscribe()
+		nc.Close()
+		return err
+	}
 	go func() {
-		defer func() { _ = reader.Close() }()
-		for {
-			msg, err := reader.ReadMessage(ctx)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				continue
-			}
-
-			var e types.AnalyticsEntry
-			if err := json.Unmarshal(msg.Value, &e); err != nil {
-				continue
-			}
-			_ = s.storeBatch(ctx, []types.AnalyticsEntry{e})
-		}
+		<-ctx.Done()
+		_ = sub.Unsubscribe()
+		nc.Close()
 	}()
-
 	return nil
 }
 

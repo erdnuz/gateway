@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package gate.quota.v1;
+
+option go_package = "gateway/packages/common/types;types";
+
+message QuotaLeaseRequest {
+  string prefix = 1;
+  string service_id = 2;
+  string api_key = 3;
+  int64 requested_tokens = 4;
+}
+
+message QuotaLeaseResponse {
+  int64 granted_tokens = 1;
+  int64 lease_ttl_seconds = 2;
+  int64 remaining_global = 3;
+}
+
+service QuotaLeaseService {
+  rpc RequestQuotaLease(QuotaLeaseRequest) returns (QuotaLeaseResponse);
+}

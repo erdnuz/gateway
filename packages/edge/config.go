@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"gateway/packages/common/types"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type ConfigManager struct {
@@ -160,6 +162,42 @@ func (cm *ConfigManager) StartAutoRefresh(ctx context.Context, interval time.Dur
 					continue
 				}
 				cm.active.Store(cfg)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func (cm *ConfigManager) RefreshConfig() error {
+	cfg, err := cm.fetchConfig()
+	if err != nil {
+		return err
+	}
+	cm.active.Store(cfg)
+	return nil
+}
+
+func (cm *ConfigManager) StartConfigReloadSubscriber(ctx context.Context, rdb *redis.Client, channel string) {
+	if rdb == nil {
+		return
+	}
+	if channel == "" {
+		channel = types.DefaultConfigReloadChannel
+	}
+	go func() {
+		sub := rdb.Subscribe(ctx, channel)
+		defer sub.Close()
+		ch := sub.Channel()
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
+				if err := cm.RefreshConfig(); err != nil {
+					log.Printf("edge config pubsub refresh failed: %v", err)
+				}
 			case <-ctx.Done():
 				return
 			}

@@ -20,23 +20,28 @@ type ConfigManager struct {
 // NewConfigManager initializes the L1 cache from a JSON file.
 func NewConfigManager(filePath string) (*ConfigManager, error) {
 	cm := &ConfigManager{filePath: filePath}
+	if err := cm.ReloadFromFile(); err != nil {
+		return nil, err
+	}
+	return cm, nil
+}
 
-	data, err := os.ReadFile(filePath)
+func (cm *ConfigManager) ReloadFromFile() error {
+	data, err := os.ReadFile(cm.filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", filePath, err)
+		return fmt.Errorf("failed to read config file %s: %w", cm.filePath, err)
 	}
 
 	var cfg types.GatewayConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		// This is the most important change for debugging
-		return nil, fmt.Errorf("failed to decode %s: %w", filePath, err)
+		return fmt.Errorf("failed to decode %s: %w", cm.filePath, err)
 	}
 	if err := ValidateGatewayConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("invalid gateway config %s: %w", filePath, err)
+		return fmt.Errorf("invalid gateway config %s: %w", cm.filePath, err)
 	}
 
 	cm.active.Store(&cfg)
-	return cm, nil
+	return nil
 }
 
 // ValidateGatewayConfig performs structural and semantic validation before the
@@ -71,6 +76,9 @@ func ValidateGatewayConfig(cfg *types.GatewayConfig) error {
 		serviceSeen := map[string]struct{}{}
 		for si, service := range prefix.Services {
 			svcPath := fmt.Sprintf("%s.services[%d]", path, si)
+			if err := service.Validate(); err != nil {
+				return fmt.Errorf("%s is invalid: %w", svcPath, err)
+			}
 			svcID := strings.TrimSpace(service.ServiceID)
 			if svcID == "" {
 				return fmt.Errorf("%s.service_id is required", svcPath)
@@ -115,8 +123,11 @@ func ValidateGatewayConfig(cfg *types.GatewayConfig) error {
 					return fmt.Errorf("%s.cache.ttl must be > 0 when cache is enabled", svcPath)
 				}
 			}
-			if service.Analytics.SamplingRate < 0 || service.Analytics.SamplingRate > 1 {
-				return fmt.Errorf("%s.analytics.sampling_rate must be between 0 and 1", svcPath)
+
+			if service.SafetyTier != nil {
+				if _, exists := tierSeen[strings.TrimSpace(service.SafetyTier.TierID)]; exists {
+					return fmt.Errorf("%s.safety_tier.tier_id must not duplicate any regular tier id", svcPath)
+				}
 			}
 
 			hp := service.Failure.EffectiveHubPolicy()

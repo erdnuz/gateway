@@ -1,13 +1,4 @@
 services:
-  hub-mongo:
-    image: mongo:7.0
-    container_name: hub-mongo
-    restart: always
-    environment:
-      - MONGO_INITDB_DATABASE=gateway_db
-    volumes:
-      - mongo_data:/data/db
-
   hub-redis:
     image: redis:7-alpine
     container_name: hub-redis
@@ -15,7 +6,7 @@ services:
       redis-server
       --appendonly yes
       --appendfsync everysec
-      --maxmemory-policy volatile-lfu
+      --maxmemory-policy noeviction
     volumes:
       - hub_redis_data:/data
 
@@ -28,21 +19,12 @@ services:
     volumes:
       - edge_redis_data:/data
 
-  kafka:
-    image: apache/kafka:3.9.0
-    container_name: kafka
-    environment:
-      - KAFKA_NODE_ID=1
-      - KAFKA_PROCESS_ROLES=broker,controller
-      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
-      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
-      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats
+    command: ["-js"]
+    ports:
+      - "4222:4222"
 
   hub-server:
     build:
@@ -51,21 +33,25 @@ services:
     container_name: hub-server
     depends_on:
       - hub-redis
-      - hub-mongo
-      - kafka
+      - nats
     environment:
       - REDIS_ADDR=hub-redis:6379
-      - MONGO_URI=mongodb://hub-mongo:27017
-      - DB_NAME=gateway_db
       - CONFIG_FILE_PATH=/cmd/config.json
       - HUB_AUTH_TOKEN=${HUB_AUTH_TOKEN:?HUB_AUTH_TOKEN is required}
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - KAFKA_RATE_TOPIC=${KAFKA_RATE_TOPIC:-rate-updates}
-      - KAFKA_RATE_GROUP=${KAFKA_RATE_GROUP:-hub-rate-consumers}
-      - KAFKA_SOT_TOPIC=${KAFKA_SOT_TOPIC:-rate-sot}
-      - KAFKA_TIER_UPDATES_TOPIC=${KAFKA_TIER_UPDATES_TOPIC:-tier-updates}
+      - HUB_ENFORCE_REDIS_NOEVICTION=true
+      - HUB_GRPC_PORT=9090
+      - HUB_TLS_CERT_FILE=/certs/hub/tls.crt
+      - HUB_TLS_KEY_FILE=/certs/hub/tls.key
+      - HUB_TLS_CA_FILE=/certs/ca/ca.crt
+      - HUB_CONFIG_RELOAD_CHANNEL=gate:config:reload
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_TIER_UPDATES_SUBJECT=${NATS_TIER_UPDATES_SUBJECT:-tier.updates}
     ports:
       - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - ./certs/hub:/certs/hub:ro
+      - ./certs/ca:/certs/ca:ro
 
   edge-server:
     build:
@@ -75,23 +61,29 @@ services:
     depends_on:
       - hub-server
       - edge-redis
-      - kafka
+      - nats
     environment:
       - REDIS_ADDR=edge-redis:6379
       - HUB_ADDR=http://hub-server:8080
+      - HUB_GRPC_ADDR=hub-server:9090
+      - HUB_GRPC_SERVER_NAME=hub-server
       - HUB_AUTH_TOKEN=${HUB_AUTH_TOKEN:?HUB_AUTH_TOKEN is required}
+      - EDGE_TLS_CERT_FILE=/certs/edge/tls.crt
+      - EDGE_TLS_KEY_FILE=/certs/edge/tls.key
+      - EDGE_TLS_CA_FILE=/certs/ca/ca.crt
+      - EDGE_CONFIG_RELOAD_CHANNEL=gate:config:reload
       - EDGE_MAX_DELTA=${EDGE_MAX_DELTA:-100}
       - ANALYTICS_ENABLED=false
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - KAFKA_RATE_TOPIC=${KAFKA_RATE_TOPIC:-rate-updates}
-      - KAFKA_SOT_TOPIC=${KAFKA_SOT_TOPIC:-rate-sot}
-      - KAFKA_TIER_UPDATES_TOPIC=${KAFKA_TIER_UPDATES_TOPIC:-tier-updates}
-      - KAFKA_EDGE_GROUP=${KAFKA_EDGE_GROUP:-edge-consumers}
+      - NATS_URL=${NATS_URL:-nats://nats:4222}
+      - NATS_TIER_UPDATES_SUBJECT=${NATS_TIER_UPDATES_SUBJECT:-tier.updates}
+      - NATS_EDGE_QUEUE=${NATS_EDGE_QUEUE:-edge-tier-updates}
       - PORT=:8080
     ports:
       - "8082:8080"
+    volumes:
+      - ./certs/edge:/certs/edge:ro
+      - ./certs/ca:/certs/ca:ro
 
 volumes:
   hub_redis_data:
   edge_redis_data:
-  mongo_data:
