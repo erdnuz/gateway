@@ -50,6 +50,9 @@ func ValidateGatewayConfig(cfg *types.GatewayConfig) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
 	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
 	if len(cfg.Prefixes) == 0 {
 		return fmt.Errorf("config must include at least one prefix")
 	}

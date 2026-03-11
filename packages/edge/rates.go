@@ -15,19 +15,12 @@ type leaseCounter struct {
 	leaseSize int64
 }
 
-func rateLocalKey(p, k string) string   { return "rate-local:" + p + ":" + k }
-func rateSyncKey(p, k string) string    { return "rate-sync:" + p + ":" + k }
-func ratePendingKey(p, k string) string { return "rate-pending:" + p + ":" + k }
-func rateSeqKey(p, k string) string     { return "rate-seq:" + p + ":" + k }
-
 type RateManager struct {
-	maxDelta         int64
-	hardThresholdPct float64
-	leaseClient      QuotaLeaseRequester
-	leaseSize        int64
-	lowWaterPct      float64
-	leaseMap         sync.Map
-	refillGroup      singleflightGroup
+	leaseClient QuotaLeaseRequester
+	leaseSize   int64
+	lowWaterPct float64
+	leaseMap    sync.Map
+	refillGroup singleflightGroup
 }
 
 type RateManagerOptions struct {
@@ -37,10 +30,11 @@ type RateManagerOptions struct {
 }
 
 func DefaultRateManagerOptions() RateManagerOptions {
+	edgeDefaults := types.DefaultRuntimePolicy().Edge
 	return RateManagerOptions{
-		HardThresholdPct: 0.9,
-		LeaseSize:        100,
-		LowWaterPct:      0.2,
+		HardThresholdPct: edgeDefaults.RateHardThresholdPct,
+		LeaseSize:        edgeDefaults.RateLeaseSize,
+		LowWaterPct:      edgeDefaults.RateLowWaterPct,
 	}
 }
 
@@ -51,20 +45,21 @@ func NewRateManager(_ string, _ interface{}, maxDelta int64, channels ...string)
 }
 
 func NewRateManagerWithOptions(_ string, _ interface{}, maxDelta int64, options RateManagerOptions, _ ...string) *RateManager {
+	edgeDefaults := types.DefaultRuntimePolicy().Edge
 	if options.HardThresholdPct <= 0 || options.HardThresholdPct > 1 {
-		options.HardThresholdPct = 0.9
+		options.HardThresholdPct = edgeDefaults.RateHardThresholdPct
 	}
 	if options.LeaseSize <= 0 {
-		options.LeaseSize = 100
+		options.LeaseSize = edgeDefaults.RateLeaseSize
 	}
 	if options.LowWaterPct <= 0 || options.LowWaterPct >= 1 {
-		options.LowWaterPct = 0.2
+		options.LowWaterPct = edgeDefaults.RateLowWaterPct
 	}
 	return &RateManager{
-		maxDelta:         maxDelta,
-		hardThresholdPct: options.HardThresholdPct,
-		leaseSize:        options.LeaseSize,
-		lowWaterPct:      options.LowWaterPct,
+		// maxDelta/hard-threshold are currently enforced by lease semantics,
+		// while options are preserved for future policy expansion.
+		leaseSize:   options.LeaseSize,
+		lowWaterPct: options.LowWaterPct,
 	}
 }
 
@@ -113,13 +108,6 @@ func (rm *RateManager) IncrementWithService(ctx context.Context, prefix, service
 		return used, nil
 	}
 	return used, nil
-}
-
-// StartSOTSubscriber listens for hub "state of truth" messages and updates
-// the local sync key accordingly.  It returns immediately and spins up a
-// goroutine; caller should provide a context for cancellation.
-func (rm *RateManager) StartSOTSubscriber(context.Context) error {
-	return nil
 }
 
 func (rm *RateManager) IncrementSafety(_ context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
@@ -173,10 +161,6 @@ func (rm *RateManager) getLeaseCounter(prefix, apiKey string) *leaseCounter {
 	counter := &leaseCounter{leaseSize: rm.leaseSize}
 	actual, _ := rm.leaseMap.LoadOrStore(key, counter)
 	return actual.(*leaseCounter)
-}
-
-func (rm *RateManager) getSyncKey(p, k string) string {
-	return rateSyncKey(p, k)
 }
 
 type singleflightGroup struct {

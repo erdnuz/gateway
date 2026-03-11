@@ -8,6 +8,7 @@ import (
 	"gateway/packages/common/types"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,8 +18,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
-
-const maxCacheableResponseBytes = 1 << 20 // 1 MiB
 
 type contextKey int
 
@@ -59,27 +58,52 @@ func getRequestState(ctx context.Context) (*requestState, bool) {
 
 // EdgeServer acts as an HTTP gateway with a pipeline of middleware
 type EdgeServer struct {
-	configManager *ConfigManager
-	tierManager   *TierManager
-	rateManager   *RateManager
-	analyticsSink AnalyticsSink
-	rdb           *redis.Client
-	client        *http.Client
+	configManager             *ConfigManager
+	tierManager               *TierManager
+	rateManager               *RateManager
+	analyticsSink             AnalyticsSink
+	rdb                       *redis.Client
+	client                    *http.Client
+	maxCacheableResponseBytes int64
+}
+
+type EdgeServerOptions struct {
+	UpstreamClientTimeout     time.Duration
+	MaxCacheableResponseBytes int64
+	UpstreamMaxIdleConns      int
+	UpstreamIdleConnTimeout   time.Duration
 }
 
 // NewEdgeServer creates a new edge gateway server with necessary managers
 func NewEdgeServer(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *RateManager, analyticsSink AnalyticsSink, rdb *redis.Client) *EdgeServer {
+	return NewEdgeServerWithOptions(configMgr, tierMgr, rateMgr, analyticsSink, rdb, EdgeServerOptions{})
+}
+
+func NewEdgeServerWithOptions(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *RateManager, analyticsSink AnalyticsSink, rdb *redis.Client, options EdgeServerOptions) *EdgeServer {
+	if options.UpstreamClientTimeout <= 0 {
+		options.UpstreamClientTimeout = types.DefaultRuntimePolicy().Edge.UpstreamClientTimeout
+	}
+	if options.MaxCacheableResponseBytes <= 0 {
+		options.MaxCacheableResponseBytes = types.DefaultRuntimePolicy().Edge.CacheMaxObjectBytes
+	}
+	if options.UpstreamMaxIdleConns <= 0 {
+		options.UpstreamMaxIdleConns = types.DefaultRuntimePolicy().Edge.UpstreamMaxIdleConns
+	}
+	if options.UpstreamIdleConnTimeout <= 0 {
+		options.UpstreamIdleConnTimeout = types.DefaultRuntimePolicy().Edge.UpstreamIdleConnTimeout
+	}
 	es := &EdgeServer{
-		configManager: configMgr,
-		tierManager:   tierMgr,
-		rateManager:   rateMgr,
-		analyticsSink: analyticsSink,
-		rdb:           rdb,
+		configManager:             configMgr,
+		tierManager:               tierMgr,
+		rateManager:               rateMgr,
+		analyticsSink:             analyticsSink,
+		rdb:                       rdb,
+		maxCacheableResponseBytes: options.MaxCacheableResponseBytes,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: options.UpstreamClientTimeout,
 			Transport: &http.Transport{
-				MaxIdleConns:       100,
-				IdleConnTimeout:    90 * time.Second,
+				MaxIdleConns:       options.UpstreamMaxIdleConns,
+				IdleConnTimeout:    options.UpstreamIdleConnTimeout,
 				DisableKeepAlives:  false,
 				DisableCompression: false,
 			},
@@ -92,9 +116,6 @@ func NewEdgeServer(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *Rate
 func (s *EdgeServer) StartBackgroundWorkers(ctx context.Context) {
 	if s.rateManager != nil {
 		s.rateManager.StartBackgroundWorkers(ctx)
-		if err := s.rateManager.StartSOTSubscriber(ctx); err != nil {
-			log.Printf("edge SOT subscriber start failed: %v", err)
-		}
 	}
 	if s.tierManager != nil {
 		if err := s.tierManager.StartHubUpdateListener(ctx); err != nil {
@@ -255,10 +276,29 @@ func (s *EdgeServer) analyticsMiddleware(next http.HandlerFunc) http.HandlerFunc
 		defer func() {
 			entry.TotalLatency = time.Since(entry.Timestamp)
 			entry.ResponseCode = uint16(rw.statusCode)
-			s.analyticsSink.Capture(entry)
+			if shouldCaptureAnalytics(state.svcCfg) {
+				s.analyticsSink.Capture(entry)
+			}
 		}()
 		next(rw, r)
 	}
+}
+
+func shouldCaptureAnalytics(cfg *types.ServiceConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	if !cfg.Analytics.Enabled {
+		return false
+	}
+	rate := cfg.Analytics.SamplingRate
+	if rate <= 0 {
+		return false
+	}
+	if rate >= 1 {
+		return true
+	}
+	return rand.Float64() < rate
 }
 
 func (s *EdgeServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -278,26 +318,50 @@ func (s *EdgeServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		if ok && cfg != nil && cfg.CORS != nil {
+			origin := r.Header.Get("Origin")
+			allowedOrigin, originAllowed := resolveAllowedCORSOrigin(origin, cfg.CORS.AllowedOrigins)
 			// Handle CORS preflight
 			if r.Method == http.MethodOptions {
-				w.Header().Set("Access-Control-Allow-Origin", strings.Join(cfg.CORS.AllowedOrigins, ", "))
+				if originAllowed {
+					w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+				}
 				w.Header().Set("Access-Control-Allow-Methods", strings.Join(cfg.CORS.AllowedMethods, ", "))
 				w.Header().Set("Access-Control-Max-Age", fmt.Sprintf("%d", int(cfg.CORS.MaxAge.Seconds())))
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, Authorization")
+				if len(cfg.CORS.AllowedHeaders) > 0 {
+					w.Header().Set("Access-Control-Allow-Headers", strings.Join(cfg.CORS.AllowedHeaders, ", "))
+				} else {
+					w.Header().Set("Access-Control-Allow-Headers", strings.Join(types.DefaultRuntimePolicy().Hub.CORSAllowedHeaders, ", "))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 			// Set CORS headers for actual request
-			origin := r.Header.Get("Origin")
-			for _, allowed := range cfg.CORS.AllowedOrigins {
-				if allowed == "*" || allowed == origin {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
-					break
-				}
+			if originAllowed {
+				w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 			}
 		}
 		next(w, r)
 	}
+}
+
+func resolveAllowedCORSOrigin(origin string, allowedOrigins []string) (string, bool) {
+	trimmed := strings.TrimSpace(origin)
+	if trimmed == "" {
+		return "", false
+	}
+	for _, allowed := range allowedOrigins {
+		candidate := strings.TrimSpace(allowed)
+		if candidate == "" {
+			continue
+		}
+		if candidate == "*" {
+			return trimmed, true
+		}
+		if candidate == trimmed {
+			return trimmed, true
+		}
+	}
+	return "", false
 }
 
 func (s *EdgeServer) cacheMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -376,6 +440,7 @@ func (s *EdgeServer) rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc
 		usage, err := s.rateManager.IncrementWithService(r.Context(), state.prefixID, state.serviceID, apiKey, int64(tierPolicy.Quota), int64(cost))
 
 		if err != nil {
+			log.Printf("edge rate increment failed prefix=%s service=%s apiKey=%s err=%v", state.prefixID, state.serviceID, apiKey, err)
 			if state.svcCfg != nil {
 				hubPolicy := state.svcCfg.Failure.EffectiveHubPolicy()
 				if hubPolicy.AllowOnRateServiceError && state.svcCfg.SafetyTier != nil {
@@ -506,7 +571,7 @@ func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *t
 	}
 
 	// Cache-enabled GET path: read a bounded prefix first.
-	limitedBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCacheableResponseBytes+1))
+	limitedBody, readErr := io.ReadAll(io.LimitReader(resp.Body, s.maxCacheableResponseBytes+1))
 	if readErr != nil {
 		http.Error(w, "Failed to read response", http.StatusBadGateway)
 		return
@@ -515,7 +580,7 @@ func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *t
 	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(resp.StatusCode)
 
-	if len(limitedBody) <= maxCacheableResponseBytes {
+	if int64(len(limitedBody)) <= s.maxCacheableResponseBytes {
 		// Entire body fits in cache bound; safe to cache and write once.
 		s.cacheResponse(r, cfg, resp.StatusCode, resp.Header.Get("Content-Type"), limitedBody)
 		if _, writeErr := w.Write(limitedBody); writeErr != nil {

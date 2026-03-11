@@ -20,7 +20,7 @@ func TestIntegration_MultiEdgeMultiAnalyticsConsistency(t *testing.T) {
 		t.Fatalf("expected at least 2 analytics instances, got %d", h.analyticsCount())
 	}
 
-	const apiKey = "multi-topology-client"
+	const apiKey = "multitopologyclient"
 	h.setTier("v1", apiKey, "free")
 
 	const totalRequests = 10

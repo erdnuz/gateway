@@ -68,3 +68,18 @@ func TestEdgeRateManager_DeniesWhenNoLeaseAvailable(t *testing.T) {
 		t.Fatalf("expected synthetic over-limit usage, got %d", usage)
 	}
 }
+
+func TestDefaultRateManagerOptions_FollowsRuntimePolicyDefaults(t *testing.T) {
+	opts := DefaultRateManagerOptions()
+	defaults := types.DefaultRuntimePolicy().Edge
+
+	if opts.HardThresholdPct != defaults.RateHardThresholdPct {
+		t.Fatalf("expected hard threshold pct %f, got %f", defaults.RateHardThresholdPct, opts.HardThresholdPct)
+	}
+	if opts.LeaseSize != defaults.RateLeaseSize {
+		t.Fatalf("expected lease size %d, got %d", defaults.RateLeaseSize, opts.LeaseSize)
+	}
+	if opts.LowWaterPct != defaults.RateLowWaterPct {
+		t.Fatalf("expected low water pct %f, got %f", defaults.RateLowWaterPct, opts.LowWaterPct)
+	}
+}

@@ -376,6 +376,107 @@ func TestAnalyticsConfig(t *testing.T) {
 	testutils.AssertTrue(t, service.Analytics.SamplingRate >= 0 && service.Analytics.SamplingRate <= 1.0, "rate should be 0-1")
 }
 
+func TestEdgeServer_AnalyticsPolicyDisabledSkipsCapture(t *testing.T) {
+	m, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	defer rdb.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	svc := testutils.NewTestServiceConfig("svc")
+	svc.TargetURL = upstream.URL
+	svc.Analytics.Enabled = false
+
+	cfg := &types.GatewayConfig{
+		Prefixes: []types.PrefixConfig{{
+			Prefix:      "v1",
+			QuotaPeriod: time.Hour,
+			Services:    []types.ServiceConfig{svc},
+		}},
+	}
+
+	configMgr := &ConfigManager{}
+	configMgr.active.Store(cfg)
+	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
+	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	rateMgr := NewRateManager("", rdb, 100)
+	sink := &captureAnalyticsSink{}
+	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, sink, rdb)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/svc/resource", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	edgeServer.ServeHTTP(rr, req)
+
+	testutils.AssertEqual(t, http.StatusOK, rr.Code, "request should succeed")
+	if sink.Last() != nil {
+		t.Fatalf("analytics capture should be skipped when disabled")
+	}
+}
+
+func TestEdgeServer_AnalyticsPolicySamplingZeroSkipsCapture(t *testing.T) {
+	m, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	defer rdb.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	svc := testutils.NewTestServiceConfig("svc")
+	svc.TargetURL = upstream.URL
+	svc.Analytics.Enabled = true
+	svc.Analytics.SamplingRate = 0
+
+	cfg := &types.GatewayConfig{
+		Prefixes: []types.PrefixConfig{{
+			Prefix:      "v1",
+			QuotaPeriod: time.Hour,
+			Services:    []types.ServiceConfig{svc},
+		}},
+	}
+
+	configMgr := &ConfigManager{}
+	configMgr.active.Store(cfg)
+	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
+	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	rateMgr := NewRateManager("", rdb, 100)
+	sink := &captureAnalyticsSink{}
+	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, sink, rdb)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/svc/resource", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	edgeServer.ServeHTTP(rr, req)
+
+	testutils.AssertEqual(t, http.StatusOK, rr.Code, "request should succeed")
+	if sink.Last() != nil {
+		t.Fatalf("analytics capture should be skipped when sampling rate is zero")
+	}
+}
+
 // TestCORSConfig tests CORS configuration
 func TestCORSConfig(t *testing.T) {
 	config := testutils.NewTestGatewayConfig()
@@ -402,7 +503,6 @@ func TestGatewayConfigStructure(t *testing.T) {
 	config := testutils.NewTestGatewayConfig()
 
 	testutils.AssertTrue(t, len(config.Prefixes) > 0, "should have prefixes")
-	testutils.AssertFalse(t, config.UpdatedAt.IsZero(), "should have update time")
 
 	for _, prefix := range config.Prefixes {
 		testutils.AssertTrue(t, len(prefix.Prefix) > 0, "prefix name should be set")
@@ -451,7 +551,6 @@ func TestEdgeServer_CacheHitPathReachable(t *testing.T) {
 			QuotaPeriod: time.Hour,
 			Services:    []types.ServiceConfig{svc},
 		}},
-		UpdatedAt: time.Now(),
 	}
 
 	configMgr := &ConfigManager{}
@@ -522,7 +621,6 @@ func TestEdgeServer_CacheHitPreservesStatusCode(t *testing.T) {
 			QuotaPeriod: time.Hour,
 			Services:    []types.ServiceConfig{svc},
 		}},
-		UpdatedAt: time.Now(),
 	}
 
 	configMgr := &ConfigManager{}
@@ -563,6 +661,7 @@ func TestEdgeServer_CORSPreflightWithoutAPIKey(t *testing.T) {
 	svc.CORS = &types.CORSConfig{
 		AllowedOrigins: []string{"https://client.example"},
 		AllowedMethods: []string{"GET", "POST"},
+		AllowedHeaders: []string{"Content-Type", "X-Edge-Token"},
 		MaxAge:         time.Hour,
 	}
 
@@ -572,7 +671,6 @@ func TestEdgeServer_CORSPreflightWithoutAPIKey(t *testing.T) {
 			QuotaPeriod: time.Hour,
 			Services:    []types.ServiceConfig{svc},
 		}},
-		UpdatedAt: time.Now(),
 	}
 
 	configMgr := &ConfigManager{}
@@ -595,6 +693,9 @@ func TestEdgeServer_CORSPreflightWithoutAPIKey(t *testing.T) {
 	if got := rw.Header().Get("Access-Control-Allow-Methods"); got == "" {
 		t.Fatal("expected Access-Control-Allow-Methods header")
 	}
+	if got := rw.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type, X-Edge-Token" {
+		t.Fatalf("expected policy-driven allow-headers, got %q", got)
+	}
 }
 
 func TestEdgeServer_BoundedCachingBehavior(t *testing.T) {
@@ -609,7 +710,7 @@ func TestEdgeServer_BoundedCachingBehavior(t *testing.T) {
 
 	var smallCalls atomic.Int32
 	var largeCalls atomic.Int32
-	largeBody := strings.Repeat("a", maxCacheableResponseBytes+128)
+	largeBody := strings.Repeat("a", int(types.DefaultRuntimePolicy().Edge.CacheMaxObjectBytes)+128)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -635,7 +736,6 @@ func TestEdgeServer_BoundedCachingBehavior(t *testing.T) {
 			QuotaPeriod: time.Hour,
 			Services:    []types.ServiceConfig{svc},
 		}},
-		UpdatedAt: time.Now(),
 	}
 
 	configMgr := &ConfigManager{}
@@ -718,7 +818,6 @@ func TestEdgeServer_HubTierLookupFallbackToDefaultTier(t *testing.T) {
 			QuotaPeriod: time.Hour,
 			Services:    []types.ServiceConfig{svc},
 		}},
-		UpdatedAt: time.Now(),
 	}
 
 	configMgr := &ConfigManager{}
@@ -774,7 +873,6 @@ func TestEdgeServer_UpstreamRetriesOnConfiguredStatus(t *testing.T) {
 			QuotaPeriod: time.Hour,
 			Services:    []types.ServiceConfig{svc},
 		}},
-		UpdatedAt: time.Now(),
 	}
 
 	configMgr := &ConfigManager{}
@@ -822,7 +920,6 @@ func TestEdgeServer_UpstreamFailOpenFallbackResponse(t *testing.T) {
 			QuotaPeriod: time.Hour,
 			Services:    []types.ServiceConfig{svc},
 		}},
-		UpdatedAt: time.Now(),
 	}
 
 	configMgr := &ConfigManager{}
@@ -847,5 +944,75 @@ func TestEdgeServer_UpstreamFailOpenFallbackResponse(t *testing.T) {
 	}
 	if rw.Header().Get("X-Upstream-Error") != "true" {
 		t.Fatalf("expected X-Upstream-Error header, got %q", rw.Header().Get("X-Upstream-Error"))
+	}
+}
+
+func TestEdgeServer_UsesConfiguredMaxCacheableResponseBytes(t *testing.T) {
+	m, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	defer rdb.Close()
+
+	body := strings.Repeat("b", 80)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer upstream.Close()
+
+	svc := testutils.NewTestServiceConfig("svc")
+	svc.TargetURL = upstream.URL
+	svc.Cache = &types.CacheConfig{Enabled: true, TTL: time.Minute, CacheKey: "$PATH:$QUERY:$KEY:$ENC"}
+
+	cfg := &types.GatewayConfig{Prefixes: []types.PrefixConfig{{Prefix: "v1", QuotaPeriod: time.Hour, Services: []types.ServiceConfig{svc}}}}
+	configMgr := &ConfigManager{}
+	configMgr.active.Store(cfg)
+	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
+	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	rateMgr := NewRateManager("", rdb, 100)
+
+	edgeServer := NewEdgeServerWithOptions(configMgr, tierMgr, rateMgr, NoOpAnalyticsSink{}, rdb, EdgeServerOptions{MaxCacheableResponseBytes: 64})
+
+	req1 := httptest.NewRequest(http.MethodGet, "/v1/svc/large", nil)
+	req1.Header.Set("X-API-Key", "test-key")
+	res1 := httptest.NewRecorder()
+	edgeServer.ServeHTTP(res1, req1)
+	if res1.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("expected first response MISS, got %q", res1.Header().Get("X-Cache"))
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/svc/large", nil)
+	req2.Header.Set("X-API-Key", "test-key")
+	res2 := httptest.NewRecorder()
+	edgeServer.ServeHTTP(res2, req2)
+	if res2.Header().Get("X-Cache") != "MISS" {
+		t.Fatalf("expected uncached response due to configured size cap, got %q", res2.Header().Get("X-Cache"))
+	}
+}
+
+func TestEdgeServer_UsesDefaultUpstreamClientTimeoutFromPolicy(t *testing.T) {
+	edgeServer := NewEdgeServer(nil, nil, nil, NoOpAnalyticsSink{}, nil)
+	if edgeServer.client.Timeout != types.DefaultRuntimePolicy().Edge.UpstreamClientTimeout {
+		t.Fatalf("expected default upstream timeout %s, got %s", types.DefaultRuntimePolicy().Edge.UpstreamClientTimeout, edgeServer.client.Timeout)
+	}
+}
+
+func TestEdgeServer_UsesDefaultTransportPoolSettingsFromPolicy(t *testing.T) {
+	edgeServer := NewEdgeServer(nil, nil, nil, NoOpAnalyticsSink{}, nil)
+	transport, ok := edgeServer.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	if transport.MaxIdleConns != types.DefaultRuntimePolicy().Edge.UpstreamMaxIdleConns {
+		t.Fatalf("expected MaxIdleConns=%d, got %d", types.DefaultRuntimePolicy().Edge.UpstreamMaxIdleConns, transport.MaxIdleConns)
+	}
+	if transport.IdleConnTimeout != types.DefaultRuntimePolicy().Edge.UpstreamIdleConnTimeout {
+		t.Fatalf("expected IdleConnTimeout=%s, got %s", types.DefaultRuntimePolicy().Edge.UpstreamIdleConnTimeout, transport.IdleConnTimeout)
 	}
 }

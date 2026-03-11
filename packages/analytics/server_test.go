@@ -197,3 +197,76 @@ func TestAdvancedFiltersOnEvents(t *testing.T) {
 		t.Fatalf("expected filtered event response_code=502, got %d", payload.Events[0].ResponseCode)
 	}
 }
+
+func TestAnalyticsPolicyControlsQueryBounds(t *testing.T) {
+	mr, _ := miniredis.Run()
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	policy := types.AnalyticsRuntimePolicy{
+		DefaultEventsLimit:  2,
+		MaxEventsLimit:      3,
+		MaxEventsOffset:     100,
+		DefaultSummaryLimit: 1,
+		MaxSummaryLimit:     2,
+	}
+	srv := NewServerWithPolicy(rdb, types.DefaultAnalyticsKey, "token", policy)
+
+	for i := 0; i < 5; i++ {
+		e := types.AnalyticsEntry{Prefix: "v1", Service: "svc", Method: http.MethodGet, Tier: "free", ResponseCode: 200, Timestamp: time.Now()}
+		b, _ := json.Marshal(e)
+		if err := rdb.RPush(context.Background(), types.DefaultAnalyticsKey, b).Err(); err != nil {
+			t.Fatalf("failed to seed redis: %v", err)
+		}
+	}
+
+	defaultReq := httptest.NewRequest(http.MethodGet, "/analytics/events", nil)
+	defaultReq.Header.Set("Authorization", "Bearer token")
+	defaultRes := httptest.NewRecorder()
+	srv.ServeHTTP(defaultRes, defaultReq)
+	if defaultRes.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", defaultRes.Code)
+	}
+	var defaultPayload struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(defaultRes.Body.Bytes(), &defaultPayload); err != nil {
+		t.Fatalf("decode default events payload: %v", err)
+	}
+	if defaultPayload.Count != 2 {
+		t.Fatalf("expected default events limit=2 from policy, got %d", defaultPayload.Count)
+	}
+
+	maxReq := httptest.NewRequest(http.MethodGet, "/analytics/events?limit=999", nil)
+	maxReq.Header.Set("Authorization", "Bearer token")
+	maxRes := httptest.NewRecorder()
+	srv.ServeHTTP(maxRes, maxReq)
+	if maxRes.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", maxRes.Code)
+	}
+	var maxPayload struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(maxRes.Body.Bytes(), &maxPayload); err != nil {
+		t.Fatalf("decode max events payload: %v", err)
+	}
+	if maxPayload.Count != 3 {
+		t.Fatalf("expected max events limit=3 from policy, got %d", maxPayload.Count)
+	}
+
+	summaryReq := httptest.NewRequest(http.MethodGet, "/analytics/summary?limit=999", nil)
+	summaryReq.Header.Set("Authorization", "Bearer token")
+	summaryRes := httptest.NewRecorder()
+	srv.ServeHTTP(summaryRes, summaryReq)
+	if summaryRes.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", summaryRes.Code)
+	}
+	var summaryPayload struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(summaryRes.Body.Bytes(), &summaryPayload); err != nil {
+		t.Fatalf("decode summary payload: %v", err)
+	}
+	if summaryPayload.Count != 2 {
+		t.Fatalf("expected max summary limit=2 from policy, got %d", summaryPayload.Count)
+	}
+}

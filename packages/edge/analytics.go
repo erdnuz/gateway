@@ -12,10 +12,15 @@ import (
 
 type AnalyticsManager struct {
 	// Buffer avoids blocking request path when broker is slow.
-	buffer chan *types.AnalyticsEntry
-	nc     *nats.Conn
-	subj   string
-	write  func(context.Context, *types.AnalyticsEntry) error
+	buffer  chan *types.AnalyticsEntry
+	nc      *nats.Conn
+	subj    string
+	timeout time.Duration
+	write   func(context.Context, *types.AnalyticsEntry) error
+}
+
+type AnalyticsManagerOptions struct {
+	PublishTimeout time.Duration
 }
 
 type AnalyticsSink interface {
@@ -35,23 +40,32 @@ func NewAnalyticsManager(bufferSize int) *AnalyticsManager {
 }
 
 func NewAnalyticsManagerWithNATS(bufferSize int, natsURL, subject string) *AnalyticsManager {
+	return NewAnalyticsManagerWithNATSOptions(bufferSize, natsURL, subject, AnalyticsManagerOptions{})
+}
+
+func NewAnalyticsManagerWithNATSOptions(bufferSize int, natsURL, subject string, options AnalyticsManagerOptions) *AnalyticsManager {
+	runtimeDefaults := types.DefaultRuntimePolicy().Edge
 	if bufferSize <= 0 {
-		bufferSize = 1000 // Default buffer size
+		bufferSize = runtimeDefaults.AnalyticsBufferSize
 	}
 	if subject == "" {
-		subject = "analytics.events"
+		subject = types.DefaultRuntimePolicy().Analytics.NATSSubject
 	}
 	if natsURL == "" {
 		natsURL = nats.DefaultURL
+	}
+	if options.PublishTimeout <= 0 {
+		options.PublishTimeout = runtimeDefaults.AnalyticsPublishTimeout
 	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		log.Printf("edge analytics nats connect failed url=%s err=%v", natsURL, err)
 	}
 	mgr := &AnalyticsManager{
-		buffer: make(chan *types.AnalyticsEntry, bufferSize),
-		nc:     nc,
-		subj:   subject,
+		buffer:  make(chan *types.AnalyticsEntry, bufferSize),
+		nc:      nc,
+		subj:    subject,
+		timeout: options.PublishTimeout,
 	}
 	mgr.write = mgr.writeNATSMessage
 	return mgr
@@ -99,7 +113,7 @@ func (m *AnalyticsManager) StartPublisher(ctx context.Context) {
 				if entry == nil {
 					continue
 				}
-				writeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				writeCtx, cancel := context.WithTimeout(ctx, m.timeout)
 				err := m.write(writeCtx, entry)
 				cancel()
 				if err != nil {

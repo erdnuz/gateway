@@ -23,13 +23,19 @@ type Server struct {
 	rdb       *redis.Client
 	key       string
 	authToken string
+	policy    types.AnalyticsRuntimePolicy
 }
 
 func NewServer(rdb *redis.Client, key, authToken string) *Server {
+	return NewServerWithPolicy(rdb, key, authToken, types.AnalyticsRuntimePolicy{})
+}
+
+func NewServerWithPolicy(rdb *redis.Client, key, authToken string, policy types.AnalyticsRuntimePolicy) *Server {
 	if key == "" {
 		key = types.DefaultAnalyticsKey
 	}
-	return &Server{rdb: rdb, key: key, authToken: strings.TrimSpace(authToken)}
+	effective := types.RuntimePolicy{Analytics: policy}.Effective().Analytics
+	return &Server{rdb: rdb, key: key, authToken: strings.TrimSpace(authToken), policy: effective}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -142,10 +148,10 @@ func (s *Server) StartNATSSubscriber(ctx context.Context, natsURL, subject, queu
 		natsURL = nats.DefaultURL
 	}
 	if strings.TrimSpace(subject) == "" {
-		subject = "analytics.events"
+		subject = s.policy.NATSSubject
 	}
 	if strings.TrimSpace(queue) == "" {
-		queue = "analytics-subscribers"
+		queue = s.policy.NATSQueue
 	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
@@ -177,8 +183,8 @@ func (s *Server) StartNATSSubscriber(ctx context.Context, natsURL, subject, queu
 
 func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := parseIntWithBounds(r.URL.Query().Get("limit"), 100, 1, 5000)
-	offset := parseIntWithBounds(r.URL.Query().Get("offset"), 0, 0, 1_000_000)
+	limit := parseIntWithBounds(r.URL.Query().Get("limit"), s.policy.DefaultEventsLimit, 1, s.policy.MaxEventsLimit)
+	offset := parseIntWithBounds(r.URL.Query().Get("offset"), 0, 0, s.policy.MaxEventsOffset)
 
 	vals, err := s.readWindow(ctx, limit, offset)
 	if err != nil {
@@ -195,8 +201,8 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	limit := parseIntWithBounds(r.URL.Query().Get("limit"), 1000, 1, 10000)
-	offset := parseIntWithBounds(r.URL.Query().Get("offset"), 0, 0, 1_000_000)
+	limit := parseIntWithBounds(r.URL.Query().Get("limit"), s.policy.DefaultSummaryLimit, 1, s.policy.MaxSummaryLimit)
+	offset := parseIntWithBounds(r.URL.Query().Get("offset"), 0, 0, s.policy.MaxEventsOffset)
 	groupBy := r.URL.Query().Get("group_by")
 
 	vals, err := s.readWindow(ctx, limit, offset)

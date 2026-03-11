@@ -72,38 +72,12 @@
               "put_cost": 1,
               "delete_cost": 1,
               "other_cost": 1
-            },
-            {
-              "tier_id": "pro",
-              "quota": 200,
-              "get_cost": 1,
-              "post_cost": 1,
-              "put_cost": 1,
-              "delete_cost": 1,
-              "other_cost": 1
             }
           ],
           "transform": {
             "strip_prefix": true,
-            "add_headers": {
-              "X-Gate-Service": "auth-api"
-            },
-            "hide_headers": [
-              "X-Internal-Secret"
-            ]
-          },
-          "cors": {
-            "allowed_origins": [
-              "https://app.example.com"
-            ],
-            "allowed_methods": [
-              "GET",
-              "POST",
-              "PUT",
-              "DELETE",
-              "OPTIONS"
-            ],
-            "max_age": 300000000000
+            "add_headers": {},
+            "hide_headers": []
           },
           "analytics": {
             "enabled": true,
@@ -127,20 +101,14 @@
             },
             "upstream": {
               "mode": "fail-closed",
-              "max_retries": 1,
-              "retry_backoff": 100000000,
-              "retry_on_statuses": [
-                502,
-                503,
-                504
-              ],
+              "max_retries": 0,
+              "retry_backoff": 0,
+              "retry_on_statuses": [],
               "retry_non_idempotent_methods": false,
-              "attempt_timeout": 2000000000,
+              "attempt_timeout": 0,
               "fallback_status_code": 503,
               "fallback_body": "upstream unavailable",
-              "fallback_headers": {
-                "Content-Type": "text/plain"
-              }
+              "fallback_headers": {}
             }
           }
         }

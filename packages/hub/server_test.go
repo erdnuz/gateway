@@ -19,7 +19,6 @@ func TestHubConfigStructure(t *testing.T) {
 	config := testutils.NewTestGatewayConfig()
 
 	testutils.AssertTrue(t, len(config.Prefixes) > 0, "should have prefixes")
-	testutils.AssertFalse(t, config.UpdatedAt.IsZero(), "should have update time")
 
 	for _, prefix := range config.Prefixes {
 		testutils.AssertTrue(t, len(prefix.Prefix) > 0, "prefix should not be empty")
@@ -228,7 +227,6 @@ func newTestHubServer(t *testing.T) (*HubServer, func()) {
 				Services:    []types.ServiceConfig{testutils.NewTestServiceConfig("auth-api")},
 			},
 		},
-		UpdatedAt: time.Now(),
 	}
 
 	cfgMgr := &ConfigManager{}
@@ -251,6 +249,7 @@ func newTestHubServer(t *testing.T) (*HubServer, func()) {
 func TestHandleConfig_OK(t *testing.T) {
 	hs, cleanup := newTestHubServer(t)
 	defer cleanup()
+	hs.SetCORSAllowedOrigins([]string{"http://edge-a:8082"})
 
 	req := httptest.NewRequest(http.MethodGet, "/config", nil)
 	rw := httptest.NewRecorder()
@@ -266,6 +265,63 @@ func TestHandleConfig_OK(t *testing.T) {
 	}
 	if len(cfg.Prefixes) == 0 {
 		t.Fatal("expected at least one prefix in config response")
+	}
+}
+
+func TestHubCORSPreflightAllowed(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+	hs.SetCORSAllowedOrigins([]string{"http://edge-a:8082"})
+	hs.SetCORSPreflightPolicy([]string{"Authorization", "X-Edge-Token"}, []string{"GET", "POST"}, 12*time.Second)
+
+	req := httptest.NewRequest(http.MethodOptions, "/config", nil)
+	req.Header.Set("Origin", "http://edge-a:8082")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rw.Code, rw.Body.String())
+	}
+	if got := rw.Header().Get("Access-Control-Allow-Origin"); got != "http://edge-a:8082" {
+		t.Fatalf("expected allow-origin header for edge, got %q", got)
+	}
+	if got := rw.Header().Get("Access-Control-Allow-Headers"); got != "Authorization, X-Edge-Token" {
+		t.Fatalf("expected configured allow headers, got %q", got)
+	}
+	if got := rw.Header().Get("Access-Control-Max-Age"); got != "12" {
+		t.Fatalf("expected configured max age=12, got %q", got)
+	}
+}
+
+func TestHubCORSPreflightRejectedForUnknownOrigin(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+	hs.SetCORSAllowedOrigins([]string{"http://edge-a:8082"})
+
+	req := httptest.NewRequest(http.MethodOptions, "/config", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rw.Code, rw.Body.String())
+	}
+}
+
+func TestHubCORSActualRequestRejectedForUnknownOrigin(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+	hs.SetCORSAllowedOrigins([]string{"http://edge-a:8082"})
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Origin", "http://evil.example")
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rw.Code, rw.Body.String())
 	}
 }
 

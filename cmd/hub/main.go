@@ -15,7 +15,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/redis/go-redis/v9" // Updated to v9
 	"google.golang.org/grpc"
@@ -41,6 +40,23 @@ func main() {
 	if err != nil {
 		log.Fatalf("Config load error: %v", err)
 	}
+	runtimePolicy := cfgManager.Get().Runtime.Effective()
+	defaults := types.DefaultRuntimePolicy()
+	if len(cfgManager.Get().Runtime.Hub.CORSAllowedHeaders) == 0 {
+		log.Printf("warning: runtime.hub.cors_allowed_headers missing; using safe default %v", defaults.Hub.CORSAllowedHeaders)
+	}
+	if cfgManager.Get().Runtime.Hub.CORSPreflightMaxAge <= 0 {
+		log.Printf("warning: runtime.hub.cors_preflight_max_age missing; using safe default %s", defaults.Hub.CORSPreflightMaxAge)
+	}
+	if len(cfgManager.Get().Runtime.Hub.CORSAllowedMethods) == 0 {
+		log.Printf("warning: runtime.hub.cors_allowed_methods missing; using safe default %v", defaults.Hub.CORSAllowedMethods)
+	}
+	if strings.TrimSpace(cfgManager.Get().Runtime.Hub.APIKeyPattern) == "" {
+		log.Printf("warning: runtime.hub.api_key_pattern missing; using safe default %q", defaults.Hub.APIKeyPattern)
+	}
+	if cfgManager.Get().Runtime.Hub.MaxDelta <= 0 {
+		log.Printf("warning: runtime.hub.max_delta missing; using safe default %d", defaults.Hub.MaxDelta)
+	}
 
 	// 3. Infrastructure (Redis)
 	rdb := redis.NewClient(&redis.Options{Addr: config.String("REDIS_ADDR", "localhost:6379")})
@@ -59,7 +75,7 @@ func main() {
 	}
 	hubUpdatesChannel := config.String("HUB_UPDATES_CHANNEL", types.DefaultHubUpdatesChannel)
 	natsURL := config.String("NATS_URL", "nats://localhost:4222")
-	natsTierUpdatesSubject := config.String("NATS_TIER_UPDATES_SUBJECT", "tier.updates")
+	natsTierUpdatesSubject := config.String("NATS_TIER_UPDATES_SUBJECT", runtimePolicy.Hub.TierUpdatesSubject)
 
 	tierStore := hub.NewTierManager(rdb)
 
@@ -77,15 +93,20 @@ func main() {
 		tierStore,
 		rateManager,
 		hubAuthToken,
-		config.Int64("MAX_DELTA", 10000),
+		config.Int64("MAX_DELTA", runtimePolicy.Hub.MaxDelta),
 		hubUpdatesChannel,
 	)
+	server.SetCORSAllowedOrigins(splitCSV(config.String("HUB_EDGE_ALLOWED_ORIGINS", "http://localhost:8082")))
+	server.SetCORSPreflightPolicy(runtimePolicy.Hub.CORSAllowedHeaders, runtimePolicy.Hub.CORSAllowedMethods, runtimePolicy.Hub.CORSPreflightMaxAge)
+	if err := server.SetAPIKeyPattern(runtimePolicy.Hub.APIKeyPattern); err != nil {
+		log.Fatalf("invalid runtime.hub.api_key_pattern: %v", err)
+	}
 	server.SetConfigReloadChannel(config.String("HUB_CONFIG_RELOAD_CHANNEL", types.DefaultConfigReloadChannel))
 	server.SetAsyncQueueConfig(
-		config.Int("HUB_QUEUE_WORKERS", 2),
-		config.Duration("HUB_QUEUE_SUBMIT_TIMEOUT", 25*time.Millisecond),
-		config.Int("HUB_QUEUE_RETRY_MAX", 1),
-		config.Duration("HUB_QUEUE_RETRY_BACKOFF", 10*time.Millisecond),
+		config.Int("HUB_QUEUE_WORKERS", runtimePolicy.Hub.QueueWorkers),
+		config.Duration("HUB_QUEUE_SUBMIT_TIMEOUT", runtimePolicy.Hub.QueueSubmitTimeout),
+		config.Int("HUB_QUEUE_RETRY_MAX", runtimePolicy.Hub.QueueRetryMax),
+		config.Duration("HUB_QUEUE_RETRY_BACKOFF", runtimePolicy.Hub.QueueRetryBackoff),
 	)
 	server.SetTierUpdateMessaging(natsURL, natsTierUpdatesSubject)
 	server.StartBackgroundWorkers(ctx)
@@ -94,10 +115,11 @@ func main() {
 	hubTLSCertFile := config.String("HUB_TLS_CERT_FILE", "")
 	hubTLSKeyFile := config.String("HUB_TLS_KEY_FILE", "")
 	hubTLSCAFile := config.String("HUB_TLS_CA_FILE", "")
+	hubGRPCClientAuthMode := strings.TrimSpace(config.String("HUB_GRPC_CLIENT_AUTH_MODE", "require-and-verify"))
 	if hubTLSCertFile == "" || hubTLSKeyFile == "" || hubTLSCAFile == "" {
 		log.Fatal("HUB_TLS_CERT_FILE, HUB_TLS_KEY_FILE and HUB_TLS_CA_FILE must be set")
 	}
-	grpcServer, grpcErr := newHubGRPCServer(hubTLSCertFile, hubTLSKeyFile, hubTLSCAFile)
+	grpcServer, grpcErr := newHubGRPCServer(hubTLSCertFile, hubTLSKeyFile, hubTLSCAFile, hubGRPCClientAuthMode)
 	if grpcErr != nil {
 		log.Fatalf("Failed to create hub grpc server: %v", grpcErr)
 	}
@@ -123,8 +145,8 @@ func main() {
 		Addr:    port,
 		Handler: server,
 		// Set timeouts so hung clients don't eat your resources
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		ReadTimeout:  runtimePolicy.Hub.HTTPReadTimeout,
+		WriteTimeout: runtimePolicy.Hub.HTTPWriteTimeout,
 	}
 
 	go func() {
@@ -138,7 +160,7 @@ func main() {
 	<-ctx.Done()
 	log.Println("Shutdown signal received...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), runtimePolicy.Hub.HTTPShutdownTimeout)
 	defer cancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
@@ -146,6 +168,21 @@ func main() {
 	}
 	grpcServer.GracefulStop()
 	log.Println("Hub exited cleanly")
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		v := strings.TrimSpace(p)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func enforceNoEvictionPolicy(ctx context.Context, rdb *redis.Client) error {
@@ -164,7 +201,7 @@ func enforceNoEvictionPolicy(ctx context.Context, rdb *redis.Client) error {
 	return nil
 }
 
-func newHubGRPCServer(certFile, keyFile, caFile string) (*grpc.Server, error) {
+func newHubGRPCServer(certFile, keyFile, caFile, clientAuthMode string) (*grpc.Server, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
@@ -177,9 +214,23 @@ func newHubGRPCServer(certFile, keyFile, caFile string) (*grpc.Server, error) {
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("failed to parse hub CA certificate")
 	}
+	clientAuth := tls.RequireAndVerifyClientCert
+	switch strings.ToLower(strings.TrimSpace(clientAuthMode)) {
+	case "", "require-and-verify":
+		clientAuth = tls.RequireAndVerifyClientCert
+	case "require-any":
+		log.Printf("warning: HUB_GRPC_CLIENT_AUTH_MODE=require-any (development mode, certificate chain/EKU not verified)")
+		clientAuth = tls.RequireAnyClientCert
+	case "none", "no-client-cert":
+		log.Printf("warning: HUB_GRPC_CLIENT_AUTH_MODE=none (development mode, client certificate auth disabled)")
+		clientAuth = tls.NoClientCert
+	default:
+		return nil, fmt.Errorf("invalid HUB_GRPC_CLIENT_AUTH_MODE=%q (valid: require-and-verify, require-any, none)", clientAuthMode)
+	}
+
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   clientAuth,
 		ClientCAs:    pool,
 		MinVersion:   tls.VersionTLS13,
 	}

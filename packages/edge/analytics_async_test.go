@@ -97,3 +97,17 @@ func TestAnalyticsManager_PublisherNoWritesWhenEmpty(t *testing.T) {
 		t.Errorf("expected 0 publishes when buffer is empty, got %d", calls)
 	}
 }
+
+func TestAnalyticsManager_UsesConfiguredPublishTimeout(t *testing.T) {
+	mgr := NewAnalyticsManagerWithNATSOptions(10, "", "", AnalyticsManagerOptions{PublishTimeout: 125 * time.Millisecond})
+	if mgr.timeout != 125*time.Millisecond {
+		t.Fatalf("expected publish timeout from options, got %s", mgr.timeout)
+	}
+}
+
+func TestAnalyticsManager_UsesDefaultPublishTimeoutWhenMissing(t *testing.T) {
+	mgr := NewAnalyticsManagerWithNATSOptions(10, "", "", AnalyticsManagerOptions{})
+	if mgr.timeout != types.DefaultRuntimePolicy().Edge.AnalyticsPublishTimeout {
+		t.Fatalf("expected default publish timeout %s, got %s", types.DefaultRuntimePolicy().Edge.AnalyticsPublishTimeout, mgr.timeout)
+	}
+}

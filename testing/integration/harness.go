@@ -331,10 +331,11 @@ func (h *integrationHarness) startEdge(configPath string) {
 	configMgr.StartConfigReloadSubscriber(h.ctx, h.rdb, types.DefaultConfigReloadChannel)
 	tierMgr := edge.NewTierManagerWithOptions(h.hubHTTP.URL, h.rdb, types.DefaultHubUpdatesChannel, "", nil, edge.TierManagerOptions{
 		NATSURL:   h.natsURL,
-		NATSSubj:  "tier.updates",
+		NATSSubj:  types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
 		NATSQueue: "edge-tier-updates-it",
 	})
-	rateMgr := edge.NewRateManagerWithOptions(h.hubHTTP.URL, h.rdb, 100, edge.RateManagerOptions{HardThresholdPct: 0.9, LeaseSize: 5, LowWaterPct: 0.2})
+	rateDefaults := configMgr.Get().Runtime.Effective().Edge
+	rateMgr := edge.NewRateManagerWithOptions(h.hubHTTP.URL, h.rdb, 100, edge.RateManagerOptions{HardThresholdPct: rateDefaults.RateHardThresholdPct, LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
 	h.edgeRateMgr = rateMgr
 	h.edgeRateAll = append(h.edgeRateAll, rateMgr)
 
@@ -359,10 +360,11 @@ func (h *integrationHarness) startAdditionalEdge(configPath string) {
 	configMgr.StartConfigReloadSubscriber(h.ctx, h.rdb, types.DefaultConfigReloadChannel)
 	tierMgr := edge.NewTierManagerWithOptions(h.hubHTTP.URL, h.rdb, types.DefaultHubUpdatesChannel, "", nil, edge.TierManagerOptions{
 		NATSURL:   h.natsURL,
-		NATSSubj:  "tier.updates",
+		NATSSubj:  types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
 		NATSQueue: "edge-tier-updates-it-secondary",
 	})
-	rateMgr := edge.NewRateManagerWithOptions(h.hubHTTP.URL, h.rdb, 100, edge.RateManagerOptions{HardThresholdPct: 0.9, LeaseSize: 5, LowWaterPct: 0.2})
+	rateDefaults := configMgr.Get().Runtime.Effective().Edge
+	rateMgr := edge.NewRateManagerWithOptions(h.hubHTTP.URL, h.rdb, 100, edge.RateManagerOptions{HardThresholdPct: rateDefaults.RateHardThresholdPct, LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
 	h.edgeRateAll = append(h.edgeRateAll, rateMgr)
 
 	leaseClient, err := edge.NewGRPCQuotaLeaseClient(h.hubGRPCListener.Addr().String(), "hub-server", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, h.mtlsFiles.CAPath)
@@ -491,7 +493,6 @@ func (h *integrationHarness) setCacheEnabled(enabled bool) {
 		svc.Cache.TTL = 2 * time.Second
 	}
 	svc.Cache.CacheKey = "$method:$path"
-	cfg.UpdatedAt = time.Now().UTC()
 	if err := writeConfigFile(h.configPath, cfg); err != nil {
 		h.t.Fatalf("write config file: %v", err)
 	}
@@ -520,7 +521,6 @@ func (h *integrationHarness) setSafetyFallback(allow bool, quota uint32) {
 		OtherCost:  1,
 	}
 	svc.Failure.Hub.AllowOnRateServiceError = allow
-	cfg.UpdatedAt = time.Now().UTC()
 	if err := writeConfigFile(h.configPath, cfg); err != nil {
 		h.t.Fatalf("write config file: %v", err)
 	}

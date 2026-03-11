@@ -1,0 +1,64 @@
+services:
+  hub-redis:
+    image: redis:7-alpine
+    container_name: hub-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory-policy noeviction
+    volumes:
+      - hub_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats
+    command: ["-js"]
+
+  hub-server:
+    build:
+      context: ..
+      dockerfile: deployments/hub.Dockerfile
+    container_name: hub-server
+    depends_on:
+      hub-redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      - PORT=${HUB_PORT:-8080}
+      - HUB_GRPC_PORT=${HUB_GRPC_PORT:-9090}
+      - REDIS_ADDR=hub-redis:6379
+      - NATS_URL=nats://nats:4222
+      - NATS_TIER_UPDATES_SUBJECT=${NATS_TIER_UPDATES_SUBJECT:-tier.updates}
+      - HUB_UPDATES_CHANNEL=${HUB_UPDATES_CHANNEL:-hub_updates}
+      - HUB_CONFIG_RELOAD_CHANNEL=${HUB_CONFIG_RELOAD_CHANNEL:-gate:config:reload}
+      - HUB_ENFORCE_REDIS_NOEVICTION=${HUB_ENFORCE_REDIS_NOEVICTION:-true}
+      - MAX_DELTA=${MAX_DELTA:-10000}
+      - HUB_EDGE_ALLOWED_ORIGINS=${HUB_EDGE_ALLOWED_ORIGINS:-http://localhost:8082}
+      - HUB_GRPC_CLIENT_AUTH_MODE=${HUB_GRPC_CLIENT_AUTH_MODE:-require-and-verify}
+      - HUB_AUTH_TOKEN=${HUB_AUTH_TOKEN:?Set HUB_AUTH_TOKEN}
+      - CONFIG_FILE_PATH=/config/gateway-config.json
+      - HUB_TLS_CERT_FILE=/certs/hub/tls.crt
+      - HUB_TLS_KEY_FILE=/certs/hub/tls.key
+      - HUB_TLS_CA_FILE=/certs/ca/ca.crt
+    ports:
+      - "${HUB_PORT:-8080}:8080"
+      - "${HUB_GRPC_PORT:-9090}:9090"
+    volumes:
+      - ${HUB_CONFIG_PATH:-./hub.gateway-config.json}:/config/gateway-config.json:ro
+      - ./certs/hub:/certs/hub:ro
+      - ./certs/ca:/certs/ca:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+
+volumes:
+  hub_redis_data:

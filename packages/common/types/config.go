@@ -5,8 +5,7 @@ import "time"
 // GatewayConfig is the root object held by the Source of Truth.
 type GatewayConfig struct {
 	Prefixes []PrefixConfig `bson:"prefixes" json:"prefixes"`
-
-	UpdatedAt time.Time `bson:"updated_at" json:"updated_at"`
+	Runtime  RuntimePolicy  `bson:"runtime" json:"runtime,omitempty"`
 }
 
 func (cfg *GatewayConfig) Validate() error {
@@ -17,6 +16,9 @@ func (cfg *GatewayConfig) Validate() error {
 		if err := cfg.Prefixes[i].Validate(); err != nil {
 			return errConfig("prefixes[%d]: %v", i, err)
 		}
+	}
+	if err := cfg.Runtime.Validate(); err != nil {
+		return errConfig("runtime: %v", err)
 	}
 	return nil
 }

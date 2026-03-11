@@ -178,6 +178,13 @@ func (cm *ConfigManager) RefreshConfig() error {
 	return nil
 }
 
+func (cm *ConfigManager) SetHTTPClient(client *http.Client) {
+	if client == nil {
+		return
+	}
+	cm.client = client
+}
+
 func (cm *ConfigManager) StartConfigReloadSubscriber(ctx context.Context, rdb *redis.Client, channel string) {
 	if rdb == nil {
 		return

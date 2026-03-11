@@ -1,0 +1,67 @@
+services:
+  edge-redis:
+    image: redis:7-alpine
+    container_name: edge-redis
+    command: >
+      redis-server
+      --maxmemory-policy volatile-lfu
+    volumes:
+      - edge_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats
+    command: ["-js"]
+
+  edge-server:
+    build:
+      context: ..
+      dockerfile: deployments/edge.Dockerfile
+    container_name: edge-server
+    depends_on:
+      edge-redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      - PORT=:8080
+      - REDIS_ADDR=edge-redis:6379
+      - NATS_URL=nats://nats:4222
+      - NATS_TIER_UPDATES_SUBJECT=${NATS_TIER_UPDATES_SUBJECT:-tier.updates}
+      - NATS_EDGE_QUEUE=${NATS_EDGE_QUEUE:-edge-tier-updates}
+      - NATS_ANALYTICS_SUBJECT=${NATS_ANALYTICS_SUBJECT:-analytics.events}
+      - HUB_UPDATES_CHANNEL=${HUB_UPDATES_CHANNEL:-hub_updates}
+      - EDGE_CONFIG_RELOAD_CHANNEL=${EDGE_CONFIG_RELOAD_CHANNEL:-gate:config:reload}
+      - EDGE_MAX_DELTA=${EDGE_MAX_DELTA:-100}
+      - EDGE_LEASE_SIZE=${EDGE_LEASE_SIZE:-100}
+      - EDGE_LEASE_LOW_WATER_PERCENT=${EDGE_LEASE_LOW_WATER_PERCENT:-20}
+      - RATE_HARD_THRESHOLD_PERCENT=${RATE_HARD_THRESHOLD_PERCENT:-90}
+      - HUB_HTTP_TIMEOUT_SECONDS=${HUB_HTTP_TIMEOUT_SECONDS:-5}
+      - GATE_ANALYTICS_ENABLED=${GATE_ANALYTICS_ENABLED:-true}
+      - ANALYTICS_BUFFER_SIZE=${ANALYTICS_BUFFER_SIZE:-1000}
+      - HUB_ADDR=${HUB_ADDR:?Set HUB_ADDR (e.g. http://192.168.1.50:8080)}
+      - HUB_GRPC_ADDR=${HUB_GRPC_ADDR:?Set HUB_GRPC_ADDR (e.g. 192.168.1.50:9090)}
+      - HUB_GRPC_SERVER_NAME=${HUB_GRPC_SERVER_NAME:?Set HUB_GRPC_SERVER_NAME (TLS server name)}
+      - HUB_AUTH_TOKEN=${HUB_AUTH_TOKEN:?Set HUB_AUTH_TOKEN}
+      - EDGE_TLS_CERT_FILE=/certs/edge/tls.crt
+      - EDGE_TLS_KEY_FILE=/certs/edge/tls.key
+      - EDGE_TLS_CA_FILE=/certs/ca/ca.crt
+      - EDGE_BOOTSTRAP_CONFIG_FILE=${EDGE_BOOTSTRAP_CONFIG_FILE:-}
+    ports:
+      - "${EDGE_PORT:-8082}:8080"
+    volumes:
+      - ./certs/edge:/certs/edge:ro
+      - ./certs/ca:/certs/ca:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+
+volumes:
+  edge_redis_data:

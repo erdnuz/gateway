@@ -62,7 +62,7 @@
       "services": [
         {
           "service_id": "auth-api",
-          "target_url": "http://localhost:9000",
+          "target_url": "http://172.18.0.1:9000",
           "tiers": [
             {
               "tier_id": "free",

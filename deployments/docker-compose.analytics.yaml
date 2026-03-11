@@ -1,0 +1,51 @@
+services:
+  analytics-redis:
+    image: redis:7-alpine
+    container_name: analytics-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory-policy volatile-lfu
+    volumes:
+      - analytics_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats
+    command: ["-js"]
+
+  analytics-api:
+    build:
+      context: ..
+      dockerfile: deployments/analytics.Dockerfile
+    container_name: analytics-api
+    depends_on:
+      analytics-redis:
+        condition: service_healthy
+      nats:
+        condition: service_started
+    environment:
+      - PORT=:8091
+      - REDIS_ADDR=analytics-redis:6379
+      - ANALYTICS_REDIS_KEY=${ANALYTICS_REDIS_KEY:-rate-analytics}
+      - NATS_URL=nats://nats:4222
+      - NATS_ANALYTICS_SUBJECT=${NATS_ANALYTICS_SUBJECT:-analytics.events}
+      - NATS_ANALYTICS_QUEUE=${NATS_ANALYTICS_QUEUE:-analytics-subscribers}
+      - ANALYTICS_API_TOKEN=${ANALYTICS_API_TOKEN:?Set ANALYTICS_API_TOKEN}
+      - HUB_ADDR=${HUB_ADDR:?Set HUB_ADDR (for deployment-time reference to Hub IP)}
+    ports:
+      - "${ANALYTICS_PORT:-8091}:8091"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8091/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 8
+
+volumes:
+  analytics_redis_data:

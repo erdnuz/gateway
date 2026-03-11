@@ -30,7 +30,6 @@ func NewTestGatewayConfig() *types.GatewayConfig {
 				},
 			},
 		},
-		UpdatedAt: time.Now(),
 	}
 }
 
