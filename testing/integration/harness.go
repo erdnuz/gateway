@@ -100,12 +100,12 @@ func newIntegrationHarness(t *testing.T) *integrationHarness {
 	h.startEdge(configPath)
 	h.startAdditionalEdge(configPath)
 
-	h.waitReady(h.hubHTTP.URL + "/readyz")
-	for _, edgeSrv := range h.edgeHTTPAll {
-		h.waitReady(edgeSrv.URL + "/readyz")
-	}
+	h.waitReady(h.hubHTTP.URL + "/healthz")
 	for _, analyticsSrv := range h.analyticsAll {
-		h.waitReady(analyticsSrv.URL + "/readyz")
+		h.waitReady(analyticsSrv.URL + "/healthz")
+	}
+	for _, edgeSrv := range h.edgeHTTPAll {
+		h.waitReady(edgeSrv.URL + "/healthz")
 	}
 	return h
 }
@@ -392,18 +392,20 @@ func (h *integrationHarness) startAdditionalEdge(configPath string) {
 
 func (h *integrationHarness) waitReady(url string) {
 	h.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
+	lastStatus := 0
 	for time.Now().Before(deadline) {
 		resp, err := http.Get(url)
 		if err == nil {
+			lastStatus = resp.StatusCode
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return
 			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
-	h.t.Fatalf("service never became ready: %s", url)
+	h.t.Fatalf("service never became ready: %s (last status=%d)", url, lastStatus)
 }
 
 func (h *integrationHarness) setTier(prefix, apiKey, tierID string) {

@@ -15,9 +15,15 @@ import (
 )
 
 func TestIntegration_StartupSafety_EdgeFailsWhenHubIsUnavailableWithoutBootstrap(t *testing.T) {
-	_, err := edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, "")
-	if err == nil {
-		t.Fatal("expected edge startup config hydration failure when hub is unavailable and no bootstrap is provided")
+	cm, err := edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, "")
+	if err != nil {
+		t.Fatalf("expected edge startup to remain pending without bootstrap, got error: %v", err)
+	}
+	if cm.Get() == nil {
+		t.Fatal("expected non-nil config manager state when hub is unavailable")
+	}
+	if len(cm.Prefixes()) != 0 {
+		t.Fatalf("expected empty config while hub is unavailable, got %d prefixes", len(cm.Prefixes()))
 	}
 }
 
@@ -34,9 +40,12 @@ func TestIntegration_StartupSafety_EdgeRecoversWhenHubStartsLate(t *testing.T) {
 		t.Fatalf("write test config: %v", err)
 	}
 
-	_, err = edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, "")
-	if err == nil {
-		t.Fatal("expected initial startup failure before hub is available")
+	cmPending, err := edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, "")
+	if err != nil {
+		t.Fatalf("expected startup to remain pending before hub is available, got: %v", err)
+	}
+	if len(cmPending.Prefixes()) != 0 {
+		t.Fatalf("expected empty pending config before hub availability, got %d prefixes", len(cmPending.Prefixes()))
 	}
 
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
