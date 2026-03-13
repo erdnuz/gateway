@@ -104,7 +104,7 @@ func DefaultRuntimePolicy() RuntimePolicy {
 			AnalyticsPublishTimeout: 2 * time.Second,
 			RateHardThresholdPct:    0.9,
 			RateLeaseSize:           100,
-			RateLowWaterPct:         0.2,
+			RateLowWaterPct:         20,
 			CacheMaxObjectBytes:     1 << 20,
 			UpstreamClientTimeout:   30 * time.Second,
 			UpstreamMaxIdleConns:    100,
@@ -154,7 +154,7 @@ func (rp RuntimePolicy) Effective() RuntimePolicy {
 	if rp.Hub.QueueSubmitTimeout <= 0 {
 		rp.Hub.QueueSubmitTimeout = defaults.Hub.QueueSubmitTimeout
 	}
-	if rp.Hub.QueueRetryMax < 0 {
+	if rp.Hub.QueueRetryMax <= 0 {
 		rp.Hub.QueueRetryMax = defaults.Hub.QueueRetryMax
 	}
 	if rp.Hub.QueueRetryBackoff <= 0 {
@@ -185,7 +185,7 @@ func (rp RuntimePolicy) Effective() RuntimePolicy {
 	if rp.Edge.RateLeaseSize <= 0 {
 		rp.Edge.RateLeaseSize = defaults.Edge.RateLeaseSize
 	}
-	if rp.Edge.RateLowWaterPct <= 0 || rp.Edge.RateLowWaterPct >= 1 {
+	if rp.Edge.RateLowWaterPct <= 0 || rp.Edge.RateLowWaterPct > 100 {
 		rp.Edge.RateLowWaterPct = defaults.Edge.RateLowWaterPct
 	}
 	if rp.Edge.CacheMaxObjectBytes <= 0 {
@@ -298,8 +298,8 @@ func (p EdgeRuntimePolicy) Validate() error {
 	if p.RateLeaseSize < 0 {
 		return errConfig("rate_lease_size must be >= 0")
 	}
-	if p.RateLowWaterPct < 0 || p.RateLowWaterPct >= 1 {
-		return errConfig("rate_low_water_pct must be >= 0 and < 1")
+	if p.RateLowWaterPct < 0 || p.RateLowWaterPct > 100 {
+		return errConfig("rate_low_water_pct must be between 0 and 100")
 	}
 	if p.CacheMaxObjectBytes < 0 {
 		return errConfig("cache_max_object_bytes must be >= 0")

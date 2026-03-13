@@ -18,9 +18,54 @@ import (
 
 type ConfigManager struct {
 	active    atomic.Pointer[types.GatewayConfig]
+	indexes   atomic.Pointer[configIndexes]
 	hubAddr   string
 	authToken string
 	client    *http.Client
+}
+
+type configIndexes struct {
+	cfg          *types.GatewayConfig
+	prefixByPath map[string]*types.PrefixConfig
+	serviceByKey map[string]*types.ServiceConfig
+}
+
+func buildConfigIndexes(cfg *types.GatewayConfig) *configIndexes {
+	if cfg == nil {
+		return &configIndexes{
+			prefixByPath: map[string]*types.PrefixConfig{},
+			serviceByKey: map[string]*types.ServiceConfig{},
+		}
+	}
+	prefixByPath := make(map[string]*types.PrefixConfig, len(cfg.Prefixes))
+	serviceCount := 0
+	for i := range cfg.Prefixes {
+		serviceCount += len(cfg.Prefixes[i].Services)
+	}
+	serviceByKey := make(map[string]*types.ServiceConfig, serviceCount)
+	for i := range cfg.Prefixes {
+		p := &cfg.Prefixes[i]
+		prefixByPath[p.Prefix] = p
+		for j := range p.Services {
+			svc := &p.Services[j]
+			serviceByKey[serviceLookupKey(p.Prefix, svc.ServiceID)] = svc
+		}
+	}
+	return &configIndexes{cfg: cfg, prefixByPath: prefixByPath, serviceByKey: serviceByKey}
+}
+
+func serviceLookupKey(prefix, service string) string {
+	return prefix + "\x00" + service
+}
+
+func (cm *ConfigManager) ensureIndexes(cfg *types.GatewayConfig) *configIndexes {
+	idx := cm.indexes.Load()
+	if idx != nil && idx.cfg == cfg {
+		return idx
+	}
+	rebuilt := buildConfigIndexes(cfg)
+	cm.indexes.Store(rebuilt)
+	return rebuilt
 }
 
 // NewConfigManager performs a one-time hydration from the Hub on startup.
@@ -53,6 +98,7 @@ func NewConfigManagerWithFallback(hubAddr, authToken string, client *http.Client
 	}
 
 	cm.active.Store(cfg)
+	cm.indexes.Store(buildConfigIndexes(cfg))
 	return cm, nil
 }
 
@@ -78,32 +124,59 @@ func (cm *ConfigManager) Get() *types.GatewayConfig {
 	return cm.active.Load()
 }
 
+func (cm *ConfigManager) EdgePolicy() types.EdgeRuntimePolicy {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Runtime.Edge
+	}
+	return types.EdgeRuntimePolicy{}
+}
+
+func (cm *ConfigManager) AnalyticsPolicy() types.AnalyticsRuntimePolicy {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Runtime.Analytics
+	}
+	return types.AnalyticsRuntimePolicy{}
+}
+
+func (cm *ConfigManager) Prefixes() []types.PrefixConfig {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Prefixes
+	}
+	return nil
+}
+
+// TierUpdatesSubject is the only hub runtime setting needed by edge for tier
+// invalidation subscriptions.
+func (cm *ConfigManager) TierUpdatesSubject() string {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Runtime.Hub.TierUpdatesSubject
+	}
+	return ""
+}
+
 // Helper to find a specific prefix from the immutable state.
 func (cm *ConfigManager) GetPrefix(path string) (*types.PrefixConfig, bool) {
 	cfg := cm.Get()
 	if cfg == nil {
 		return nil, false
 	}
-
-	for i := range cfg.Prefixes {
-		if cfg.Prefixes[i].Prefix == path {
-			return &cfg.Prefixes[i], true
-		}
-	}
-	return nil, false
+	idx := cm.ensureIndexes(cfg)
+	prefix, ok := idx.prefixByPath[path]
+	return prefix, ok
 }
 
 // Helper to find a specific service config from the immutable state.
 func (cm *ConfigManager) GetServiceConfig(prefix, service string) (*types.ServiceConfig, error) {
-	prefixCfg, found := cm.GetPrefix(prefix)
-	if !found {
+	cfg := cm.Get()
+	if cfg == nil {
 		return nil, fmt.Errorf("prefix not found: %s", prefix)
 	}
-
-	for i := range prefixCfg.Services {
-		if prefixCfg.Services[i].ServiceID == service {
-			return &prefixCfg.Services[i], nil
-		}
+	idx := cm.ensureIndexes(cfg)
+	if _, found := idx.prefixByPath[prefix]; !found {
+		return nil, fmt.Errorf("prefix not found: %s", prefix)
+	}
+	if svc, ok := idx.serviceByKey[serviceLookupKey(prefix, service)]; ok {
+		return svc, nil
 	}
 	return nil, fmt.Errorf("service not found: %s", service)
 }
@@ -162,6 +235,7 @@ func (cm *ConfigManager) StartAutoRefresh(ctx context.Context, interval time.Dur
 					continue
 				}
 				cm.active.Store(cfg)
+				cm.indexes.Store(buildConfigIndexes(cfg))
 			case <-ctx.Done():
 				return
 			}
@@ -175,6 +249,7 @@ func (cm *ConfigManager) RefreshConfig() error {
 		return err
 	}
 	cm.active.Store(cfg)
+	cm.indexes.Store(buildConfigIndexes(cfg))
 	return nil
 }
 

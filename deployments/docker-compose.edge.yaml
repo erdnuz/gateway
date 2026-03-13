@@ -13,9 +13,9 @@ services:
       timeout: 3s
       retries: 5
 
-  nats:
+  nats-tier:
     image: nats:2.10-alpine
-    container_name: nats
+    container_name: nats-tier
     command: ["-js"]
 
   edge-server:
@@ -26,12 +26,13 @@ services:
     depends_on:
       edge-redis:
         condition: service_healthy
-      nats:
+      nats-tier:
         condition: service_started
     environment:
       - PORT=:8080
       - REDIS_ADDR=edge-redis:6379
-      - NATS_URL=nats://nats:4222
+      - NATS_TIER_URL=${NATS_TIER_URL:-nats://nats-tier:4222}
+      - NATS_ANALYTICS_URL=${NATS_ANALYTICS_URL:?Set NATS_ANALYTICS_URL (e.g. nats://<analytics-host>:4222)}
       - NATS_TIER_UPDATES_SUBJECT=${NATS_TIER_UPDATES_SUBJECT:-tier.updates}
       - NATS_EDGE_QUEUE=${NATS_EDGE_QUEUE:-edge-tier-updates}
       - NATS_ANALYTICS_SUBJECT=${NATS_ANALYTICS_SUBJECT:-analytics.events}

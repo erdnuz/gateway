@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"encoding/json"
 	"gateway/packages/common/types"
 	testutils "gateway/testing"
 	"net/http"
@@ -1014,5 +1015,26 @@ func TestEdgeServer_UsesDefaultTransportPoolSettingsFromPolicy(t *testing.T) {
 	}
 	if transport.IdleConnTimeout != types.DefaultRuntimePolicy().Edge.UpstreamIdleConnTimeout {
 		t.Fatalf("expected IdleConnTimeout=%s, got %s", types.DefaultRuntimePolicy().Edge.UpstreamIdleConnTimeout, transport.IdleConnTimeout)
+	}
+}
+
+func TestEdgeServer_AnalyticsMetricsEndpoint(t *testing.T) {
+	mgr := NewAnalyticsManager(4)
+	mgr.Capture(&types.AnalyticsEntry{Prefix: "v1", Service: "svc", Method: http.MethodGet})
+
+	edgeServer := NewEdgeServer(nil, nil, nil, mgr, nil)
+	req := httptest.NewRequest(http.MethodGet, "/analytics/metrics", nil)
+	rw := httptest.NewRecorder()
+	edgeServer.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rw.Code)
+	}
+	var stats AnalyticsManagerStats
+	if err := json.NewDecoder(rw.Body).Decode(&stats); err != nil {
+		t.Fatalf("decode analytics stats: %v", err)
+	}
+	if stats.Captured != 1 || stats.BufferDepth != 1 {
+		t.Fatalf("unexpected analytics stats payload: %+v", stats)
 	}
 }

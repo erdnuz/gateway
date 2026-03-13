@@ -35,18 +35,18 @@ var hybridWindowLua = redis.NewScript(`
 
 type RateManager struct {
 	rdb    *redis.Client
-	config *ConfigManager
+	config ConfigRegistry
 }
 
 type RateManagerOptions struct{}
 
 var _ types.AuthoritativeStore = (*RateManager)(nil)
 
-func NewRateManager(rdb *redis.Client, config *ConfigManager, _ ...string) *RateManager {
+func NewRateManager(rdb *redis.Client, config ConfigRegistry, _ ...string) *RateManager {
 	return &RateManager{rdb: rdb, config: config}
 }
 
-func NewRateManagerWithOptions(rdb *redis.Client, config *ConfigManager, _ RateManagerOptions, _ ...string) *RateManager {
+func NewRateManagerWithOptions(rdb *redis.Client, config ConfigRegistry, _ RateManagerOptions, _ ...string) *RateManager {
 	return &RateManager{rdb: rdb, config: config}
 }
 
@@ -70,14 +70,11 @@ func (rm *RateManager) Increment(ctx context.Context, prefixStr, key string, amo
 
 // calculateWindow retrieves the quota period from the read-only L1 config and performs window math.
 func (rm *RateManager) calculateWindow(prefixStr string) (size, curr, prev uint64, weight float64, err error) {
-	cfg := rm.config.Get() // O(1) atomic load
-	var quotaPeriod time.Duration
-	for _, p := range cfg.Prefixes {
-		if p.Prefix == prefixStr {
-			quotaPeriod = p.QuotaPeriod
-			break
-		}
+	p, ok := rm.config.FindPrefix(prefixStr)
+	if !ok {
+		return 0, 0, 0, 0, errors.New("quota period not found for prefix: " + prefixStr)
 	}
+	quotaPeriod := p.QuotaPeriod
 
 	if quotaPeriod <= 0 {
 		return 0, 0, 0, 0, errors.New("quota period not found for prefix: " + prefixStr)

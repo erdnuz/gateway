@@ -82,21 +82,35 @@ func TestIntegration_CacheHitAndAnalyticsQuery(t *testing.T) {
 		t.Fatalf("expected positive total latencies; miss=%v hit=%v", miss.TotalLatency, hit.TotalLatency)
 	}
 
-	resp, err := http.Get(h.analyticsSrv.URL + "/analytics/summary?limit=20")
-	if err != nil {
-		t.Fatalf("summary query failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("summary status=%d", resp.StatusCode)
-	}
 	var summary struct {
 		TotalEntries    int     `json:"count"`
 		CacheHitRatePct float64 `json:"cache_hit_rate_pct"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil {
-		t.Fatalf("decode summary: %v", err)
+	summaryURL := h.analyticsSrv.URL + "/analytics/summary?service=auth-api&limit=20"
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		resp, err := http.Get(summaryURL)
+		if err != nil {
+			t.Fatalf("summary query failed: %v", err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil {
+				_ = resp.Body.Close()
+				t.Fatalf("decode summary: %v", err)
+			}
+			_ = resp.Body.Close()
+			break
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("summary status=%d", resp.StatusCode)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("summary endpoint stayed in processing state too long")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+
 	if summary.TotalEntries < 2 {
 		t.Fatalf("expected >=2 analytics entries got %d", summary.TotalEntries)
 	}

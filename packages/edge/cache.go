@@ -2,11 +2,12 @@ package edge
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
+	"hash/fnv"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"gateway/packages/common/types"
 
@@ -14,8 +15,37 @@ import (
 )
 
 type CacheManager struct {
-	rdb *redis.Client
-	cfg types.CacheConfig
+	rdb          *redis.Client
+	cfg          types.CacheConfig
+	templatePlan []cacheTemplatePart
+}
+
+type cacheToken int
+
+const (
+	tokenLiteral cacheToken = iota
+	tokenPath
+	tokenQuery
+	tokenAPIKey
+	tokenEncoding
+	tokenMethod
+)
+
+type cacheTemplatePart struct {
+	token   cacheToken
+	literal string
+}
+
+const edgeCacheRedisTimeout = 150 * time.Millisecond
+
+func withCacheRedisTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithTimeout(context.Background(), edgeCacheRedisTimeout)
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, edgeCacheRedisTimeout)
 }
 
 type CachedResponse struct {
@@ -26,15 +56,18 @@ type CachedResponse struct {
 
 func NewCacheManager(rdb *redis.Client, cfg types.CacheConfig) *CacheManager {
 	return &CacheManager{
-		rdb: rdb,
-		cfg: cfg,
+		rdb:          rdb,
+		cfg:          cfg,
+		templatePlan: compileCacheTemplate(cfg.CacheKey),
 	}
 }
 
 // CheckCache retrieves cached response metadata from Redis.
 func (cm *CacheManager) CheckCache(ctx context.Context, request *http.Request, apiKey string) (*CachedResponse, bool, error) {
 	key := cm.generateCacheKey(request, apiKey)
-	val, err := cm.rdb.Get(ctx, key).Bytes()
+	redisCtx, cancel := withCacheRedisTimeout(ctx)
+	defer cancel()
+	val, err := cm.rdb.Get(redisCtx, key).Bytes()
 	if err == redis.Nil {
 		return nil, false, nil
 	}
@@ -70,31 +103,88 @@ func (cm *CacheManager) SetCache(ctx context.Context, request *http.Request, api
 	if err != nil {
 		return err
 	}
-	return cm.rdb.Set(ctx, key, b, cm.cfg.TTL).Err()
+	redisCtx, cancel := withCacheRedisTimeout(ctx)
+	defer cancel()
+	return cm.rdb.Set(redisCtx, key, b, cm.cfg.TTL).Err()
 }
 
 func (cm *CacheManager) generateCacheKey(r *http.Request, apiKey string) string {
-	// Canonicalize Query: Sort keys alphabetically so ?a=1&b=2 is same as ?b=2&a=1
-	query := r.URL.Query().Encode()
-
-	replacements := map[string]string{
-		"$PATH":   r.URL.Path,
-		"$path":   r.URL.Path,
-		"$QUERY":  query,
-		"$query":  query,
-		"$KEY":    apiKey,
-		"$key":    apiKey,
-		"$ENC":    r.Header.Get("Accept-Encoding"),
-		"$enc":    r.Header.Get("Accept-Encoding"),
-		"$METHOD": r.Method,
-		"$method": r.Method,
+	h := fnv.New64a()
+	path := r.URL.Path
+	method := r.Method
+	encoding := r.Header.Get("Accept-Encoding")
+	var query string
+	queryResolved := false
+	for _, part := range cm.templatePlan {
+		switch part.token {
+		case tokenLiteral:
+			_, _ = h.Write([]byte(part.literal))
+		case tokenPath:
+			_, _ = h.Write([]byte(path))
+		case tokenMethod:
+			_, _ = h.Write([]byte(method))
+		case tokenEncoding:
+			_, _ = h.Write([]byte(encoding))
+		case tokenAPIKey:
+			_, _ = h.Write([]byte(apiKey))
+		case tokenQuery:
+			if !queryResolved {
+				// Canonicalized query preserves stable keys regardless of param ordering.
+				query = r.URL.Query().Encode()
+				queryResolved = true
+			}
+			_, _ = h.Write([]byte(query))
+		}
 	}
+	var b strings.Builder
+	b.Grow(3 + len(path) + 1 + 16)
+	b.WriteString("c:")
+	b.WriteString(path)
+	b.WriteByte(':')
+	b.WriteString(strconv.FormatUint(h.Sum64(), 16))
+	return b.String()
+}
 
-	generated := cm.cfg.CacheKey
-	for keyword, value := range replacements {
-		generated = strings.ReplaceAll(generated, keyword, value)
+func compileCacheTemplate(tpl string) []cacheTemplatePart {
+	if tpl == "" {
+		tpl = "$method:$path"
 	}
+	parts := make([]cacheTemplatePart, 0, 8)
+	for len(tpl) > 0 {
+		dollar := strings.IndexByte(tpl, '$')
+		if dollar < 0 {
+			parts = append(parts, cacheTemplatePart{token: tokenLiteral, literal: tpl})
+			break
+		}
+		if dollar > 0 {
+			parts = append(parts, cacheTemplatePart{token: tokenLiteral, literal: tpl[:dollar]})
+			tpl = tpl[dollar:]
+		}
+		matched, token, size := matchCacheToken(tpl)
+		if !matched {
+			parts = append(parts, cacheTemplatePart{token: tokenLiteral, literal: "$"})
+			tpl = tpl[1:]
+			continue
+		}
+		parts = append(parts, cacheTemplatePart{token: token})
+		tpl = tpl[size:]
+	}
+	return parts
+}
 
-	hash := sha256.Sum256([]byte(generated))
-	return fmt.Sprintf("c:%s:%x", r.URL.Path, hash[:16])
+func matchCacheToken(s string) (bool, cacheToken, int) {
+	switch {
+	case strings.HasPrefix(s, "$PATH"), strings.HasPrefix(s, "$path"):
+		return true, tokenPath, 5
+	case strings.HasPrefix(s, "$QUERY"), strings.HasPrefix(s, "$query"):
+		return true, tokenQuery, 6
+	case strings.HasPrefix(s, "$KEY"), strings.HasPrefix(s, "$key"):
+		return true, tokenAPIKey, 4
+	case strings.HasPrefix(s, "$ENC"), strings.HasPrefix(s, "$enc"):
+		return true, tokenEncoding, 4
+	case strings.HasPrefix(s, "$METHOD"), strings.HasPrefix(s, "$method"):
+		return true, tokenMethod, 7
+	default:
+		return false, tokenLiteral, 0
+	}
 }

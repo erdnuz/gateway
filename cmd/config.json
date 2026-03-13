@@ -30,7 +30,7 @@
       "analytics_publish_timeout": 2000000000,
       "rate_hard_threshold_pct": 0.9,
       "rate_lease_size": 100,
-      "rate_low_water_pct": 0.2,
+      "rate_low_water_pct": 20,
       "cache_max_object_bytes": 1048576,
       "upstream_client_timeout": 30000000000,
       "upstream_max_idle_conns": 100,
@@ -59,6 +59,12 @@
     {
       "prefix": "v1",
       "quota_period": 60000000000,
+      "leasing": {
+        "lease_quantum": 100,
+        "low_water_pct": 20,
+        "lease_ttl": 10000000000,
+        "renewal_buffer": 2000000000
+      },
       "services": [
         {
           "service_id": "auth-api",

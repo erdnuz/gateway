@@ -3,152 +3,171 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gate Pulse Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Syne:wght@600;700&display=swap" rel="stylesheet">
+  <title>Gate Analytics</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <div class="bg-gradient" aria-hidden="true"></div>
-  <header class="shell hero">
-    <p class="kicker">GATE PERFORMANCE</p>
-    <h1>Owner Dashboard</h1>
-    <p class="subtitle">Real-time visibility into rate limiting behavior, latency, and upstream health.</p>
-  </header>
+  <main class="app-shell">
+    <header class="hero panel">
+      <p class="eyebrow">Gate Analytics</p>
+      <h1>Analytics Contract Dashboard</h1>
+      <p class="subtle">Minimal summary and contract series view with dynamic edge traffic visibility.</p>
+      <p id="authBanner" class="auth-banner" role="alert" hidden>Authentication failed. Update token and refresh.</p>
+    </header>
 
-  <main class="shell layout">
-    <section class="panel controls">
-      <h2>Query Controls</h2>
-      <div class="grid">
-        <label>
-          API Base URL
-          <input id="apiBase" type="text" placeholder="http://localhost:8091" />
+    <section class="panel controls" aria-label="filters">
+      <h2>Filters</h2>
+      <div class="controls-grid">
+        <label class="col-6">
+          API Base
+          <input id="apiBase" type="text" placeholder="http://localhost:8091">
         </label>
-        <label>
+        <label class="col-6">
           Bearer Token
-          <input id="token" type="password" placeholder="optional" />
+          <input id="token" type="password" placeholder="token or Bearer token">
         </label>
-        <label>
-          Window Limit
-          <input id="limit" type="number" min="1" max="10000" value="500" />
+
+        <label class="col-2">
+          Interval
+          <select id="interval">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m" selected>15m</option>
+            <option value="1h">1h</option>
+          </select>
         </label>
-        <label>
-          Service Filter
-          <input id="service" type="text" placeholder="auth-api" />
+        <label class="col-5">
+          Start
+          <input id="filterStart" type="datetime-local">
         </label>
-        <label>
-          Prefix Filter
-          <input id="prefix" type="text" placeholder="v1" />
+        <label class="col-5">
+          End
+          <input id="filterEnd" type="datetime-local">
         </label>
-        <label>
-          Tier Filter
-          <input id="tier" type="text" placeholder="free" />
+
+        <label class="col-3">
+          Prefix (comma-separated)
+          <input id="filterPrefix" type="text" placeholder="/v1,/v2">
         </label>
-        <label>
-          Method Filter
-          <input id="method" type="text" placeholder="GET" />
+        <label class="col-3">
+          Service (comma-separated)
+          <input id="filterService" type="text" placeholder="svc-a,svc-b">
         </label>
-        <label>
-          Response Code Min
-          <input id="responseCodeMin" type="number" min="100" max="599" placeholder="400" />
+        <label class="col-3">
+          Edge ID (comma-separated)
+          <input id="filterEdge" type="text" placeholder="edge-a,edge-b">
         </label>
-        <label>
-          Response Code Max
-          <input id="responseCodeMax" type="number" min="100" max="599" placeholder="599" />
+        <label class="col-3">
+          Tier (comma-separated)
+          <input id="filterTier" type="text" placeholder="free,pro">
         </label>
-        <label>
+        <label class="col-3">
+          Method (comma-separated)
+          <input id="filterMethod" type="text" placeholder="GET,POST">
+        </label>
+
+        <label class="col-2">
+          Response Min
+          <input id="filterRcMin" type="number" min="100" max="599" placeholder="200">
+        </label>
+        <label class="col-2">
+          Response Max
+          <input id="filterRcMax" type="number" min="100" max="599" placeholder="599">
+        </label>
+        <label class="col-2">
           Cache Hit
-          <input id="cacheHit" type="text" placeholder="true / false" />
+          <select id="filterCacheHit">
+            <option value="">Any</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
         </label>
-        <label>
+        <label class="col-2">
           Upstream Error
-          <input id="upstreamError" type="text" placeholder="true / false" />
+          <select id="filterUpstreamError">
+            <option value="">Any</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
         </label>
-        <label>
-          Min Total Latency (ms)
-          <input id="totalLatencyMin" type="number" min="0" step="0.1" placeholder="10" />
+        <label class="col-2">
+          Latency Min (ms)
+          <input id="filterLatencyMin" type="number" min="0" step="0.01" placeholder="0">
         </label>
-        <label>
-          Max Total Latency (ms)
-          <input id="totalLatencyMax" type="number" min="0" step="0.1" placeholder="250" />
+        <label class="col-2">
+          Latency Max (ms)
+          <input id="filterLatencyMax" type="number" min="0" step="0.01" placeholder="250">
         </label>
       </div>
+
       <div class="actions">
-        <button id="refreshBtn">Refresh Dashboard</button>
-        <p id="status" role="status" aria-live="polite"></p>
+        <button id="refreshBtn" type="button">Refresh</button>
+        <button id="clearBtn" type="button" hidden>Clear Analytics</button>
+        <p id="status" role="status" aria-live="polite">Idle</p>
       </div>
     </section>
 
-    <section class="stats" id="stats"></section>
-
-    <section class="chart-grid">
-      <article class="panel">
-        <h3>Latency Timeline (Recent Events)</h3>
-        <svg id="timelineChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
-      </article>
-      <article class="panel">
-        <h3>Requests by Service</h3>
-        <svg id="serviceChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
-      </article>
-      <article class="panel">
-        <h3>Rate Limited by Prefix</h3>
-        <svg id="prefixChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
-      </article>
-      <article class="panel">
-        <h3>Status Mix Over Time</h3>
-        <svg id="statusTimelineChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
-      </article>
-      <article class="panel">
-        <h3>Payload Size Over Time</h3>
-        <svg id="sizeTimelineChart" viewBox="0 0 900 260" preserveAspectRatio="none"></svg>
-      </article>
+    <section class="summary-block">
+      <h2>Summary</h2>
+      <div id="summaryGrid" class="summary-grid"></div>
     </section>
 
-    <section class="panel">
-      <h3>Slowest Request Patterns</h3>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Service</th>
-              <th>Prefix</th>
-              <th>Method</th>
-              <th>Avg Total Latency</th>
-              <th>Rate Limited</th>
-              <th>Upstream Errors</th>
-            </tr>
-          </thead>
-          <tbody id="slowTable"></tbody>
-        </table>
-      </div>
-    </section>
+    <section class="series-block">
+      <h2>Time Series</h2>
 
-    <section class="panel">
-      <h3>Recent Events (All Entry Fields)</h3>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Timestamp</th>
-              <th>Prefix</th>
-              <th>Service</th>
-              <th>Method</th>
-              <th>Tier</th>
-              <th>Total Latency</th>
-              <th>Upstream Latency</th>
-              <th>Cache Hit</th>
-              <th>Limit Used</th>
-              <th>Limit Used Ratio</th>
-              <th>Request Bytes</th>
-              <th>Response Bytes</th>
-              <th>Response Code</th>
-              <th>Upstream Error</th>
-            </tr>
-          </thead>
-          <tbody id="eventsTable"></tbody>
-        </table>
-      </div>
+      <article class="panel series-card">
+        <div class="series-head">
+          <h3>Latency</h3>
+          <p>Contract series: latency_total, latency_upstream, latency_added</p>
+        </div>
+        <div class="chart-wrap"><svg id="latencyChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
+        <div id="latencyLegend" class="legend"></div>
+      </article>
+
+      <article class="panel series-card">
+        <div class="series-head">
+          <h3>Volume</h3>
+          <p>request_avg and response_avg</p>
+        </div>
+        <div class="chart-wrap"><svg id="volumeChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
+        <div id="volumeLegend" class="legend"></div>
+      </article>
+
+      <article class="panel series-card">
+        <div class="series-head">
+          <h3>Rates</h3>
+          <p>cache_hit, upstream_err, and rate_limited</p>
+        </div>
+        <div class="chart-wrap"><svg id="ratesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
+        <div id="ratesLegend" class="legend"></div>
+      </article>
+
+      <article class="panel series-card">
+        <div class="series-head">
+          <h3>Prefixes</h3>
+          <p>Dynamic top prefix counts per bucket</p>
+        </div>
+        <div class="chart-wrap"><svg id="prefixesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
+        <div id="prefixesLegend" class="legend"></div>
+      </article>
+
+      <article class="panel series-card">
+        <div class="series-head">
+          <h3>Services</h3>
+          <p>Dynamic top service counts per bucket</p>
+        </div>
+        <div class="chart-wrap"><svg id="servicesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
+        <div id="servicesLegend" class="legend"></div>
+      </article>
+
+      <article class="panel series-card">
+        <div class="series-head">
+          <h3>Edges</h3>
+          <p>Dynamic traffic counts by edge per bucket</p>
+        </div>
+        <div class="chart-wrap"><svg id="edgesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
+        <div id="edgesLegend" class="legend"></div>
+      </article>
     </section>
   </main>
 

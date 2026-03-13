@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 
@@ -26,6 +27,14 @@ func NewConfigManager(filePath string) (*ConfigManager, error) {
 	return cm, nil
 }
 
+func MustNewConfigManager(filePath string) *ConfigManager {
+	cm, err := NewConfigManager(filePath)
+	if err != nil {
+		panic(fmt.Sprintf("gate: config boot failure: %v", err))
+	}
+	return cm
+}
+
 func (cm *ConfigManager) ReloadFromFile() error {
 	data, err := os.ReadFile(cm.filePath)
 	if err != nil {
@@ -36,6 +45,10 @@ func (cm *ConfigManager) ReloadFromFile() error {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return fmt.Errorf("failed to decode %s: %w", cm.filePath, err)
 	}
+	if err := validateRuntimePolicyProvided(cfg.Runtime); err != nil {
+		return fmt.Errorf("invalid gateway config %s: %w", cm.filePath, err)
+	}
+	cfg.Runtime = cfg.Runtime.Effective()
 	if err := ValidateGatewayConfig(&cfg); err != nil {
 		return fmt.Errorf("invalid gateway config %s: %w", cm.filePath, err)
 	}
@@ -52,6 +65,9 @@ func ValidateGatewayConfig(cfg *types.GatewayConfig) error {
 	}
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("config validation failed: %w", err)
+	}
+	if err := validateEffectiveRuntime(cfg); err != nil {
+		return err
 	}
 	if len(cfg.Prefixes) == 0 {
 		return fmt.Errorf("config must include at least one prefix")
@@ -160,8 +176,148 @@ func ValidateGatewayConfig(cfg *types.GatewayConfig) error {
 	return nil
 }
 
+func validateRuntimePolicyProvided(runtime types.RuntimePolicy) error {
+	return requireNonZeroStructFields("runtime", reflect.ValueOf(runtime))
+}
+
+func validateEffectiveRuntime(cfg *types.GatewayConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if err := requireNonZeroStructFields("runtime", reflect.ValueOf(cfg.Runtime)); err != nil {
+		return fmt.Errorf("config runtime validation failed: %w", err)
+	}
+	return nil
+}
+
+func requireNonZeroStructFields(path string, v reflect.Value) error {
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return fmt.Errorf("%s is required", path)
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil
+	}
+	t := v.Type()
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		ft := t.Field(i)
+		if !ft.IsExported() {
+			continue
+		}
+		tag := ft.Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "" || name == "-" {
+			name = strings.ToLower(ft.Name)
+		}
+		next := path + "." + name
+
+		if f.Kind() == reflect.Pointer {
+			if f.IsNil() {
+				return fmt.Errorf("%s is required", next)
+			}
+			f = f.Elem()
+		}
+
+		switch f.Kind() {
+		case reflect.Struct:
+			if err := requireNonZeroStructFields(next, f); err != nil {
+				return err
+			}
+		case reflect.String:
+			if strings.TrimSpace(f.String()) == "" {
+				return fmt.Errorf("%s is required", next)
+			}
+		case reflect.Slice, reflect.Array, reflect.Map:
+			if f.Len() == 0 {
+				return fmt.Errorf("%s is required", next)
+			}
+		case reflect.Bool:
+			// false can be a valid explicit value
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			if f.Int() == 0 {
+				return fmt.Errorf("%s is required", next)
+			}
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			if f.Uint() == 0 {
+				return fmt.Errorf("%s is required", next)
+			}
+		case reflect.Float32, reflect.Float64:
+			if f.Float() == 0 {
+				return fmt.Errorf("%s is required", next)
+			}
+		}
+	}
+	return nil
+}
+
 // Get returns the read-only configuration.
 // Highly efficient O(1) with no mutex contention.
 func (cm *ConfigManager) Get() *types.GatewayConfig {
 	return cm.active.Load()
+}
+
+func (cm *ConfigManager) Snapshot() *types.GatewayConfig {
+	return cm.Get()
+}
+
+func (cm *ConfigManager) HubPolicy() types.HubRuntimePolicy {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Runtime.Hub
+	}
+	return types.HubRuntimePolicy{}
+}
+
+func (cm *ConfigManager) EdgePolicy() types.EdgeRuntimePolicy {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Runtime.Edge
+	}
+	return types.EdgeRuntimePolicy{}
+}
+
+func (cm *ConfigManager) AnalyticsPolicy() types.AnalyticsRuntimePolicy {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Runtime.Analytics
+	}
+	return types.AnalyticsRuntimePolicy{}
+}
+
+func (cm *ConfigManager) Prefixes() []types.PrefixConfig {
+	if cfg := cm.Get(); cfg != nil {
+		return cfg.Prefixes
+	}
+	return nil
+}
+
+func (cm *ConfigManager) FindPrefix(prefix string) (*types.PrefixConfig, bool) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil, false
+	}
+	cfg := cm.Get()
+	if cfg == nil {
+		return nil, false
+	}
+	for i := range cfg.Prefixes {
+		if cfg.Prefixes[i].Prefix == prefix {
+			return &cfg.Prefixes[i], true
+		}
+	}
+	return nil, false
+}
+
+func (cm *ConfigManager) FindService(prefix, service string) (*types.PrefixConfig, *types.ServiceConfig, bool) {
+	prefixCfg, ok := cm.FindPrefix(prefix)
+	if !ok {
+		return nil, nil, false
+	}
+	service = strings.TrimSpace(service)
+	for i := range prefixCfg.Services {
+		if prefixCfg.Services[i].ServiceID == service {
+			return prefixCfg, &prefixCfg.Services[i], true
+		}
+	}
+	return nil, nil, false
 }

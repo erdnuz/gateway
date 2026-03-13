@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -109,5 +110,53 @@ func TestAnalyticsManager_UsesDefaultPublishTimeoutWhenMissing(t *testing.T) {
 	mgr := NewAnalyticsManagerWithNATSOptions(10, "", "", AnalyticsManagerOptions{})
 	if mgr.timeout != types.DefaultRuntimePolicy().Edge.AnalyticsPublishTimeout {
 		t.Fatalf("expected default publish timeout %s, got %s", types.DefaultRuntimePolicy().Edge.AnalyticsPublishTimeout, mgr.timeout)
+	}
+}
+
+func TestAnalyticsManager_StatsTrackDrops(t *testing.T) {
+	mgr := NewAnalyticsManager(1)
+	entry := &types.AnalyticsEntry{Prefix: "v1", Service: "svc", Method: http.MethodGet}
+
+	mgr.Capture(entry)
+	mgr.Capture(entry)
+
+	stats := mgr.Stats()
+	if stats.Captured != 2 {
+		t.Fatalf("expected captured=2, got %+v", stats)
+	}
+	if stats.Dropped != 1 {
+		t.Fatalf("expected dropped=1, got %+v", stats)
+	}
+	if stats.BufferDepth != 1 || stats.BufferCapacity != 1 {
+		t.Fatalf("unexpected buffer stats: %+v", stats)
+	}
+}
+
+func TestAnalyticsManager_StatsTrackPublishFailures(t *testing.T) {
+	mgr := NewAnalyticsManager(2)
+	mgr.write = func(_ context.Context, _ *types.AnalyticsEntry) error {
+		return context.DeadlineExceeded
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.StartPublisher(ctx)
+	mgr.Capture(&types.AnalyticsEntry{Prefix: "v1", Service: "svc", Method: http.MethodPost})
+
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		stats := mgr.Stats()
+		if stats.PublishFailures > 0 {
+			if stats.Published != 0 {
+				t.Fatalf("expected no successful publishes, got %+v", stats)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for publish failure metric")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 }

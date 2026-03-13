@@ -1,513 +1,453 @@
 const byId = (id) => document.getElementById(id);
 
 const state = {
-  summary: null,
-  groupedByService: {},
-  groupedByPrefix: {},
-  events: [],
+  authFailed: false,
+  poller: null,
 };
+
+const palette = [
+  "#7aa2ff",
+  "#79e2c8",
+  "#ffcf7a",
+  "#ff9bb2",
+  "#bda3ff",
+  "#9ad7ff",
+  "#8fe3a2",
+  "#ffa8a8",
+];
+
+function setStatus(msg, bad = false) {
+  const el = byId("status");
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = bad ? "#ff7f8a" : "#aeb4c0";
+}
+
+function normalizeToken(token) {
+  if (!token) return "";
+  return token.replace(/^Bearer\s+/i, "").trim();
+}
+
+function toIso(raw) {
+  const text = (raw || "").trim();
+  if (!text) return "";
+  const d = new Date(text);
+  if (!Number.isFinite(d.getTime())) return "";
+  return d.toISOString();
+}
 
 function getConfig() {
   const defaultBase = `${window.location.protocol}//${window.location.host}`;
   return {
     base: (byId("apiBase").value || defaultBase).replace(/\/$/, ""),
-    token: byId("token").value.trim(),
-    limit: byId("limit").value || "500",
-    service: byId("service").value.trim(),
-    prefix: byId("prefix").value.trim(),
-    tier: byId("tier").value.trim(),
-    method: byId("method").value.trim(),
-    responseCodeMin: byId("responseCodeMin").value.trim(),
-    responseCodeMax: byId("responseCodeMax").value.trim(),
-    cacheHit: byId("cacheHit").value.trim(),
-    upstreamError: byId("upstreamError").value.trim(),
-    totalLatencyMin: byId("totalLatencyMin").value.trim(),
-    totalLatencyMax: byId("totalLatencyMax").value.trim(),
+    token: normalizeToken(byId("token").value),
+    interval: byId("interval").value,
+    prefix: byId("filterPrefix").value.trim(),
+    service: byId("filterService").value.trim(),
+    edge: byId("filterEdge").value.trim(),
+    tier: byId("filterTier").value.trim(),
+    method: byId("filterMethod").value.trim(),
+    rcMin: byId("filterRcMin").value.trim(),
+    rcMax: byId("filterRcMax").value.trim(),
+    cacheHit: byId("filterCacheHit").value,
+    upstreamError: byId("filterUpstreamError").value,
+    latencyMin: byId("filterLatencyMin").value.trim(),
+    latencyMax: byId("filterLatencyMax").value.trim(),
+    start: byId("filterStart").value,
+    end: byId("filterEnd").value,
   };
 }
 
-function toQS(cfg) {
-  const p = new URLSearchParams({ limit: cfg.limit });
-  if (cfg.service) p.set("service", cfg.service);
+function buildSummaryUrl(cfg) {
+  const p = new URLSearchParams();
+  p.set("interval", cfg.interval);
   if (cfg.prefix) p.set("prefix", cfg.prefix);
+  if (cfg.service) p.set("service", cfg.service);
+  if (cfg.edge) p.set("edge_id", cfg.edge);
   if (cfg.tier) p.set("tier", cfg.tier);
   if (cfg.method) p.set("method", cfg.method);
-  if (cfg.responseCodeMin) p.set("response_code_min", cfg.responseCodeMin);
-  if (cfg.responseCodeMax) p.set("response_code_max", cfg.responseCodeMax);
+  if (cfg.rcMin) p.set("response_code_min", cfg.rcMin);
+  if (cfg.rcMax) p.set("response_code_max", cfg.rcMax);
   if (cfg.cacheHit) p.set("cache_hit", cfg.cacheHit);
   if (cfg.upstreamError) p.set("upstream_error", cfg.upstreamError);
-  if (cfg.totalLatencyMin) p.set("total_latency_ms_min", cfg.totalLatencyMin);
-  if (cfg.totalLatencyMax) p.set("total_latency_ms_max", cfg.totalLatencyMax);
-  return p;
+  if (cfg.latencyMin) p.set("total_latency_ms_min", cfg.latencyMin);
+  if (cfg.latencyMax) p.set("total_latency_ms_max", cfg.latencyMax);
+  const startIso = toIso(cfg.start);
+  const endIso = toIso(cfg.end);
+  if (startIso) p.set("start", startIso);
+  if (endIso) p.set("end", endIso);
+  return `${cfg.base}/analytics/summary?${p.toString()}`;
 }
 
-async function callAPI(path, cfg) {
+function authHeaders(cfg) {
   const headers = {};
   if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
-  const res = await fetch(`${cfg.base}${path}`, { headers });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`HTTP ${res.status}: ${text}`);
+  return headers;
+}
+
+async function fetchJsonWithAuth(url, cfg) {
+  const res = await fetch(url, { headers: authHeaders(cfg) });
+  if (res.status === 401) {
+    state.authFailed = true;
+    byId("authBanner").hidden = false;
+    if (state.poller) {
+      clearInterval(state.poller);
+      state.poller = null;
+    }
+    throw new Error("Unauthorized");
   }
-  return res.json();
+  return res;
 }
 
-function fmtMs(v) {
-  return `${Number(v || 0).toFixed(1)} ms`;
-}
-
-function fmtBytes(v) {
+function fmtNumber(v) {
   const n = Number(v || 0);
-  if (n < 1024) return `${n.toFixed(0)} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  if (!Number.isFinite(n)) return "0";
+  if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (Math.abs(n) >= 1) return n.toFixed(2);
+  return n.toFixed(4);
 }
 
-function fmtPct(part, total) {
-  if (!total) return "0.0%";
-  return `${((part / total) * 100).toFixed(1)}%`;
+function fmtTrend(v) {
+  const n = Number(v || 0);
+  if (!Number.isFinite(n)) return { cls: "trend-flat", text: "0.00%" };
+  const pct = (n * 100).toFixed(2);
+  if (n > 0) return { cls: "trend-up", text: `+${pct}%` };
+  if (n < 0) return { cls: "trend-down", text: `${pct}%` };
+  return { cls: "trend-flat", text: `${pct}%` };
 }
 
-function setStatus(msg, bad = false) {
-  const el = byId("status");
-  el.textContent = msg;
-  el.style.color = bad ? "#f46060" : "#99b6c8";
-}
+function renderSummary(summary) {
+  const grid = byId("summaryGrid");
+  if (!summary || typeof summary !== "object") {
+    grid.innerHTML = '<p class="empty">No summary data.</p>';
+    return;
+  }
+  const keys = Object.keys(summary).sort();
+  if (!keys.length) {
+    grid.innerHTML = '<p class="empty">No summary metrics returned.</p>';
+    return;
+  }
 
-function renderStats(summary) {
-  const cards = [
-    ["Requests", String(summary.count || 0), ""],
-    ["Avg Total", fmtMs(summary.avg_total_latency_ms), ""],
-    ["P95 Rate Limiter", fmtMs(summary.p95_rate_limiter_latency_ms), ""],
-    ["Avg Upstream", fmtMs(summary.avg_upstream_latency_ms), ""],
-    ["Avg Limiter", fmtMs(summary.avg_rate_limiter_latency_ms), ""],
-    ["Cache Hit Rate", `${Number(summary.cache_hit_rate_pct || 0).toFixed(1)}%`, Number(summary.cache_hit_rate_pct || 0) > 50 ? "ok" : ""],
-    ["2xx Success Rate", `${Number(summary.success_rate_pct || 0).toFixed(1)}%`, Number(summary.success_rate_pct || 0) >= 95 ? "ok" : ""],
-    ["Avg Request Size", fmtBytes(summary.avg_request_size_bytes), ""],
-    ["Avg Response Size", fmtBytes(summary.avg_response_size_bytes), ""],
-    ["Active Tiers", String(summary.active_tiers_count || 0), ""],
-    [
-      "Rate Limited",
-      `${summary.rate_limited_count || 0} (${fmtPct(summary.rate_limited_count || 0, summary.count || 0)})`,
-      (summary.rate_limited_count || 0) > 0 ? "bad" : "ok",
-    ],
-    [
-      "Upstream Errors",
-      `${summary.upstream_error_count || 0} (${fmtPct(summary.upstream_error_count || 0, summary.count || 0)})`,
-      (summary.upstream_error_count || 0) > 0 ? "bad" : "ok",
-    ],
-  ];
-
-  byId("stats").innerHTML = cards
-    .map(([label, value, level]) => `
-      <article class="card">
-        <div class="label">${label}</div>
-        <div class="value ${level}">${value}</div>
-      </article>
-    `)
+  grid.innerHTML = keys
+    .map((key) => {
+      const metric = summary[key] || {};
+      const trend = fmtTrend(metric.trend);
+      return `
+        <article class="summary-card">
+          <p class="summary-name">${key}</p>
+          <p class="summary-value">${fmtNumber(metric.last_value)}</p>
+          <p class="summary-trend ${trend.cls}">${trend.text}</p>
+        </article>
+      `;
+    })
     .join("");
 }
 
-function clearSVG(svg) {
-  while (svg.firstChild) {
-    svg.removeChild(svg.firstChild);
-  }
+function parseTime(value) {
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? t : null;
 }
 
-function textNode(x, y, value, fill = "#99b6c8", size = 12, anchor = "start") {
+function drawChart(svgId, legendId, points, lines, yLabel, formatter) {
+  const svg = byId(svgId);
+  const legend = byId(legendId);
+  if (!svg || !legend) return;
+
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  if (!points.length || !lines.length) {
+    svg.appendChild(makeText(450, 140, "No data", "#aeb4c0", 14, "middle"));
+    legend.innerHTML = "";
+    return;
+  }
+
+  const w = 900;
+  const h = 280;
+  const pad = { top: 18, right: 14, bottom: 42, left: 56 };
+  const iw = w - pad.left - pad.right;
+  const ih = h - pad.top - pad.bottom;
+
+  const xVals = points.map((p) => parseTime(p.time)).filter((t) => t !== null);
+  if (!xVals.length) {
+    svg.appendChild(makeText(450, 140, "No valid time points", "#aeb4c0", 14, "middle"));
+    legend.innerHTML = "";
+    return;
+  }
+
+  const xMin = Math.min(...xVals);
+  const xMax = Math.max(...xVals);
+  const xSpan = Math.max(1, xMax - xMin);
+
+  const yVals = [];
+  for (const line of lines) {
+    for (const p of points) {
+      const v = Number(p[line.key]);
+      if (Number.isFinite(v)) yVals.push(v);
+    }
+  }
+  const yMinRaw = yVals.length ? Math.min(...yVals) : 0;
+  const yMaxRaw = yVals.length ? Math.max(...yVals) : 1;
+  const yMin = Math.min(0, yMinRaw);
+  const yMax = yMaxRaw === yMin ? yMin + 1 : yMaxRaw;
+  const ySpan = yMax - yMin;
+
+  for (let i = 0; i <= 4; i++) {
+    const gy = pad.top + (ih * i) / 4;
+    const v = yMax - (ySpan * i) / 4;
+    svg.appendChild(makeLine(pad.left, gy, w - pad.right, gy, "rgba(255,255,255,0.08)", 1));
+    svg.appendChild(makeText(pad.left - 8, gy + 4, formatter(v), "#aeb4c0", 11, "end"));
+  }
+
+  svg.appendChild(makeText(16, 18, yLabel, "#aeb4c0", 12, "start"));
+
+  for (const line of lines) {
+    let d = "";
+    let hadPoint = false;
+    for (const p of points) {
+      const t = parseTime(p.time);
+      const v = Number(p[line.key]);
+      if (t === null || !Number.isFinite(v)) continue;
+      const x = pad.left + ((t - xMin) / xSpan) * iw;
+      const y = pad.top + ih - ((v - yMin) / ySpan) * ih;
+      d += `${hadPoint ? "L" : "M"}${x} ${y} `;
+      hadPoint = true;
+    }
+    if (!hadPoint) continue;
+
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", d.trim());
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", line.color);
+    path.setAttribute("stroke-width", "2");
+    svg.appendChild(path);
+  }
+
+  svg.appendChild(makeText(pad.left, h - 14, new Date(xMin).toLocaleString(), "#aeb4c0", 10, "start"));
+  svg.appendChild(makeText(w - pad.right, h - 14, new Date(xMax).toLocaleString(), "#aeb4c0", 10, "end"));
+
+  legend.innerHTML = lines
+    .map((line) => `<span class="legend-item"><span class="legend-swatch" style="background:${line.color}"></span>${line.label}</span>`)
+    .join("");
+}
+
+function makeLine(x1, y1, x2, y2, stroke, width) {
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  line.setAttribute("x1", x1);
+  line.setAttribute("y1", y1);
+  line.setAttribute("x2", x2);
+  line.setAttribute("y2", y2);
+  line.setAttribute("stroke", stroke);
+  line.setAttribute("stroke-width", width);
+  return line;
+}
+
+function makeText(x, y, text, fill, size, anchor) {
   const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
   t.setAttribute("x", x);
   t.setAttribute("y", y);
   t.setAttribute("fill", fill);
   t.setAttribute("font-size", String(size));
   t.setAttribute("text-anchor", anchor);
-  t.textContent = value;
+  t.textContent = text;
   return t;
 }
 
-function drawBarChart(svgId, points, metric, color) {
-  const svg = byId(svgId);
-  clearSVG(svg);
-  if (!points.length) {
-    svg.appendChild(textNode(450, 130, "No data", "#99b6c8", 14, "middle"));
-    return;
-  }
-
-  const width = 900;
-  const height = 260;
-  const pad = { top: 16, right: 12, bottom: 58, left: 44 };
-  const innerW = width - pad.left - pad.right;
-  const innerH = height - pad.top - pad.bottom;
-  const max = Math.max(...points.map((p) => p[metric]), 1);
-  const barW = innerW / points.length;
-
-  for (let y = 0; y <= 4; y += 1) {
-    const gy = pad.top + (innerH / 4) * y;
-    const grid = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    grid.setAttribute("x1", pad.left);
-    grid.setAttribute("y1", gy);
-    grid.setAttribute("x2", width - pad.right);
-    grid.setAttribute("y2", gy);
-    grid.setAttribute("stroke", "rgba(153, 182, 200, 0.20)");
-    grid.setAttribute("stroke-width", "1");
-    svg.appendChild(grid);
-  }
-
-  for (let i = 0; i < points.length; i += 1) {
-    const p = points[i];
-    const val = p[metric];
-    const h = (val / max) * innerH;
-    const x = pad.left + i * barW + 6;
-    const y = height - pad.bottom - h;
-
-    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-    rect.setAttribute("x", x);
-    rect.setAttribute("y", y);
-    rect.setAttribute("width", Math.max(6, barW - 12));
-    rect.setAttribute("height", h);
-    rect.setAttribute("rx", 5);
-    rect.setAttribute("fill", color);
-    rect.setAttribute("opacity", "0.92");
-    svg.appendChild(rect);
-
-    const label = p.key.length > 12 ? `${p.key.slice(0, 10)}..` : p.key;
-    const lx = x + Math.max(6, barW - 12) / 2;
-    svg.appendChild(textNode(lx, height - 36, label, "#c6dae8", 11, "middle"));
-    svg.appendChild(textNode(lx, y - 4, Number(val).toFixed(0), "#eaf6ff", 11, "middle"));
-  }
-
-  svg.appendChild(textNode(8, 18, metric, "#99b6c8", 12));
-}
-
-function drawTimeline(svgId, events) {
-  const svg = byId(svgId);
-  clearSVG(svg);
-  if (!events.length) {
-    svg.appendChild(textNode(450, 130, "No events in selected window", "#99b6c8", 14, "middle"));
-    return;
-  }
-
-  const width = 900;
-  const height = 260;
-  const pad = { top: 18, right: 10, bottom: 34, left: 42 };
-  const innerW = width - pad.left - pad.right;
-  const innerH = height - pad.top - pad.bottom;
-  const valuesTotal = events.map((e) => Number(e.total_latency_ms || 0));
-  const valuesLimiter = events.map((e) => Math.max(Number(e.total_latency_ms || 0) - Number(e.upstream_latency_ms || 0), 0));
-  const max = Math.max(...valuesTotal, ...valuesLimiter, 1);
-
-  for (let y = 0; y <= 4; y += 1) {
-    const gy = pad.top + (innerH / 4) * y;
-    const grid = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    grid.setAttribute("x1", pad.left);
-    grid.setAttribute("y1", gy);
-    grid.setAttribute("x2", width - pad.right);
-    grid.setAttribute("y2", gy);
-    grid.setAttribute("stroke", "rgba(153, 182, 200, 0.20)");
-    grid.setAttribute("stroke-width", "1");
-    svg.appendChild(grid);
-  }
-
-  const area = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  let areaD = "";
-  for (let i = 0; i < valuesTotal.length; i += 1) {
-    const x = pad.left + (i / Math.max(valuesTotal.length - 1, 1)) * innerW;
-    const y = pad.top + innerH - (valuesTotal[i] / max) * innerH;
-    areaD += `${i === 0 ? "M" : "L"}${x} ${y} `;
-  }
-  areaD += `L${pad.left + innerW} ${pad.top + innerH} L${pad.left} ${pad.top + innerH} Z`;
-  area.setAttribute("d", areaD.trim());
-  area.setAttribute("fill", "rgba(48, 213, 200, 0.14)");
-  svg.appendChild(area);
-
-  const pathTotal = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  let totalD = "";
-  for (let i = 0; i < valuesTotal.length; i += 1) {
-    const x = pad.left + (i / Math.max(valuesTotal.length - 1, 1)) * innerW;
-    const y = pad.top + innerH - (valuesTotal[i] / max) * innerH;
-    totalD += `${i === 0 ? "M" : "L"}${x} ${y} `;
-  }
-  pathTotal.setAttribute("d", totalD.trim());
-  pathTotal.setAttribute("fill", "none");
-  pathTotal.setAttribute("stroke", "#30d5c8");
-  pathTotal.setAttribute("stroke-width", "2.5");
-  svg.appendChild(pathTotal);
-
-  const pathLimiter = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  let limiterD = "";
-  for (let i = 0; i < valuesLimiter.length; i += 1) {
-    const x = pad.left + (i / Math.max(valuesLimiter.length - 1, 1)) * innerW;
-    const y = pad.top + innerH - (valuesLimiter[i] / max) * innerH;
-    limiterD += `${i === 0 ? "M" : "L"}${x} ${y} `;
-  }
-  pathLimiter.setAttribute("d", limiterD.trim());
-  pathLimiter.setAttribute("fill", "none");
-  pathLimiter.setAttribute("stroke", "#f4a261");
-  pathLimiter.setAttribute("stroke-width", "2");
-  pathLimiter.setAttribute("stroke-dasharray", "6 4");
-  svg.appendChild(pathLimiter);
-
-  svg.appendChild(textNode(8, 18, "total vs limiter latency (ms)", "#99b6c8", 12));
-  svg.appendChild(textNode(44, height - 8, "older", "#99b6c8", 11));
-  svg.appendChild(textNode(width - 14, height - 8, "newer", "#99b6c8", 11, "end"));
-  svg.appendChild(textNode(44, 26, `max ${max.toFixed(1)} ms`, "#99b6c8", 11));
-  svg.appendChild(textNode(width - 14, 18, "total", "#30d5c8", 11, "end"));
-  svg.appendChild(textNode(width - 14, 34, "limiter", "#f4a261", 11, "end"));
-}
-
-function buildBuckets(events, bucketCount = 24) {
-  if (!events.length) return [];
-  const count = Math.min(bucketCount, events.length);
-  const buckets = new Array(count).fill(null).map(() => []);
-  for (let i = 0; i < events.length; i += 1) {
-    const idx = Math.min(count - 1, Math.floor((i / Math.max(events.length, 1)) * count));
-    buckets[idx].push(events[i]);
-  }
-  return buckets;
-}
-
-function drawStatusTimeline(svgId, events) {
-  const svg = byId(svgId);
-  clearSVG(svg);
-  if (!events.length) {
-    svg.appendChild(textNode(450, 130, "No status samples", "#99b6c8", 14, "middle"));
-    return;
-  }
-
-  const buckets = buildBuckets(events, 24);
-  const values2xx = buckets.map((b) => b.filter((e) => Number(e.response_code) >= 200 && Number(e.response_code) < 300).length);
-  const values4xx = buckets.map((b) => b.filter((e) => Number(e.response_code) >= 400 && Number(e.response_code) < 500).length);
-  const values5xx = buckets.map((b) => b.filter((e) => Number(e.response_code) >= 500).length);
-
-  const width = 900;
-  const height = 260;
-  const pad = { top: 18, right: 10, bottom: 34, left: 42 };
-  const innerW = width - pad.left - pad.right;
-  const innerH = height - pad.top - pad.bottom;
-  const max = Math.max(...values2xx, ...values4xx, ...values5xx, 1);
-
-  const drawLine = (values, stroke, dash = "") => {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    let d = "";
-    for (let i = 0; i < values.length; i += 1) {
-      const x = pad.left + (i / Math.max(values.length - 1, 1)) * innerW;
-      const y = pad.top + innerH - (values[i] / max) * innerH;
-      d += `${i === 0 ? "M" : "L"}${x} ${y} `;
+function keysFromDynamicSeries(rows) {
+  const score = {};
+  for (const row of rows) {
+    for (const k of Object.keys(row)) {
+      if (k === "time") continue;
+      const v = Number(row[k] || 0);
+      if (!Number.isFinite(v)) continue;
+      score[k] = (score[k] || 0) + v;
     }
-    path.setAttribute("d", d.trim());
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", stroke);
-    path.setAttribute("stroke-width", "2.2");
-    if (dash) path.setAttribute("stroke-dasharray", dash);
-    svg.appendChild(path);
-  };
-
-  drawLine(values2xx, "#4ad67d");
-  drawLine(values4xx, "#f4a261", "6 4");
-  drawLine(values5xx, "#f46060");
-  svg.appendChild(textNode(8, 18, "status counts over time", "#99b6c8", 12));
-  svg.appendChild(textNode(width - 14, 18, "2xx", "#4ad67d", 11, "end"));
-  svg.appendChild(textNode(width - 14, 34, "4xx", "#f4a261", 11, "end"));
-  svg.appendChild(textNode(width - 14, 50, "5xx", "#f46060", 11, "end"));
+  }
+  return Object.entries(score)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map((x) => x[0]);
 }
 
-function drawSizeTimeline(svgId, events) {
-  const svg = byId(svgId);
-  clearSVG(svg);
-  if (!events.length) {
-    svg.appendChild(textNode(450, 130, "No payload samples", "#99b6c8", 14, "middle"));
-    return;
+function renderSeries(series) {
+  const latency = Array.isArray(series?.latency) ? series.latency : [];
+  drawChart(
+    "latencyChart",
+    "latencyLegend",
+    latency,
+    [
+      { key: "latency_total_p90", label: "total p90", color: palette[0] },
+      { key: "latency_upstream_p90", label: "upstream p90", color: palette[1] },
+      { key: "latency_added_p90", label: "added p90", color: palette[2] },
+      { key: "latency_total_p50", label: "total p50", color: palette[3] },
+      { key: "latency_total_p95", label: "total p95", color: palette[4] },
+    ],
+    "ms",
+    (v) => Number(v).toFixed(1),
+  );
+
+  const volume = Array.isArray(series?.volume) ? series.volume : [];
+  drawChart(
+    "volumeChart",
+    "volumeLegend",
+    volume,
+    [
+      { key: "request_avg", label: "request avg", color: palette[0] },
+      { key: "response_avg", label: "response avg", color: palette[1] },
+    ],
+    "bytes",
+    (v) => Number(v).toFixed(0),
+  );
+
+  const rates = Array.isArray(series?.rates) ? series.rates : [];
+  drawChart(
+    "ratesChart",
+    "ratesLegend",
+    rates,
+    [
+      { key: "cache_hit", label: "cache hit", color: palette[1] },
+      { key: "upstream_err", label: "upstream err", color: palette[3] },
+      { key: "rate_limited", label: "rate limited", color: palette[2] },
+    ],
+    "ratio",
+    (v) => Number(v).toFixed(3),
+  );
+
+  const prefixes = Array.isArray(series?.prefixes) ? series.prefixes : [];
+  const prefixKeys = keysFromDynamicSeries(prefixes);
+  drawChart(
+    "prefixesChart",
+    "prefixesLegend",
+    prefixes,
+    prefixKeys.map((k, i) => ({ key: k, label: k, color: palette[i % palette.length] })),
+    "count",
+    (v) => Number(v).toFixed(0),
+  );
+
+  const services = Array.isArray(series?.services) ? series.services : [];
+  const serviceKeys = keysFromDynamicSeries(services);
+  drawChart(
+    "servicesChart",
+    "servicesLegend",
+    services,
+    serviceKeys.map((k, i) => ({ key: k, label: k, color: palette[i % palette.length] })),
+    "count",
+    (v) => Number(v).toFixed(0),
+  );
+
+  const edges = Array.isArray(series?.edges) ? series.edges : [];
+  const edgeKeys = keysFromDynamicSeries(edges);
+  drawChart(
+    "edgesChart",
+    "edgesLegend",
+    edges,
+    edgeKeys.map((k, i) => ({ key: k, label: k, color: palette[i % palette.length] })),
+    "count",
+    (v) => Number(v).toFixed(0),
+  );
+}
+
+async function loadFeatures() {
+  const cfg = getConfig();
+  try {
+    const res = await fetch(`${cfg.base}/analytics/features`);
+    if (!res.ok) return;
+    const data = await res.json();
+    byId("clearBtn").hidden = !data.testing_clear_enabled;
+  } catch {
+    byId("clearBtn").hidden = true;
   }
+}
 
-  const buckets = buildBuckets(events, 24);
-  const req = buckets.map((b) => {
-    if (!b.length) return 0;
-    return b.reduce((sum, e) => sum + Number(e.request_size_bytes || 0), 0) / b.length;
-  });
-  const resp = buckets.map((b) => {
-    if (!b.length) return 0;
-    return b.reduce((sum, e) => sum + Number(e.response_size_bytes || 0), 0) / b.length;
-  });
+async function clearAnalytics() {
+  const cfg = getConfig();
+  if (!window.confirm("Clear all analytics data?")) return;
 
-  const width = 900;
-  const height = 260;
-  const pad = { top: 18, right: 10, bottom: 34, left: 42 };
-  const innerW = width - pad.left - pad.right;
-  const innerH = height - pad.top - pad.bottom;
-  const max = Math.max(...req, ...resp, 1);
-
-  const drawLine = (values, stroke, dash = "") => {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    let d = "";
-    for (let i = 0; i < values.length; i += 1) {
-      const x = pad.left + (i / Math.max(values.length - 1, 1)) * innerW;
-      const y = pad.top + innerH - (values[i] / max) * innerH;
-      d += `${i === 0 ? "M" : "L"}${x} ${y} `;
+  try {
+    const res = await fetch(`${cfg.base}/analytics/clear`, {
+      method: "POST",
+      headers: authHeaders(cfg),
+    });
+    if (res.status === 403) {
+      setStatus("Clear is disabled in this deployment.", true);
+      return;
     }
-    path.setAttribute("d", d.trim());
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", stroke);
-    path.setAttribute("stroke-width", "2.2");
-    if (dash) path.setAttribute("stroke-dasharray", dash);
-    svg.appendChild(path);
-  };
-
-  drawLine(req, "#30d5c8");
-  drawLine(resp, "#9ab6ff", "6 4");
-  svg.appendChild(textNode(8, 18, "avg payload bytes over time", "#99b6c8", 12));
-  svg.appendChild(textNode(width - 14, 18, "request", "#30d5c8", 11, "end"));
-  svg.appendChild(textNode(width - 14, 34, "response", "#9ab6ff", 11, "end"));
-}
-
-function summarizeGroupMap(mapObj) {
-  return Object.entries(mapObj)
-    .map(([key, v]) => ({ key, ...v }))
-    .sort((a, b) => (b.count || 0) - (a.count || 0));
-}
-
-function normalizeEvents(rawEvents) {
-  return rawEvents.map((e) => ({
-    ...e,
-    total_latency_ms: e.total_latency_ms ?? (Number(e.total_latency || 0) / 1_000_000),
-    upstream_latency_ms: e.upstream_latency_ms ?? (Number(e.upstream_latency || 0) / 1_000_000),
-  }));
-}
-
-function fmtTimestamp(value) {
-  if (!value) return "-";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return String(value);
-  return d.toLocaleString();
-}
-
-function fmtRatio(value) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return "0.00";
-  return Number(value).toFixed(2);
-}
-
-function fmtDurationFromNsToMs(value) {
-  return `${(Number(value || 0) / 1_000_000).toFixed(3)} ms`;
-}
-
-function renderEventsTable(events) {
-  const tbody = byId("eventsTable");
-  if (!events.length) {
-    tbody.innerHTML = '<tr><td colspan="14">No events in selected window</td></tr>';
-    return;
+    if (!res.ok) {
+      setStatus(`Failed to clear analytics (${res.status}).`, true);
+      return;
+    }
+    setStatus("Analytics cleared.");
+    await refresh();
+  } catch (err) {
+    setStatus(`Failed to clear analytics: ${err.message}`, true);
   }
-
-  tbody.innerHTML = events
-    .slice(-100)
-    .reverse()
-    .map(
-      (e) => `
-      <tr>
-        <td>${fmtTimestamp(e.timestamp)}</td>
-        <td>${e.prefix || "-"}</td>
-        <td>${e.service || "-"}</td>
-        <td>${e.method || "-"}</td>
-        <td>${e.tier || "-"}</td>
-        <td>${fmtDurationFromNsToMs(e.total_latency)}</td>
-        <td>${fmtDurationFromNsToMs(e.upstream_latency)}</td>
-        <td>${e.cache_hit ? "true" : "false"}</td>
-        <td>${Number(e.limit_used || 0)}</td>
-        <td>${fmtRatio(e.limit_used_of_total)}</td>
-        <td>${Number(e.request_size_bytes || 0)}</td>
-        <td>${Number(e.response_size_bytes || 0)}</td>
-        <td>${Number(e.response_code || 0)}</td>
-        <td>${e.upstream_error ? "true" : "false"}</td>
-      </tr>
-    `,
-    )
-    .join("");
-}
-
-function renderSlowTable(events) {
-  const buckets = new Map();
-  for (const e of events) {
-    const key = `${e.service || "-"}|${e.prefix || "-"}|${e.method || "-"}`;
-    const item = buckets.get(key) || {
-      service: e.service || "-",
-      prefix: e.prefix || "-",
-      method: e.method || "-",
-      count: 0,
-      totalMs: 0,
-      rateLimited: 0,
-      upstreamErrors: 0,
-    };
-    item.count += 1;
-    item.totalMs += Number(e.total_latency_ms || 0);
-    if (Number(e.response_code) === 429) item.rateLimited += 1;
-    if (e.upstream_error) item.upstreamErrors += 1;
-    buckets.set(key, item);
-  }
-
-  const rows = [...buckets.values()]
-    .map((r) => ({ ...r, avg: r.count ? r.totalMs / r.count : 0 }))
-    .sort((a, b) => b.avg - a.avg)
-    .slice(0, 12);
-
-  byId("slowTable").innerHTML = rows
-    .map(
-      (r) => `
-        <tr>
-          <td>${r.service}</td>
-          <td>${r.prefix}</td>
-          <td>${r.method}</td>
-          <td>${r.avg.toFixed(1)} ms</td>
-          <td>${r.rateLimited}</td>
-          <td>${r.upstreamErrors}</td>
-        </tr>
-      `,
-    )
-    .join("");
 }
 
 async function refresh() {
   const cfg = getConfig();
-  const qs = toQS(cfg);
-  setStatus("Loading analytics window...");
+  setStatus("Loading summary...");
 
   try {
-    const [summary, groupedByService, groupedByPrefix, eventsRes] = await Promise.all([
-      callAPI(`/analytics/summary?${qs.toString()}`, cfg),
-      callAPI(`/analytics/summary?group_by=service&${qs.toString()}`, cfg),
-      callAPI(`/analytics/summary?group_by=prefix&${qs.toString()}`, cfg),
-      callAPI(`/analytics/events?${qs.toString()}`, cfg),
-    ]);
+    const res = await fetchJsonWithAuth(buildSummaryUrl(cfg), cfg);
+    const payload = await res.json();
 
-    state.summary = summary;
-    state.groupedByService = groupedByService;
-    state.groupedByPrefix = groupedByPrefix;
-    state.events = normalizeEvents(eventsRes.events || []);
+    if (res.status === 202 || payload.status === "processing") {
+      setStatus("Summary cache warming. Please retry shortly.");
+      return;
+    }
+    if (!res.ok) {
+      setStatus(`Failed to load summary (${res.status}).`, true);
+      return;
+    }
 
-    renderStats(state.summary);
-    drawTimeline("timelineChart", state.events.slice(-120));
-    drawStatusTimeline("statusTimelineChart", state.events.slice(-240));
-    drawSizeTimeline("sizeTimelineChart", state.events.slice(-240));
-    drawBarChart("serviceChart", summarizeGroupMap(state.groupedByService).slice(0, 10), "count", "#f4a261");
-    drawBarChart(
-      "prefixChart",
-      summarizeGroupMap(state.groupedByPrefix)
-        .map((x) => ({ ...x, rate_limited_count: x.rate_limited_count || 0 }))
-        .sort((a, b) => b.rate_limited_count - a.rate_limited_count)
-        .slice(0, 10),
-      "rate_limited_count",
-      "#f46060",
-    );
-    renderSlowTable(state.events);
-    renderEventsTable(state.events);
+    if (state.authFailed) {
+      state.authFailed = false;
+      byId("authBanner").hidden = true;
+      if (!state.poller) state.poller = setInterval(refresh, 15000);
+    }
 
-    setStatus(`Updated ${new Date().toLocaleTimeString()} (${state.summary.count || 0} samples)`);
+    renderSummary(payload.summary);
+    renderSeries(payload.series);
+    setStatus(`Updated ${new Date().toLocaleTimeString()}`);
   } catch (err) {
-    setStatus(`Failed to load data: ${err.message}`, true);
+    if (err.message !== "Unauthorized") {
+      setStatus(`Failed to load summary: ${err.message}`, true);
+    }
+  }
+}
+
+function attachFilterListeners() {
+  const ids = [
+    "interval",
+    "filterStart",
+    "filterEnd",
+    "filterPrefix",
+    "filterService",
+    "filterEdge",
+    "filterTier",
+    "filterMethod",
+    "filterRcMin",
+    "filterRcMax",
+    "filterCacheHit",
+    "filterUpstreamError",
+    "filterLatencyMin",
+    "filterLatencyMax",
+  ];
+  for (const id of ids) {
+    const el = byId(id);
+    if (!el) continue;
+    el.addEventListener("change", refresh);
   }
 }
 
 function bootstrap() {
   byId("apiBase").value = `${window.location.protocol}//${window.location.host}`;
   byId("refreshBtn").addEventListener("click", refresh);
+  byId("clearBtn").addEventListener("click", clearAnalytics);
+  byId("token").addEventListener("change", refresh);
+  attachFilterListeners();
+  loadFeatures();
   refresh();
+  state.poller = setInterval(refresh, 15000);
 }
 
 bootstrap();

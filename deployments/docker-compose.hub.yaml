@@ -15,11 +15,6 @@ services:
       timeout: 3s
       retries: 5
 
-  nats:
-    image: nats:2.10-alpine
-    container_name: nats
-    command: ["-js"]
-
   hub-server:
     build:
       context: ..
@@ -28,13 +23,11 @@ services:
     depends_on:
       hub-redis:
         condition: service_healthy
-      nats:
-        condition: service_started
     environment:
       - PORT=${HUB_PORT:-8080}
       - HUB_GRPC_PORT=${HUB_GRPC_PORT:-9090}
       - REDIS_ADDR=hub-redis:6379
-      - NATS_URL=nats://nats:4222
+      - NATS_TIER_URL=${NATS_TIER_URL:?Set NATS_TIER_URL (e.g. nats://<edge-host>:4222)}
       - NATS_TIER_UPDATES_SUBJECT=${NATS_TIER_UPDATES_SUBJECT:-tier.updates}
       - HUB_UPDATES_CHANNEL=${HUB_UPDATES_CHANNEL:-hub_updates}
       - HUB_CONFIG_RELOAD_CHANNEL=${HUB_CONFIG_RELOAD_CHANNEL:-gate:config:reload}

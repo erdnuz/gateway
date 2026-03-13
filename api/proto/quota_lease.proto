@@ -15,6 +15,12 @@ message QuotaLeaseResponse {
   int64 granted_tokens = 1;
   int64 lease_ttl_seconds = 2;
   int64 remaining_global = 3;
+  // waiting_for_capacity is true when the Hub has zero quota available.
+  // The Edge must enter WAITING state and short-circuit all traffic with 429.
+  bool waiting_for_capacity = 4;
+  // retry_after_ms is the Hub's hint for when the Edge should retry the lease
+  // request. Only set when waiting_for_capacity is true.
+  int64 retry_after_ms = 5;
 }
 
 service QuotaLeaseService {

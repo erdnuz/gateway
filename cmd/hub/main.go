@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/redis/go-redis/v9" // Updated to v9
 	"google.golang.org/grpc"
@@ -36,30 +37,19 @@ func main() {
 			}
 		}
 	}
-	cfgManager, err := hub.NewConfigManager(configFilePath)
-	if err != nil {
-		log.Fatalf("Config load error: %v", err)
-	}
-	runtimePolicy := cfgManager.Get().Runtime.Effective()
-	defaults := types.DefaultRuntimePolicy()
-	if len(cfgManager.Get().Runtime.Hub.CORSAllowedHeaders) == 0 {
-		log.Printf("warning: runtime.hub.cors_allowed_headers missing; using safe default %v", defaults.Hub.CORSAllowedHeaders)
-	}
-	if cfgManager.Get().Runtime.Hub.CORSPreflightMaxAge <= 0 {
-		log.Printf("warning: runtime.hub.cors_preflight_max_age missing; using safe default %s", defaults.Hub.CORSPreflightMaxAge)
-	}
-	if len(cfgManager.Get().Runtime.Hub.CORSAllowedMethods) == 0 {
-		log.Printf("warning: runtime.hub.cors_allowed_methods missing; using safe default %v", defaults.Hub.CORSAllowedMethods)
-	}
-	if strings.TrimSpace(cfgManager.Get().Runtime.Hub.APIKeyPattern) == "" {
-		log.Printf("warning: runtime.hub.api_key_pattern missing; using safe default %q", defaults.Hub.APIKeyPattern)
-	}
-	if cfgManager.Get().Runtime.Hub.MaxDelta <= 0 {
-		log.Printf("warning: runtime.hub.max_delta missing; using safe default %d", defaults.Hub.MaxDelta)
-	}
+	cfgManager := hub.MustNewConfigManager(configFilePath)
+	hubPolicy := cfgManager.HubPolicy()
 
 	// 3. Infrastructure (Redis)
-	rdb := redis.NewClient(&redis.Options{Addr: config.String("REDIS_ADDR", "localhost:6379")})
+	rdb := redis.NewClient(&redis.Options{
+		Addr:         config.String("REDIS_ADDR", "localhost:6379"),
+		DialTimeout:  config.Duration("HUB_REDIS_DIAL_TIMEOUT", 200*time.Millisecond),
+		ReadTimeout:  config.Duration("HUB_REDIS_READ_TIMEOUT", 300*time.Millisecond),
+		WriteTimeout: config.Duration("HUB_REDIS_WRITE_TIMEOUT", 300*time.Millisecond),
+		PoolTimeout:  config.Duration("HUB_REDIS_POOL_TIMEOUT", 500*time.Millisecond),
+		PoolSize:     config.Int("HUB_REDIS_POOL_SIZE", 64),
+		MinIdleConns: config.Int("HUB_REDIS_MIN_IDLE_CONNS", 16),
+	})
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("Redis Ping Error: %v", err)
 	}
@@ -75,7 +65,8 @@ func main() {
 	}
 	hubUpdatesChannel := config.String("HUB_UPDATES_CHANNEL", types.DefaultHubUpdatesChannel)
 	natsURL := config.String("NATS_URL", "nats://localhost:4222")
-	natsTierUpdatesSubject := config.String("NATS_TIER_UPDATES_SUBJECT", runtimePolicy.Hub.TierUpdatesSubject)
+	natsTierURL := config.String("NATS_TIER_URL", natsURL)
+	natsTierUpdatesSubject := config.String("NATS_TIER_UPDATES_SUBJECT", hubPolicy.TierUpdatesSubject)
 
 	tierStore := hub.NewTierManager(rdb)
 
@@ -93,22 +84,22 @@ func main() {
 		tierStore,
 		rateManager,
 		hubAuthToken,
-		config.Int64("MAX_DELTA", runtimePolicy.Hub.MaxDelta),
+		config.Int64("MAX_DELTA", hubPolicy.MaxDelta),
 		hubUpdatesChannel,
 	)
 	server.SetCORSAllowedOrigins(splitCSV(config.String("HUB_EDGE_ALLOWED_ORIGINS", "http://localhost:8082")))
-	server.SetCORSPreflightPolicy(runtimePolicy.Hub.CORSAllowedHeaders, runtimePolicy.Hub.CORSAllowedMethods, runtimePolicy.Hub.CORSPreflightMaxAge)
-	if err := server.SetAPIKeyPattern(runtimePolicy.Hub.APIKeyPattern); err != nil {
+	server.SetCORSPreflightPolicy(hubPolicy.CORSAllowedHeaders, hubPolicy.CORSAllowedMethods, hubPolicy.CORSPreflightMaxAge)
+	if err := server.SetAPIKeyPattern(hubPolicy.APIKeyPattern); err != nil {
 		log.Fatalf("invalid runtime.hub.api_key_pattern: %v", err)
 	}
 	server.SetConfigReloadChannel(config.String("HUB_CONFIG_RELOAD_CHANNEL", types.DefaultConfigReloadChannel))
 	server.SetAsyncQueueConfig(
-		config.Int("HUB_QUEUE_WORKERS", runtimePolicy.Hub.QueueWorkers),
-		config.Duration("HUB_QUEUE_SUBMIT_TIMEOUT", runtimePolicy.Hub.QueueSubmitTimeout),
-		config.Int("HUB_QUEUE_RETRY_MAX", runtimePolicy.Hub.QueueRetryMax),
-		config.Duration("HUB_QUEUE_RETRY_BACKOFF", runtimePolicy.Hub.QueueRetryBackoff),
+		config.Int("HUB_QUEUE_WORKERS", hubPolicy.QueueWorkers),
+		config.Duration("HUB_QUEUE_SUBMIT_TIMEOUT", hubPolicy.QueueSubmitTimeout),
+		config.Int("HUB_QUEUE_RETRY_MAX", hubPolicy.QueueRetryMax),
+		config.Duration("HUB_QUEUE_RETRY_BACKOFF", hubPolicy.QueueRetryBackoff),
 	)
-	server.SetTierUpdateMessaging(natsURL, natsTierUpdatesSubject)
+	server.SetTierUpdateMessaging(natsTierURL, natsTierUpdatesSubject)
 	server.StartBackgroundWorkers(ctx)
 
 	grpcAddr := ":" + config.String("HUB_GRPC_PORT", "9090")
@@ -145,8 +136,8 @@ func main() {
 		Addr:    port,
 		Handler: server,
 		// Set timeouts so hung clients don't eat your resources
-		ReadTimeout:  runtimePolicy.Hub.HTTPReadTimeout,
-		WriteTimeout: runtimePolicy.Hub.HTTPWriteTimeout,
+		ReadTimeout:  hubPolicy.HTTPReadTimeout,
+		WriteTimeout: hubPolicy.HTTPWriteTimeout,
 	}
 
 	go func() {
@@ -160,7 +151,7 @@ func main() {
 	<-ctx.Done()
 	log.Println("Shutdown signal received...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), runtimePolicy.Hub.HTTPShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), hubPolicy.HTTPShutdownTimeout)
 	defer cancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

@@ -3,6 +3,7 @@ package edge
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"gateway/packages/common/types"
@@ -14,9 +15,15 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+)
+
+const (
+	edgeReadyProbeInterval = 2 * time.Second
+	edgeReadyProbeTimeout  = 150 * time.Millisecond
 )
 
 type contextKey int
@@ -62,9 +69,12 @@ type EdgeServer struct {
 	tierManager               *TierManager
 	rateManager               *RateManager
 	analyticsSink             AnalyticsSink
+	edgeID                    string
 	rdb                       *redis.Client
 	client                    *http.Client
 	maxCacheableResponseBytes int64
+	readyHealthy              atomic.Bool
+	readyProbeStarted         atomic.Bool
 }
 
 type EdgeServerOptions struct {
@@ -72,6 +82,7 @@ type EdgeServerOptions struct {
 	MaxCacheableResponseBytes int64
 	UpstreamMaxIdleConns      int
 	UpstreamIdleConnTimeout   time.Duration
+	EdgeID                    string
 }
 
 // NewEdgeServer creates a new edge gateway server with necessary managers
@@ -97,6 +108,7 @@ func NewEdgeServerWithOptions(configMgr *ConfigManager, tierMgr *TierManager, ra
 		tierManager:               tierMgr,
 		rateManager:               rateMgr,
 		analyticsSink:             analyticsSink,
+		edgeID:                    strings.TrimSpace(options.EdgeID),
 		rdb:                       rdb,
 		maxCacheableResponseBytes: options.MaxCacheableResponseBytes,
 		client: &http.Client{
@@ -109,11 +121,42 @@ func NewEdgeServerWithOptions(configMgr *ConfigManager, tierMgr *TierManager, ra
 			},
 		},
 	}
+	if es.edgeID == "" {
+		es.edgeID = "unknown-edge"
+	}
+	es.readyHealthy.Store(true)
 
 	return es
 }
 
+func (s *EdgeServer) startReadinessProbe(ctx context.Context) {
+	if s.rdb == nil {
+		s.readyHealthy.Store(true)
+		return
+	}
+	if !s.readyProbeStarted.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(edgeReadyProbeInterval)
+		defer ticker.Stop()
+		for {
+			probeCtx, cancel := context.WithTimeout(ctx, edgeReadyProbeTimeout)
+			err := s.rdb.Ping(probeCtx).Err()
+			cancel()
+			s.readyHealthy.Store(err == nil)
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
 func (s *EdgeServer) StartBackgroundWorkers(ctx context.Context) {
+	s.startReadinessProbe(ctx)
 	if s.rateManager != nil {
 		s.rateManager.StartBackgroundWorkers(ctx)
 	}
@@ -131,8 +174,18 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 		return
 	}
+	if r.URL.Path == "/analytics/metrics" {
+		if m, ok := s.analyticsSink.(interface{ Stats() AnalyticsManagerStats }); ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(m.Stats())
+			return
+		}
+		http.Error(w, "analytics metrics unavailable", http.StatusNotFound)
+		return
+	}
 	if r.URL.Path == "/readyz" {
-		if s.rdb != nil && s.rdb.Ping(r.Context()).Err() != nil {
+		if !s.readyHealthy.Load() {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -149,7 +202,7 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		requestStatePool.Put(state)
 	}()
 	if s.analyticsSink != nil {
-		state.analytics = &types.AnalyticsEntry{Timestamp: time.Now(), Method: r.Method}
+		state.analytics = &types.AnalyticsEntry{Timestamp: time.Now(), Method: r.Method, EdgeID: s.edgeID}
 	}
 	ctx := context.WithValue(r.Context(), requestStateCtxKey, state)
 

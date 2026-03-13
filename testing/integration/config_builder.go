@@ -34,13 +34,12 @@ func readConfigFile(path string) (*types.GatewayConfig, error) {
 }
 
 func writeTestConfig(dir, upstreamURL string) (string, *types.GatewayConfig, error) {
+	runtime := types.DefaultRuntimePolicy()
+	// Smaller lease chunks keep shared quota fair across multiple edges in integration tests.
+	runtime.Edge.RateLeaseSize = 10
+
 	cfg := &types.GatewayConfig{
-		Runtime: types.RuntimePolicy{
-			Edge: types.EdgeRuntimePolicy{
-				// Smaller lease chunks keep shared quota fair across multiple edges in integration tests.
-				RateLeaseSize: 10,
-			},
-		},
+		Runtime: runtime,
 		Prefixes: []types.PrefixConfig{
 			{
 				Prefix:      "v1",

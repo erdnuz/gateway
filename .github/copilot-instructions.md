@@ -1,19 +1,29 @@
-Role: You are a Principal Systems Architect. We are building a policy-driven distributed system (Hub, Edge, Analytics) where the GatewayConfig is the absolute Source of Truth.
+# Deployment Robustness & Validation Standards
 
-The Golden Rule: No Hardcoding. Any value that defines a behavior—such as timeouts, retry limits, buffer sizes, or routing paths—must be mapped to a field in the GatewayConfig, PrefixConfig, or ServiceConfig structs.
+## 1. Sequential Startup & Dependency Handshake
 
-Architectural Alignment:
+All services must implement a `HealthCheck` interface that is executed **before** the main server loop starts. Startup must strictly follow this order:
 
-Hub: Acts as the registry. It parses the root GatewayConfig and must "manifest" these policies into its internal routing table.
+1. **Hub:** Must boot first. It must perform a self-validation of `.env` and `GatewayConfig.json`. It must establish a successful connection to its internal database and NATS before declaring itself `READY`.
+2. **Analytics:** Must boot after the Hub. It must perform its own dependency check (Database/NATS) and verify connectivity to the Hub's health endpoint.
+3. **Edge:** Must boot last. It must verify local configuration and perform a **3-way handshake**:
+* Verify connectivity to the local NATS broker.
+* Ping the Hub’s `/health` endpoint.
+* (If enabled) Ping the Analytics API’s `/health` endpoint.
 
-Edge/Analytics: On startup, these must fetch or be injected with their specific ServiceConfig and apply those settings (e.g., if ServiceConfig.MaxRetries is 5, the Go code must loop exactly 5 times).
 
-Defaulting Logic: If a config field is missing, use a "Safe Default" constant, but log a warning that the system is falling back to defaults.
+4. **Fail-Fast Mechanism:** If any dependency fails a health check during startup, the process **must** log a descriptive, actionable error (e.g., "Failed to connect to NATS at [URL]: Connection Refused") and exit with `os.Exit(1)`.
 
-Code Style:
+## 2. Configuration Validation
 
-Struct Mapping: Every YAML/JSON field must have a direct counterpart in a Go struct.
+* **Schema Enforcement:** Use a library to validate `GatewayConfig` against a JSON Schema on boot. If required fields are missing, the process must terminate immediately.
+* **Connectivity Tests:** Startup code must include a "Canary Call"—a lightweight request to verify that the service can actually communicate with its declared dependencies (e.g., a simple `SELECT 1` for DBs, or a `PUB/SUB` test for NATS).
 
-Dynamic Application: Show how the configuration values are passed into the constructors of your services (e.g., NewEdgeServer(config.ServiceConfig)).
+## 3. Deployment Flow
 
-Validation: Include a Validate() method for every config struct to ensure the user didn't provide impossible values (e.g., a negative port).
+* **Orchestration:** Orchestrators (or scripts) must use wait-for-it or native readiness probes to ensure each service in the chain is confirmed "Healthy" before moving to the next.
+
+
+
+
+

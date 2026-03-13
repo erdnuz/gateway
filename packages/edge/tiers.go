@@ -17,7 +17,9 @@ import (
 )
 
 const (
-	tierCacheTTL = 1 * time.Hour
+	tierCacheTTL          = 1 * time.Hour
+	defaultTierRedisOpTTL = 150 * time.Millisecond
+	defaultTierHubOpTTL   = 500 * time.Millisecond
 )
 
 type TierManager struct {
@@ -99,7 +101,9 @@ func (tm *TierManager) GetUserTier(ctx context.Context, prefix, apiKey string) (
 	cacheKey := tm.getCacheKey(prefix, apiKey)
 
 	// 1. L1: Fast-path (Redis)
-	val, err := tm.rdb.Get(ctx, cacheKey).Result()
+	redisCtx, redisCancel := context.WithTimeout(ctx, defaultTierRedisOpTTL)
+	val, err := tm.rdb.Get(redisCtx, cacheKey).Result()
+	redisCancel()
 	if err == nil {
 		tm.stale.Store(cacheKey, tierSnapshot{tier: val, updatedAt: time.Now()})
 		return val, nil
@@ -107,7 +111,9 @@ func (tm *TierManager) GetUserTier(ctx context.Context, prefix, apiKey string) (
 
 	// 2. L2: Slow-path (Hub) with thundering herd protection
 	result, err, _ := tm.group.Do(cacheKey, func() (interface{}, error) {
-		tier, err := tm.fetchFromHub(ctx, prefix, apiKey)
+		hubCtx, hubCancel := context.WithTimeout(ctx, defaultTierHubOpTTL)
+		defer hubCancel()
+		tier, err := tm.fetchFromHub(hubCtx, prefix, apiKey)
 		if err != nil {
 			return "", err
 		}
@@ -115,7 +121,9 @@ func (tm *TierManager) GetUserTier(ctx context.Context, prefix, apiKey string) (
 		// 3. Backfill Redis so the next request is O(1)
 		// We use a background context here so the client request doesn't
 		// wait for the Redis write to finish.
-		if err := tm.rdb.Set(context.Background(), cacheKey, tier, tierCacheTTL).Err(); err != nil {
+		backfillCtx, backfillCancel := context.WithTimeout(context.Background(), defaultTierRedisOpTTL)
+		defer backfillCancel()
+		if err := tm.rdb.Set(backfillCtx, cacheKey, tier, tierCacheTTL).Err(); err != nil {
 			log.Printf("edge tier cache set failed key=%s err=%v", cacheKey, err)
 		}
 		tm.stale.Store(cacheKey, tierSnapshot{tier: tier, updatedAt: time.Now()})
@@ -222,15 +230,20 @@ func (tm *TierManager) applyTierUpdatePayload(ctx context.Context, payload strin
 	tierID := parts[3]
 	cacheKey := tm.getCacheKey(prefix, apiKey)
 	if tierID == "" {
-		if err := tm.rdb.Del(ctx, cacheKey).Err(); err != nil {
+		redisCtx, redisCancel := context.WithTimeout(ctx, defaultTierRedisOpTTL)
+		if err := tm.rdb.Del(redisCtx, cacheKey).Err(); err != nil {
 			log.Printf("edge tier cache delete failed key=%s err=%v", cacheKey, err)
 		}
+		redisCancel()
 		tm.stale.Delete(cacheKey)
 		return
 	}
-	if err := tm.rdb.Set(ctx, cacheKey, tierID, tierCacheTTL).Err(); err != nil {
+	redisCtx, redisCancel := context.WithTimeout(ctx, defaultTierRedisOpTTL)
+	if err := tm.rdb.Set(redisCtx, cacheKey, tierID, tierCacheTTL).Err(); err != nil {
 		log.Printf("edge tier cache update failed key=%s tier=%s err=%v", cacheKey, tierID, err)
+		redisCancel()
 		return
 	}
+	redisCancel()
 	tm.stale.Store(cacheKey, tierSnapshot{tier: tierID, updatedAt: time.Now()})
 }

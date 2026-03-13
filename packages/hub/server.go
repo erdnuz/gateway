@@ -10,38 +10,73 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9" // Updated to v9
 )
 
+type corsPolicy struct {
+	allowed           map[string]struct{}
+	allowHeaders      []string
+	allowMethods      []string
+	maxAge            time.Duration
+	allowHeadersValue string
+	allowMethodsValue string
+	maxAgeValue       string
+}
+
+const hubReadyRedisTimeout = 200 * time.Millisecond
+
+func newCORSPolicy(origins map[string]struct{}, allowedHeaders, allowedMethods []string, maxAge time.Duration) *corsPolicy {
+	if origins == nil {
+		origins = map[string]struct{}{}
+	}
+	originsCopy := make(map[string]struct{}, len(origins))
+	for k, v := range origins {
+		originsCopy[k] = v
+	}
+	headersCopy := append([]string(nil), allowedHeaders...)
+	methodsCopy := append([]string(nil), allowedMethods...)
+
+	return &corsPolicy{
+		allowed:           originsCopy,
+		allowHeaders:      headersCopy,
+		allowMethods:      methodsCopy,
+		maxAge:            maxAge,
+		allowHeadersValue: strings.Join(headersCopy, ", "),
+		allowMethodsValue: strings.Join(methodsCopy, ", "),
+		maxAgeValue:       strconv.FormatInt(int64(maxAge.Seconds()), 10),
+	}
+}
+
 type HubServer struct {
-	rdb              *redis.Client
-	cfgManager       ConfigStore
-	tierManager      TierStore
-	rateManager      RateLimiter
-	authToken        string
-	maxDelta         int64
-	hubUpdatesChan   string
-	asyncQueue       *workers.BoundedQueue
-	queueWorkers     int
-	submitTimeout    time.Duration
-	retryMax         int
-	retryBackoff     time.Duration
-	tierUpdateConn   *nats.Conn
-	tierUpdateSubj   string
-	configReloadChan string
-	corsAllowed      map[string]struct{}
-	corsAllowHeaders []string
-	corsAllowMethods []string
-	corsMaxAge       time.Duration
-	apiKeyPattern    *regexp.Regexp
+	rdb               *redis.Client
+	cfgManager        ConfigRegistry
+	tierManager       TierStore
+	rateManager       RateLimiter
+	authToken         string
+	maxDelta          int64
+	hubUpdatesChan    string
+	asyncQueue        *workers.BoundedQueue
+	queueWorkers      int
+	submitTimeout     time.Duration
+	retryMax          int
+	retryBackoff      time.Duration
+	tierUpdateConn    *nats.Conn
+	tierUpdateSubj    string
+	configReloadChan  string
+	corsPolicy        atomic.Pointer[corsPolicy]
+	apiKeyPattern     atomic.Pointer[regexp.Regexp]
+	readyHealthy      atomic.Bool
+	readyProbeStarted atomic.Bool
+	tierPublishErrors atomic.Uint64
 }
 
 func NewHubServerWithManagers(
 	rdb *redis.Client,
-	cfg ConfigStore,
+	cfg ConfigRegistry,
 	tierStore TierStore,
 	rateLimiter RateLimiter,
 	authToken string,
@@ -55,7 +90,7 @@ func NewHubServerWithManagers(
 		hubUpdatesChannel = types.DefaultHubUpdatesChannel
 	}
 	queue := workers.NewBoundedQueue(512)
-	return &HubServer{
+	server := &HubServer{
 		rdb:              rdb,
 		cfgManager:       cfg,
 		tierManager:      tierStore,
@@ -69,15 +104,35 @@ func NewHubServerWithManagers(
 		retryMax:         1,
 		retryBackoff:     10 * time.Millisecond,
 		configReloadChan: types.DefaultConfigReloadChannel,
-		corsAllowed:      map[string]struct{}{},
-		corsAllowHeaders: []string{"Authorization", "Content-Type", "X-API-Key"},
-		corsAllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		corsMaxAge:       5 * time.Minute,
-		apiKeyPattern:    regexp.MustCompile(types.DefaultRuntimePolicy().Hub.APIKeyPattern),
 	}
+	server.readyHealthy.Store(true)
+	server.corsPolicy.Store(newCORSPolicy(
+		map[string]struct{}{},
+		[]string{"Authorization", "Content-Type", "X-API-Key"},
+		[]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		5*time.Minute,
+	))
+	server.apiKeyPattern.Store(regexp.MustCompile(types.DefaultRuntimePolicy().Hub.APIKeyPattern))
+	return server
+}
+
+func (s *HubServer) currentCORSPolicy() *corsPolicy {
+	policy := s.corsPolicy.Load()
+	if policy != nil {
+		return policy
+	}
+	fallback := newCORSPolicy(
+		map[string]struct{}{},
+		[]string{"Authorization", "Content-Type", "X-API-Key"},
+		[]string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		5*time.Minute,
+	)
+	s.corsPolicy.Store(fallback)
+	return fallback
 }
 
 func (s *HubServer) SetCORSAllowedOrigins(origins []string) {
+	current := s.currentCORSPolicy()
 	allowed := make(map[string]struct{}, len(origins))
 	for _, origin := range origins {
 		v := strings.TrimSpace(strings.TrimSuffix(origin, "/"))
@@ -85,7 +140,7 @@ func (s *HubServer) SetCORSAllowedOrigins(origins []string) {
 			allowed[v] = struct{}{}
 		}
 	}
-	s.corsAllowed = allowed
+	s.corsPolicy.Store(newCORSPolicy(allowed, current.allowHeaders, current.allowMethods, current.maxAge))
 }
 
 func (s *HubServer) SetConfigReloadChannel(channel string) {
@@ -96,15 +151,20 @@ func (s *HubServer) SetConfigReloadChannel(channel string) {
 }
 
 func (s *HubServer) SetCORSPreflightPolicy(allowedHeaders, allowedMethods []string, maxAge time.Duration) {
+	current := s.currentCORSPolicy()
+	nextHeaders := current.allowHeaders
+	nextMethods := current.allowMethods
+	nextMaxAge := current.maxAge
 	if len(allowedHeaders) > 0 {
-		s.corsAllowHeaders = allowedHeaders
+		nextHeaders = allowedHeaders
 	}
 	if len(allowedMethods) > 0 {
-		s.corsAllowMethods = allowedMethods
+		nextMethods = allowedMethods
 	}
 	if maxAge > 0 {
-		s.corsMaxAge = maxAge
+		nextMaxAge = maxAge
 	}
+	s.corsPolicy.Store(newCORSPolicy(current.allowed, nextHeaders, nextMethods, nextMaxAge))
 }
 
 func (s *HubServer) SetAPIKeyPattern(pattern string) error {
@@ -116,7 +176,7 @@ func (s *HubServer) SetAPIKeyPattern(pattern string) error {
 	if err != nil {
 		return err
 	}
-	s.apiKeyPattern = re
+	s.apiKeyPattern.Store(re)
 	return nil
 }
 
@@ -152,9 +212,36 @@ func (s *HubServer) SetAsyncQueueConfig(workersCount int, submitTimeout time.Dur
 }
 
 func (s *HubServer) StartBackgroundWorkers(ctx context.Context) {
+	s.startReadinessProbe(ctx)
 	if s.asyncQueue != nil {
 		s.asyncQueue.Start(ctx, s.queueWorkers)
 	}
+}
+
+func (s *HubServer) startReadinessProbe(ctx context.Context) {
+	if s.rdb == nil {
+		s.readyHealthy.Store(true)
+		return
+	}
+	if !s.readyProbeStarted.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			probeCtx, cancel := context.WithTimeout(ctx, hubReadyRedisTimeout)
+			err := s.rdb.Ping(probeCtx).Err()
+			cancel()
+			s.readyHealthy.Store(err == nil)
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }
 
 func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -174,9 +261,6 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch parts[0] {
-	case "health":
-		s.handleHealth(w, r)
-		return
 	case "healthz":
 		s.handleHealth(w, r)
 		return
@@ -195,6 +279,8 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleConfig(w, r)
 	case "config-reload":
 		s.handleConfigReload(w, r)
+	case "queue-metrics":
+		s.handleQueueMetrics(w, r)
 	case "tiers":
 		s.handleTiers(w, r, ctx, parts[1:])
 	case "rate":
@@ -205,6 +291,7 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HubServer) handleCORS(w http.ResponseWriter, r *http.Request) bool {
+	policy := s.currentCORSPolicy()
 	origin := strings.TrimSpace(strings.TrimSuffix(r.Header.Get("Origin"), "/"))
 	if origin == "" {
 		return false
@@ -218,9 +305,9 @@ func (s *HubServer) handleCORS(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Methods", strings.Join(s.corsAllowMethods, ", "))
-		w.Header().Set("Access-Control-Allow-Headers", strings.Join(s.corsAllowHeaders, ", "))
-		w.Header().Set("Access-Control-Max-Age", strconv.FormatInt(int64(s.corsMaxAge.Seconds()), 10))
+		w.Header().Set("Access-Control-Allow-Methods", policy.allowMethodsValue)
+		w.Header().Set("Access-Control-Allow-Headers", policy.allowHeadersValue)
+		w.Header().Set("Access-Control-Max-Age", policy.maxAgeValue)
 		w.WriteHeader(http.StatusNoContent)
 		return true
 	}
@@ -228,10 +315,11 @@ func (s *HubServer) handleCORS(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *HubServer) isCORSOriginAllowed(origin string) bool {
-	if len(s.corsAllowed) == 0 {
+	policy := s.currentCORSPolicy()
+	if len(policy.allowed) == 0 {
 		return false
 	}
-	_, ok := s.corsAllowed[origin]
+	_, ok := policy.allowed[origin]
 	return ok
 }
 
@@ -307,7 +395,7 @@ func (s *HubServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	config := s.cfgManager.Get()
+	config := s.cfgManager.Snapshot()
 	if err := json.NewEncoder(w).Encode(config); err != nil {
 		s.writeInternalError(w, "handleConfig", err)
 	}
@@ -319,7 +407,7 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	cfgMgr, ok := s.cfgManager.(*ConfigManager)
+	cfgMgr, ok := s.cfgManager.(interface{ ReloadFromFile() error })
 	if !ok {
 		http.Error(w, "config reload unsupported", http.StatusNotImplemented)
 		return
@@ -329,7 +417,11 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.rdb != nil {
-		_ = s.rdb.Publish(r.Context(), s.configReloadChan, time.Now().UTC().Format(time.RFC3339Nano)).Err()
+		go func(channel, payload string) {
+			pubCtx, cancel := context.WithTimeout(context.Background(), hubReadyRedisTimeout)
+			defer cancel()
+			_ = s.rdb.Publish(pubCtx, channel, payload).Err()
+		}(s.configReloadChan, time.Now().UTC().Format(time.RFC3339Nano))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -339,12 +431,30 @@ func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.rdb == nil || s.rdb.Ping(r.Context()).Err() != nil {
+	if !s.readyHealthy.Load() {
 		http.Error(w, "not ready", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+}
+
+func (s *HubServer) handleQueueMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	snapshot := workers.QueueSnapshot{}
+	if s.asyncQueue != nil {
+		snapshot = s.asyncQueue.Snapshot()
+	}
+	write := map[string]interface{}{
+		"tier_update_queue":                    snapshot,
+		"tier_update_publish_failures":         s.tierPublishErrors.Load(),
+		"tier_update_submit_non_blocking_mode": true,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(write)
 }
 
 func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx context.Context, params []string) {
@@ -423,26 +533,23 @@ func (s *HubServer) authorize(r *http.Request) bool {
 }
 
 func (s *HubServer) isAllowedPrefix(prefix string) bool {
-	cfg := s.cfgManager.Get()
-	if cfg == nil {
-		return false
-	}
-	for _, p := range cfg.Prefixes {
-		if p.Prefix == prefix {
-			return true
-		}
-	}
-	return false
+	_, ok := s.cfgManager.FindPrefix(prefix)
+	return ok
 }
 
 func (s *HubServer) matchesAPIKey(apiKey string) bool {
-	if s.apiKeyPattern == nil {
-		s.apiKeyPattern = regexp.MustCompile(types.DefaultRuntimePolicy().Hub.APIKeyPattern)
+	pattern := s.apiKeyPattern.Load()
+	if pattern == nil {
+		pattern = regexp.MustCompile(types.DefaultRuntimePolicy().Hub.APIKeyPattern)
+		s.apiKeyPattern.Store(pattern)
 	}
-	return s.apiKeyPattern.MatchString(apiKey)
+	return pattern.MatchString(apiKey)
 }
 
 func (s *HubServer) publishTierUpdate(prefix, apiKey, tierID string) {
+	if s.asyncQueue == nil {
+		return
+	}
 	task := &tierUpdateTask{
 		prefix:   prefix,
 		apiKey:   apiKey,
@@ -451,8 +558,9 @@ func (s *HubServer) publishTierUpdate(prefix, apiKey, tierID string) {
 		backoff:  s.retryBackoff,
 		conn:     s.tierUpdateConn,
 		subject:  s.tierUpdateSubj,
+		errorCnt: &s.tierPublishErrors,
 	}
-	if err := s.asyncQueue.Submit(task, s.submitTimeout); err != nil {
+	if err := s.asyncQueue.Submit(task, 0); err != nil {
 		log.Printf("hub tier update queue submit failed prefix=%s api_key=%s tier=%s err=%v", prefix, apiKey, tierID, err)
 	}
 }
@@ -465,6 +573,7 @@ type tierUpdateTask struct {
 	backoff  time.Duration
 	conn     *nats.Conn
 	subject  string
+	errorCnt *atomic.Uint64
 }
 
 func (t *tierUpdateTask) Execute(ctx context.Context) error {
@@ -474,6 +583,9 @@ func (t *tierUpdateTask) Execute(ctx context.Context) error {
 		return nil
 	}
 	if err := t.conn.Publish(t.subject, []byte(payload)); err != nil {
+		if t.errorCnt != nil {
+			t.errorCnt.Add(1)
+		}
 		log.Printf("hub tier update nats publish failed prefix=%s api_key=%s tier=%s subject=%s err=%v", t.prefix, t.apiKey, t.tierID, t.subject, err)
 		return err
 	}

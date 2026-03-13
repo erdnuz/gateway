@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"gateway/packages/common/types"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -17,6 +18,20 @@ type AnalyticsManager struct {
 	subj    string
 	timeout time.Duration
 	write   func(context.Context, *types.AnalyticsEntry) error
+
+	captured        atomic.Uint64
+	dropped         atomic.Uint64
+	published       atomic.Uint64
+	publishFailures atomic.Uint64
+}
+
+type AnalyticsManagerStats struct {
+	BufferDepth     int    `json:"buffer_depth"`
+	BufferCapacity  int    `json:"buffer_capacity"`
+	Captured        uint64 `json:"captured"`
+	Dropped         uint64 `json:"dropped"`
+	Published       uint64 `json:"published"`
+	PublishFailures uint64 `json:"publish_failures"`
 }
 
 type AnalyticsManagerOptions struct {
@@ -72,11 +87,27 @@ func NewAnalyticsManagerWithNATSOptions(bufferSize int, natsURL, subject string,
 }
 
 func (m *AnalyticsManager) Capture(entry *types.AnalyticsEntry) {
+	m.captured.Add(1)
 	// Non-blocking send to the processing worker
 	select {
 	case m.buffer <- entry:
 	default:
 		// Buffer full, drop entry to protect Edge performance
+		m.dropped.Add(1)
+	}
+}
+
+func (m *AnalyticsManager) Stats() AnalyticsManagerStats {
+	if m == nil {
+		return AnalyticsManagerStats{}
+	}
+	return AnalyticsManagerStats{
+		BufferDepth:     len(m.buffer),
+		BufferCapacity:  cap(m.buffer),
+		Captured:        m.captured.Load(),
+		Dropped:         m.dropped.Load(),
+		Published:       m.published.Load(),
+		PublishFailures: m.publishFailures.Load(),
 	}
 }
 
@@ -117,8 +148,11 @@ func (m *AnalyticsManager) StartPublisher(ctx context.Context) {
 				err := m.write(writeCtx, entry)
 				cancel()
 				if err != nil {
+					m.publishFailures.Add(1)
 					log.Printf("edge analytics nats publish failed: %v", err)
+					continue
 				}
+				m.published.Add(1)
 			case <-ctx.Done():
 				return
 			}

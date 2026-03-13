@@ -15,6 +15,7 @@ local key = KEYS[1]
 local quota = tonumber(ARGV[1])
 local requested = tonumber(ARGV[2])
 local expiry = tonumber(ARGV[3])
+local max_grant_pct = tonumber(ARGV[4])
 
 local used = tonumber(redis.call("GET", key) or "0")
 local remaining = quota - used
@@ -27,20 +28,36 @@ if grant > remaining then
   grant = remaining
 end
 
+-- Banker cap for massive requests: only apply the percentage cap when a
+-- caller asks for more than the full quota in one shot.
+if requested > quota and max_grant_pct and max_grant_pct > 0 and max_grant_pct < 100 then
+	local cap = math.floor((quota * max_grant_pct) / 100)
+	if cap < 1 then
+		cap = 1
+	end
+	if grant > cap then
+		grant = cap
+	end
+end
+
 local new_used = used + grant
 redis.call("SET", key, new_used, "EX", expiry)
 return {grant, quota - new_used}
 `)
 
+const bankerMassiveRequestCapPct = int64(25)
+
+const leaseRedisOpTimeout = 250 * time.Millisecond
+
 type QuotaLeaseServer struct {
 	types.UnimplementedQuotaLeaseServiceServer
 
 	rdb       *redis.Client
-	cfgStore  ConfigStore
+	cfgStore  ConfigRegistry
 	tierStore TierStore
 }
 
-func NewQuotaLeaseServer(rdb *redis.Client, cfgStore ConfigStore, tierStore TierStore) *QuotaLeaseServer {
+func NewQuotaLeaseServer(rdb *redis.Client, cfgStore ConfigRegistry, tierStore TierStore) *QuotaLeaseServer {
 	return &QuotaLeaseServer{rdb: rdb, cfgStore: cfgStore, tierStore: tierStore}
 }
 
@@ -49,13 +66,14 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 		return nil, err
 	}
 
-	cfg := s.cfgStore.Get()
-	prefixCfg, svcCfg, err := lookupServiceConfig(cfg, req.Prefix, req.ServiceId)
-	if err != nil {
-		return nil, err
+	prefixCfg, svcCfg, ok := s.cfgStore.FindService(req.Prefix, req.ServiceId)
+	if !ok {
+		return nil, fmt.Errorf("service %q not found in prefix %q", req.ServiceId, req.Prefix)
 	}
 
-	tierID, err := s.tierStore.GetTier(ctx, req.Prefix, req.ApiKey)
+	tierCtx, tierCancel := context.WithTimeout(ctx, leaseRedisOpTimeout)
+	tierID, err := s.tierStore.GetTier(tierCtx, req.Prefix, req.ApiKey)
+	tierCancel()
 	if err != nil {
 		return nil, fmt.Errorf("tier lookup failed: %w", err)
 	}
@@ -71,7 +89,9 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 	windowID := time.Now().Unix() / periodSeconds
 	leaseKey := fmt.Sprintf("lease-used:%s:%s:%s:%d", req.Prefix, req.ServiceId, req.ApiKey, windowID)
 
-	result, err := leaseGrantLua.Run(ctx, s.rdb, []string{leaseKey}, int64(tierCfg.Quota), req.RequestedTokens, periodSeconds*2).Int64Slice()
+	leaseCtx, leaseCancel := context.WithTimeout(ctx, leaseRedisOpTimeout)
+	result, err := leaseGrantLua.Run(leaseCtx, s.rdb, []string{leaseKey}, int64(tierCfg.Quota), req.RequestedTokens, periodSeconds*2, bankerMassiveRequestCapPct).Int64Slice()
+	leaseCancel()
 	if err != nil {
 		return nil, err
 	}
@@ -79,31 +99,28 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 		return nil, fmt.Errorf("invalid lease grant result")
 	}
 
+	// Partial-grant or zero-grant case. When available == 0, return the WAITING
+	// signal per the Hub "Banker" Logic spec (§4): the Edge must back off and
+	// schedule a retry after retry_after_ms using jitter.
+	if result[0] == 0 {
+		retryAfterMs := periodSeconds * 1000 / 10 // 10 % of the quota period, min 500 ms
+		if retryAfterMs < 500 {
+			retryAfterMs = 500
+		}
+		return &types.QuotaLeaseResponse{
+			GrantedTokens:      0,
+			LeaseTtlSeconds:    periodSeconds,
+			RemainingGlobal:    result[1],
+			WaitingForCapacity: true,
+			RetryAfterMs:       retryAfterMs,
+		}, nil
+	}
+
 	return &types.QuotaLeaseResponse{
 		GrantedTokens:   result[0],
 		LeaseTtlSeconds: periodSeconds,
 		RemainingGlobal: result[1],
 	}, nil
-}
-
-func lookupServiceConfig(cfg *types.GatewayConfig, prefixID, serviceID string) (*types.PrefixConfig, *types.ServiceConfig, error) {
-	if cfg == nil {
-		return nil, nil, fmt.Errorf("config not loaded")
-	}
-	for i := range cfg.Prefixes {
-		prefix := &cfg.Prefixes[i]
-		if prefix.Prefix != prefixID {
-			continue
-		}
-		for j := range prefix.Services {
-			svc := &prefix.Services[j]
-			if svc.ServiceID == serviceID {
-				return prefix, svc, nil
-			}
-		}
-		return nil, nil, fmt.Errorf("service %q not found in prefix %q", serviceID, prefixID)
-	}
-	return nil, nil, fmt.Errorf("prefix %q not found", prefixID)
 }
 
 func findTier(svcCfg *types.ServiceConfig, tierID string) (*types.TierConfig, bool) {

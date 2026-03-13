@@ -43,63 +43,33 @@ func main() {
 	rateHardThresholdPct := float64(rateHardThresholdPctRaw) / 100.0
 	leaseSize := config.Int64("EDGE_LEASE_SIZE", 0)
 	leaseLowWaterPctRaw := config.Int("EDGE_LEASE_LOW_WATER_PERCENT", 0)
-	leaseLowWaterPct := float64(leaseLowWaterPctRaw) / 100.0
+	leaseLowWaterPct := float64(leaseLowWaterPctRaw) // 0–100 percentage
 	hubGRPCAddr := config.String("HUB_GRPC_ADDR", "localhost:9090")
 	hubGRPCServerName := config.String("HUB_GRPC_SERVER_NAME", "")
 	edgeTLSCertFile := config.String("EDGE_TLS_CERT_FILE", "")
 	edgeTLSKeyFile := config.String("EDGE_TLS_KEY_FILE", "")
 	edgeTLSCAFile := config.String("EDGE_TLS_CA_FILE", "")
 	natsURL := config.String("NATS_URL", "nats://localhost:4222")
+	natsTierURL := config.String("NATS_TIER_URL", natsURL)
+	natsAnalyticsURL := config.String("NATS_ANALYTICS_URL", natsURL)
 	natsTierUpdatesSubject := config.String("NATS_TIER_UPDATES_SUBJECT", "")
 	natsEdgeQueue := config.String("NATS_EDGE_QUEUE", "edge-tier-updates")
+	edgeID := config.String("EDGE_ID", "")
 
 	// ConfigManager performs initial hydration from Hub
 	configMgr, err := edge.NewConfigManagerWithFallback(hubAddr, hubToken, hubHTTPClient, bootstrapConfigFile)
 	if err != nil {
 		log.Fatalf("Failed to initialize ConfigManager: %v", err)
 	}
-	runtimePolicy := configMgr.Get().Runtime.Effective()
-	runtimeDefaults := types.DefaultRuntimePolicy()
-	if configMgr.Get().Runtime.Edge.HubHTTPTimeout <= 0 {
-		log.Printf("warning: runtime.edge.hub_http_timeout missing; using safe default %s", runtimeDefaults.Edge.HubHTTPTimeout)
-	}
-	if configMgr.Get().Runtime.Edge.AnalyticsBufferSize <= 0 {
-		log.Printf("warning: runtime.edge.analytics_buffer_size missing; using safe default %d", runtimeDefaults.Edge.AnalyticsBufferSize)
-	}
-	if configMgr.Get().Runtime.Edge.AnalyticsPublishTimeout <= 0 {
-		log.Printf("warning: runtime.edge.analytics_publish_timeout missing; using safe default %s", runtimeDefaults.Edge.AnalyticsPublishTimeout)
-	}
-	if configMgr.Get().Runtime.Edge.RateHardThresholdPct <= 0 {
-		log.Printf("warning: runtime.edge.rate_hard_threshold_pct missing; using safe default %.2f", runtimeDefaults.Edge.RateHardThresholdPct)
-	}
-	if configMgr.Get().Runtime.Edge.RateLeaseSize <= 0 {
-		log.Printf("warning: runtime.edge.rate_lease_size missing; using safe default %d", runtimeDefaults.Edge.RateLeaseSize)
-	}
-	if configMgr.Get().Runtime.Edge.RateLowWaterPct <= 0 {
-		log.Printf("warning: runtime.edge.rate_low_water_pct missing; using safe default %.2f", runtimeDefaults.Edge.RateLowWaterPct)
-	}
-	if configMgr.Get().Runtime.Edge.UpstreamClientTimeout <= 0 || configMgr.Get().Runtime.Edge.CacheMaxObjectBytes <= 0 {
-		log.Printf("warning: runtime.edge upstream/cache limits missing; using safe defaults where needed")
-	}
-	if configMgr.Get().Runtime.Edge.UpstreamMaxIdleConns <= 0 || configMgr.Get().Runtime.Edge.UpstreamIdleConnTimeout <= 0 {
-		log.Printf("warning: runtime.edge upstream connection pool settings missing; using safe defaults where needed")
-	}
-	if configMgr.Get().Runtime.Edge.HTTPReadTimeout <= 0 || configMgr.Get().Runtime.Edge.HTTPWriteTimeout <= 0 || configMgr.Get().Runtime.Edge.HTTPIdleTimeout <= 0 {
-		log.Printf("warning: runtime.edge http timeouts missing; using safe defaults where needed")
-	}
+	edgePolicy := configMgr.EdgePolicy()
+	analyticsPolicy := configMgr.AnalyticsPolicy()
 	if natsAnalyticsSubject == "" {
-		natsAnalyticsSubject = runtimePolicy.Analytics.NATSSubject
-		if configMgr.Get().Runtime.Analytics.NATSSubject == "" {
-			log.Printf("warning: runtime.analytics.nats_subject missing; using safe default %s", runtimeDefaults.Analytics.NATSSubject)
-		}
+		natsAnalyticsSubject = analyticsPolicy.NATSSubject
 	}
 	if natsTierUpdatesSubject == "" {
-		natsTierUpdatesSubject = runtimePolicy.Hub.TierUpdatesSubject
-		if configMgr.Get().Runtime.Hub.TierUpdatesSubject == "" {
-			log.Printf("warning: runtime.hub.tier_updates_subject missing; using safe default %s", runtimeDefaults.Hub.TierUpdatesSubject)
-		}
+		natsTierUpdatesSubject = configMgr.TierUpdatesSubject()
 	}
-	hubHTTPTimeout = runtimePolicy.Edge.HubHTTPTimeout
+	hubHTTPTimeout = edgePolicy.HubHTTPTimeout
 	hubHTTPClient = edge.NewHubHTTPClient(hubHTTPTimeout)
 	configMgr.SetHTTPClient(hubHTTPClient)
 	if configRefreshSeconds > 0 {
@@ -115,7 +85,7 @@ func main() {
 		hubToken,
 		hubHTTPClient,
 		edge.TierManagerOptions{
-			NATSURL:   natsURL,
+			NATSURL:   natsTierURL,
 			NATSSubj:  natsTierUpdatesSubject,
 			NATSQueue: natsEdgeQueue,
 		},
@@ -131,14 +101,17 @@ func main() {
 	defer leaseClient.Close()
 
 	// RateManager handles local rate limiting with hub synchronization
+	prefixLeasing := resolvePrefixLeasing(configMgr.Prefixes(), edgePolicy)
 	rateMgr := edge.NewRateManagerWithOptions(
 		hubAddr,
 		rdb,
 		maxDelta,
 		edge.RateManagerOptions{
-			HardThresholdPct: chooseRatePct(rateHardThresholdPct, runtimePolicy.Edge.RateHardThresholdPct),
-			LeaseSize:        chooseLeaseSize(leaseSize, runtimePolicy.Edge.RateLeaseSize),
-			LowWaterPct:      chooseRatePct(leaseLowWaterPct, runtimePolicy.Edge.RateLowWaterPct),
+			HardThresholdPct: chooseRatePct(rateHardThresholdPct, edgePolicy.RateHardThresholdPct),
+			LeaseSize:        chooseLeaseSize(leaseSize, prefixLeasing.LeaseQuantum),
+			LowWaterPct:      chooseLowWaterPct(leaseLowWaterPct, edgePolicy.RateLowWaterPct),
+			LeaseTTL:         prefixLeasing.LeaseTTL,
+			RenewalBuffer:    prefixLeasing.RenewalBuffer,
 		},
 		"",
 	)
@@ -149,10 +122,10 @@ func main() {
 	var analyticsMgr *edge.AnalyticsManager
 	if analyticsEnabled {
 		analyticsMgr = edge.NewAnalyticsManagerWithNATSOptions(
-			runtimePolicy.Edge.AnalyticsBufferSize,
-			natsURL,
+			edgePolicy.AnalyticsBufferSize,
+			natsAnalyticsURL,
 			natsAnalyticsSubject,
-			edge.AnalyticsManagerOptions{PublishTimeout: runtimePolicy.Edge.AnalyticsPublishTimeout},
+			edge.AnalyticsManagerOptions{PublishTimeout: edgePolicy.AnalyticsPublishTimeout},
 		)
 		analyticsSink = analyticsMgr
 	}
@@ -165,10 +138,11 @@ func main() {
 		analyticsSink,
 		rdb,
 		edge.EdgeServerOptions{
-			UpstreamClientTimeout:     runtimePolicy.Edge.UpstreamClientTimeout,
-			MaxCacheableResponseBytes: runtimePolicy.Edge.CacheMaxObjectBytes,
-			UpstreamMaxIdleConns:      runtimePolicy.Edge.UpstreamMaxIdleConns,
-			UpstreamIdleConnTimeout:   runtimePolicy.Edge.UpstreamIdleConnTimeout,
+			UpstreamClientTimeout:     edgePolicy.UpstreamClientTimeout,
+			MaxCacheableResponseBytes: edgePolicy.CacheMaxObjectBytes,
+			UpstreamMaxIdleConns:      edgePolicy.UpstreamMaxIdleConns,
+			UpstreamIdleConnTimeout:   edgePolicy.UpstreamIdleConnTimeout,
+			EdgeID:                    edgeID,
 		},
 	)
 	edgeServer.StartBackgroundWorkers(ctx)
@@ -183,9 +157,9 @@ func main() {
 	httpServer := &http.Server{
 		Addr:         port,
 		Handler:      edgeServer,
-		ReadTimeout:  runtimePolicy.Edge.HTTPReadTimeout,
-		WriteTimeout: runtimePolicy.Edge.HTTPWriteTimeout,
-		IdleTimeout:  runtimePolicy.Edge.HTTPIdleTimeout,
+		ReadTimeout:  edgePolicy.HTTPReadTimeout,
+		WriteTimeout: edgePolicy.HTTPWriteTimeout,
+		IdleTimeout:  edgePolicy.HTTPIdleTimeout,
 	}
 
 	// 6. Start Server
@@ -218,9 +192,27 @@ func chooseRatePct(envValue, policyValue float64) float64 {
 	return policyValue
 }
 
+func chooseLowWaterPct(envValue, policyValue float64) float64 {
+	if envValue > 0 && envValue <= 100 {
+		return envValue
+	}
+	return policyValue
+}
+
 func chooseLeaseSize(envValue, policyValue int64) int64 {
 	if envValue > 0 {
 		return envValue
 	}
 	return policyValue
+}
+
+// resolvePrefixLeasing returns the effective LeasingConfig for the first prefix
+// in the gateway config, falling back to global EdgeRuntimePolicy defaults.
+func resolvePrefixLeasing(prefixes []types.PrefixConfig, edgePolicy types.EdgeRuntimePolicy) types.LeasingConfig {
+	if len(prefixes) == 0 {
+		var zero types.LeasingConfig
+		return zero.Effective(edgePolicy, 0)
+	}
+	p := &prefixes[0]
+	return p.Leasing.Effective(edgePolicy, p.QuotaPeriod)
 }

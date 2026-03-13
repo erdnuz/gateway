@@ -9,38 +9,44 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	analyticsapi "gateway/packages/analytics"
 	"gateway/packages/common/config"
 	"gateway/packages/common/types"
-
-	"github.com/redis/go-redis/v9"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	rdb := redis.NewClient(&redis.Options{Addr: config.String("REDIS_ADDR", "localhost:6379")})
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("redis ping failed: %v", err)
-	}
-	defer rdb.Close()
-
 	runtimePolicy := loadAnalyticsRuntimePolicy(ctx)
-	server := analyticsapi.NewServerWithPolicy(
-		rdb,
-		config.String("ANALYTICS_REDIS_KEY", types.DefaultAnalyticsKey),
+	store, err := analyticsapi.NewClickHouseAnalyticsStore(
+		config.String("CLICKHOUSE_DSN", "clickhouse://localhost:9000/default"),
+		config.String("ANALYTICS_CLICKHOUSE_TABLE", "analytics_events"),
+	)
+	if err != nil {
+		log.Fatalf("clickhouse store init failed: %v", err)
+	}
+	defer store.Close()
+	if err := store.Ping(ctx); err != nil {
+		log.Fatalf("clickhouse ping failed: %v", err)
+	}
+
+	server := analyticsapi.NewServerWithAnalyticsStore(
+		store,
 		config.String("ANALYTICS_API_TOKEN", ""),
 		runtimePolicy,
 	)
 
 	natsURL := config.String("NATS_URL", "nats://localhost:4222")
+	natsAnalyticsURL := config.String("NATS_ANALYTICS_URL", natsURL)
 	natsSubject := config.String("NATS_ANALYTICS_SUBJECT", runtimePolicy.NATSSubject)
 	natsQueue := config.String("NATS_ANALYTICS_QUEUE", runtimePolicy.NATSQueue)
-	if err := server.StartNATSSubscriber(ctx, natsURL, natsSubject, natsQueue); err != nil {
+	if err := server.StartNATSSubscriber(ctx, natsAnalyticsURL, natsSubject, natsQueue); err != nil {
 		log.Fatalf("analytics nats subscriber start failed: %v", err)
 	}
+	server.StartBackgroundAggregator(ctx, 10*time.Second)
 
 	httpServer := &http.Server{
 		Addr:         config.String("PORT", ":8091"),
@@ -92,21 +98,20 @@ func loadAnalyticsRuntimePolicy(ctx context.Context) types.AnalyticsRuntimePolic
 		return defaults
 	}
 
-	var cfg types.GatewayConfig
-	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+	var snapshot analyticsConfigSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
 		log.Printf("warning: analytics runtime policy decode failed: %v; using defaults", err)
 		return defaults
 	}
+	return snapshot.AnalyticsPolicy()
+}
 
-	effective := cfg.Runtime.Effective().Analytics
-	if cfg.Runtime.Analytics.ReadTimeout <= 0 || cfg.Runtime.Analytics.WriteTimeout <= 0 || cfg.Runtime.Analytics.IdleTimeout <= 0 {
-		log.Printf("warning: runtime.analytics timeouts missing/invalid; using safe defaults where needed")
-	}
-	if cfg.Runtime.Analytics.DefaultEventsLimit <= 0 || cfg.Runtime.Analytics.MaxEventsLimit <= 0 || cfg.Runtime.Analytics.DefaultSummaryLimit <= 0 || cfg.Runtime.Analytics.MaxSummaryLimit <= 0 {
-		log.Printf("warning: runtime.analytics limits missing/invalid; using safe defaults where needed")
-	}
-	if strings.TrimSpace(cfg.Runtime.Analytics.NATSSubject) == "" || strings.TrimSpace(cfg.Runtime.Analytics.NATSQueue) == "" {
-		log.Printf("warning: runtime.analytics nats subject/queue missing; using safe defaults where needed")
-	}
-	return effective
+type analyticsConfigSnapshot struct {
+	Runtime struct {
+		Analytics types.AnalyticsRuntimePolicy `json:"analytics"`
+	} `json:"runtime"`
+}
+
+func (s analyticsConfigSnapshot) AnalyticsPolicy() types.AnalyticsRuntimePolicy {
+	return types.RuntimePolicy{Analytics: s.Runtime.Analytics}.Effective().Analytics
 }

@@ -94,8 +94,14 @@ type QuotaLeaseResponse struct {
 	GrantedTokens   int64                  `protobuf:"varint,1,opt,name=granted_tokens,json=grantedTokens,proto3" json:"granted_tokens,omitempty"`
 	LeaseTtlSeconds int64                  `protobuf:"varint,2,opt,name=lease_ttl_seconds,json=leaseTtlSeconds,proto3" json:"lease_ttl_seconds,omitempty"`
 	RemainingGlobal int64                  `protobuf:"varint,3,opt,name=remaining_global,json=remainingGlobal,proto3" json:"remaining_global,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// waiting_for_capacity is true when the Hub has zero quota available.
+	// The Edge must enter WAITING state and short-circuit all traffic with 429.
+	WaitingForCapacity bool `protobuf:"varint,4,opt,name=waiting_for_capacity,json=waitingForCapacity,proto3" json:"waiting_for_capacity,omitempty"`
+	// retry_after_ms is the Hub's hint for when the Edge should retry the lease
+	// request. Only set when waiting_for_capacity is true.
+	RetryAfterMs  int64 `protobuf:"varint,5,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QuotaLeaseResponse) Reset() {
@@ -149,6 +155,20 @@ func (x *QuotaLeaseResponse) GetRemainingGlobal() int64 {
 	return 0
 }
 
+func (x *QuotaLeaseResponse) GetWaitingForCapacity() bool {
+	if x != nil {
+		return x.WaitingForCapacity
+	}
+	return false
+}
+
+func (x *QuotaLeaseResponse) GetRetryAfterMs() int64 {
+	if x != nil {
+		return x.RetryAfterMs
+	}
+	return 0
+}
+
 var File_api_proto_quota_lease_proto protoreflect.FileDescriptor
 
 const file_api_proto_quota_lease_proto_rawDesc = "" +
@@ -159,11 +179,13 @@ const file_api_proto_quota_lease_proto_rawDesc = "" +
 	"\n" +
 	"service_id\x18\x02 \x01(\tR\tserviceId\x12\x17\n" +
 	"\aapi_key\x18\x03 \x01(\tR\x06apiKey\x12)\n" +
-	"\x10requested_tokens\x18\x04 \x01(\x03R\x0frequestedTokens\"\x92\x01\n" +
+	"\x10requested_tokens\x18\x04 \x01(\x03R\x0frequestedTokens\"\xea\x01\n" +
 	"\x12QuotaLeaseResponse\x12%\n" +
 	"\x0egranted_tokens\x18\x01 \x01(\x03R\rgrantedTokens\x12*\n" +
 	"\x11lease_ttl_seconds\x18\x02 \x01(\x03R\x0fleaseTtlSeconds\x12)\n" +
-	"\x10remaining_global\x18\x03 \x01(\x03R\x0fremainingGlobal2m\n" +
+	"\x10remaining_global\x18\x03 \x01(\x03R\x0fremainingGlobal\x120\n" +
+	"\x14waiting_for_capacity\x18\x04 \x01(\bR\x12waitingForCapacity\x12$\n" +
+	"\x0eretry_after_ms\x18\x05 \x01(\x03R\fretryAfterMs2m\n" +
 	"\x11QuotaLeaseService\x12X\n" +
 	"\x11RequestQuotaLease\x12 .gate.quota.v1.QuotaLeaseRequest\x1a!.gate.quota.v1.QuotaLeaseResponseB%Z#gateway/packages/common/types;typesb\x06proto3"
 

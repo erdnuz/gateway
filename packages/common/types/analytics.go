@@ -6,6 +6,7 @@ import "time"
 type AnalyticsEntry struct {
 	Prefix    string    `json:"prefix"`    // The matched route prefix (e.g., "/v1/users")
 	Service   string    `json:"service"`   // The specific service handling the request (e.g., "get-users")
+	EdgeID    string    `json:"edge_id"`   // Unique edge identifier emitting this event
 	Timestamp time.Time `json:"timestamp"` // Unix timestamp of the request
 
 	// --- Client Context ---

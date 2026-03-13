@@ -1,23 +1,18 @@
 services:
-  analytics-redis:
-    image: redis:7-alpine
-    container_name: analytics-redis
-    command: >
-      redis-server
-      --appendonly yes
-      --appendfsync everysec
-      --maxmemory-policy volatile-lfu
+  analytics-clickhouse:
+    image: clickhouse/clickhouse-server:25.3-alpine
+    container_name: analytics-clickhouse
     volumes:
-      - analytics_redis_data:/data
+      - analytics_clickhouse_data:/var/lib/clickhouse
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 3s
-      retries: 5
+      retries: 8
 
-  nats:
+  nats-analytics:
     image: nats:2.10-alpine
-    container_name: nats
+    container_name: nats-analytics
     command: ["-js"]
 
   analytics-api:
@@ -26,18 +21,19 @@ services:
       dockerfile: deployments/analytics.Dockerfile
     container_name: analytics-api
     depends_on:
-      analytics-redis:
+      analytics-clickhouse:
         condition: service_healthy
-      nats:
+      nats-analytics:
         condition: service_started
     environment:
       - PORT=:8091
-      - REDIS_ADDR=analytics-redis:6379
-      - ANALYTICS_REDIS_KEY=${ANALYTICS_REDIS_KEY:-rate-analytics}
-      - NATS_URL=nats://nats:4222
+      - CLICKHOUSE_DSN=${CLICKHOUSE_DSN:-clickhouse://analytics-clickhouse:9000/default}
+      - ANALYTICS_CLICKHOUSE_TABLE=${ANALYTICS_CLICKHOUSE_TABLE:-analytics_events}
+      - NATS_ANALYTICS_URL=${NATS_ANALYTICS_URL:-nats://nats-analytics:4222}
       - NATS_ANALYTICS_SUBJECT=${NATS_ANALYTICS_SUBJECT:-analytics.events}
       - NATS_ANALYTICS_QUEUE=${NATS_ANALYTICS_QUEUE:-analytics-subscribers}
       - ANALYTICS_API_TOKEN=${ANALYTICS_API_TOKEN:?Set ANALYTICS_API_TOKEN}
+      - ANALYTICS_ENABLE_TESTING_CLEAR=${ANALYTICS_ENABLE_TESTING_CLEAR:-false}
       - HUB_ADDR=${HUB_ADDR:?Set HUB_ADDR (for deployment-time reference to Hub IP)}
     ports:
       - "${ANALYTICS_PORT:-8091}:8091"
@@ -48,4 +44,4 @@ services:
       retries: 8
 
 volumes:
-  analytics_redis_data:
+  analytics_clickhouse_data:
