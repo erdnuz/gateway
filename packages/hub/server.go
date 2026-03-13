@@ -70,6 +70,7 @@ type HubServer struct {
 	corsPolicy        atomic.Pointer[corsPolicy]
 	apiKeyPattern     atomic.Pointer[regexp.Regexp]
 	readyHealthy      atomic.Bool
+	pendingDependency atomic.Value
 	readyProbeStarted atomic.Bool
 	tierPublishErrors atomic.Uint64
 }
@@ -105,7 +106,7 @@ func NewHubServerWithManagers(
 		retryBackoff:     10 * time.Millisecond,
 		configReloadChan: types.DefaultConfigReloadChannel,
 	}
-	server.readyHealthy.Store(true)
+	server.readyHealthy.Store(false)
 	server.corsPolicy.Store(newCORSPolicy(
 		map[string]struct{}{},
 		[]string{"Authorization", "Content-Type", "X-API-Key"},
@@ -113,7 +114,30 @@ func NewHubServerWithManagers(
 		5*time.Minute,
 	))
 	server.apiKeyPattern.Store(regexp.MustCompile(types.DefaultRuntimePolicy().Hub.APIKeyPattern))
+	server.pendingDependency.Store("redis,nats")
 	return server
+}
+
+func (s *HubServer) SetStartupReady(ready bool) {
+	s.readyHealthy.Store(ready)
+}
+
+func (s *HubServer) SetPendingDependency(dependency string) {
+	v := strings.TrimSpace(dependency)
+	if v == "" {
+		v = "unknown"
+	}
+	s.pendingDependency.Store(v)
+}
+
+func (s *HubServer) pendingDependencyValue() string {
+	v := s.pendingDependency.Load()
+	dep, _ := v.(string)
+	dep = strings.TrimSpace(dep)
+	if dep == "" {
+		return "unknown"
+	}
+	return dep
 }
 
 func (s *HubServer) currentCORSPolicy() *corsPolicy {
@@ -180,7 +204,7 @@ func (s *HubServer) SetAPIKeyPattern(pattern string) error {
 	return nil
 }
 
-func (s *HubServer) SetTierUpdateMessaging(natsURL, subject string) {
+func (s *HubServer) SetTierUpdateMessaging(natsURL, subject string) error {
 	if strings.TrimSpace(natsURL) == "" {
 		natsURL = nats.DefaultURL
 	}
@@ -189,11 +213,11 @@ func (s *HubServer) SetTierUpdateMessaging(natsURL, subject string) {
 	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
-		log.Printf("hub nats connect failed url=%s err=%v", natsURL, err)
-		return
+		return err
 	}
 	s.tierUpdateConn = nc
 	s.tierUpdateSubj = subject
+	return nil
 }
 
 func (s *HubServer) SetAsyncQueueConfig(workersCount int, submitTimeout time.Duration, retryMax int, retryBackoff time.Duration) {
@@ -212,7 +236,6 @@ func (s *HubServer) SetAsyncQueueConfig(workersCount int, submitTimeout time.Dur
 }
 
 func (s *HubServer) StartBackgroundWorkers(ctx context.Context) {
-	s.startReadinessProbe(ctx)
 	if s.asyncQueue != nil {
 		s.asyncQueue.Start(ctx, s.queueWorkers)
 	}
@@ -432,7 +455,9 @@ func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.readyHealthy.Load() {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "pending", "missing_dependency": s.pendingDependencyValue()})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

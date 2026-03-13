@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"gateway/packages/common/config"
+	"gateway/packages/common/ready"
+	"gateway/packages/common/startup"
 	"gateway/packages/common/types"
 	"gateway/packages/edge"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,11 +24,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 2. Infrastructure (Redis)
-	rdb := redis.NewClient(&redis.Options{Addr: config.String("REDIS_ADDR", "localhost:6379")})
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Redis Ping Error: %v", err)
+	startupChecks := newEdgeStartupChecks()
+	if err := startupChecks.ValidateConfig(ctx); err != nil {
+		startup.FailFast("edge", "config_validation", err, "fix edge env/config before startup")
 	}
+
+	// 2. Infrastructure (Redis)
+	rdb := redis.NewClient(&redis.Options{Addr: startupChecks.redisAddr})
 	defer rdb.Close()
 
 	// 3. Initialize Managers
@@ -146,6 +152,8 @@ func main() {
 		},
 	)
 	edgeServer.StartBackgroundWorkers(ctx)
+	edgeServer.SetStartupReady(false)
+	edgeServer.SetPendingDependency("hub_readyz")
 
 	// 5. Start analytics publisher — forwards captured events to NATS immediately.
 	if analyticsEnabled && analyticsMgr != nil {
@@ -169,6 +177,68 @@ func main() {
 			log.Fatalf("Server Error: %v", err)
 		}
 	}()
+
+	analyticsReadyURL := strings.TrimSuffix(config.String("ANALYTICS_ADDR", "http://localhost:8091"), "/") + "/readyz"
+	hubReadyURL := strings.TrimSuffix(startupChecks.hubAddr, "/") + "/readyz"
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	edgeWatcher := ready.NewReadyWatcher("edge", 500*time.Millisecond, 5*time.Second)
+	checks := []ready.Check{
+		{
+			Name: "hub_readyz",
+			URL:  hubReadyURL,
+			Probe: func(probeCtx context.Context) error {
+				req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, hubReadyURL, nil)
+				if err != nil {
+					edgeServer.SetPendingDependency("hub_readyz")
+					return err
+				}
+				if startupChecks.hubToken != "" {
+					req.Header.Set("Authorization", "Bearer "+startupChecks.hubToken)
+				}
+				resp, err := httpClient.Do(req)
+				if err != nil {
+					edgeServer.SetPendingDependency("hub_readyz")
+					return err
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					edgeServer.SetPendingDependency("hub_readyz")
+					return fmt.Errorf("status=%d", resp.StatusCode)
+				}
+				return nil
+			},
+		},
+	}
+	if startupChecks.analyticsEnabled {
+		checks = append(checks, ready.Check{
+			Name: "analytics_readyz",
+			URL:  analyticsReadyURL,
+			Probe: func(probeCtx context.Context) error {
+				req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, analyticsReadyURL, nil)
+				if err != nil {
+					edgeServer.SetPendingDependency("analytics_readyz")
+					return err
+				}
+				resp, err := httpClient.Do(req)
+				if err != nil {
+					edgeServer.SetPendingDependency("analytics_readyz")
+					return err
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					edgeServer.SetPendingDependency("analytics_readyz")
+					return fmt.Errorf("status=%d", resp.StatusCode)
+				}
+				return nil
+			},
+		})
+	}
+	go edgeWatcher.WatchAll(ctx, checks, func(isReady bool) {
+		edgeServer.SetStartupReady(isReady)
+		if isReady {
+			edgeServer.SetPendingDependency("")
+		}
+	})
 
 	// 7. Wait for shutdown signal
 	<-ctx.Done()

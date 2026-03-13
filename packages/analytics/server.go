@@ -30,6 +30,8 @@ type Server struct {
 	authToken         string
 	policy            types.AnalyticsRuntimePolicy
 	allowTestingClear bool
+	hubReady          atomic.Bool
+	pendingDependency atomic.Value
 
 	summaryMu    sync.RWMutex
 	summaryCache map[string]summaryResponse
@@ -40,6 +42,7 @@ type Server struct {
 
 	ingestQueue   chan types.AnalyticsEntry
 	ingestStarted atomic.Bool
+	subscriberUp  atomic.Bool
 	ingestStats   ingestionCounters
 }
 
@@ -137,7 +140,7 @@ func NewServerWithStore(store analyticsStore, rdb *redis.Client, key, authToken 
 			buckets:    map[int64]*bucketAggregation{},
 		}
 	}
-	return &Server{
+	srv := &Server{
 		rdb:               rdb,
 		store:             store,
 		key:               key,
@@ -149,6 +152,31 @@ func NewServerWithStore(store analyticsStore, rdb *redis.Client, key, authToken 
 		aggData:           data,
 		ingestQueue:       make(chan types.AnalyticsEntry, defaultIngestQueueSize),
 	}
+	srv.hubReady.Store(true)
+	srv.pendingDependency.Store("hub_readyz")
+	return srv
+}
+
+func (s *Server) SetHubReady(ready bool) {
+	s.hubReady.Store(ready)
+}
+
+func (s *Server) SetPendingDependency(dependency string) {
+	v := strings.TrimSpace(dependency)
+	if v == "" {
+		v = "unknown"
+	}
+	s.pendingDependency.Store(v)
+}
+
+func (s *Server) pendingDependencyValue() string {
+	v := s.pendingDependency.Load()
+	dep, _ := v.(string)
+	dep = strings.TrimSpace(dep)
+	if dep == "" {
+		return "unknown"
+	}
+	return dep
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -247,28 +275,45 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.hubReady.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"status": "pending", "missing_dependency": s.pendingDependencyValue()})
+		return
+	}
 	if s.store != nil {
 		pingCtx, pingCancel := withRedisTimeout(r.Context())
 		err := s.store.Ping(pingCtx)
 		pingCancel()
 		if err != nil {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			s.SetPendingDependency("clickhouse")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]string{"status": "pending", "missing_dependency": "clickhouse"})
 			return
 		}
-		writeJSON(w, map[string]string{"status": "ready"})
+	} else {
+		if s.rdb == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]string{"status": "pending", "missing_dependency": "analytics_store"})
+			return
+		}
+		pingCtx, pingCancel := withRedisTimeout(r.Context())
+		err := s.rdb.Ping(pingCtx).Err()
+		pingCancel()
+		if err != nil {
+			s.SetPendingDependency("redis")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, map[string]string{"status": "pending", "missing_dependency": "redis"})
+			return
+		}
+	}
+
+	if !s.ingestStarted.Load() || !s.subscriberUp.Load() {
+		s.SetPendingDependency("nats_subscriber")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		writeJSON(w, map[string]string{"status": "pending", "missing_dependency": "nats_subscriber"})
 		return
 	}
-	if s.rdb == nil {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-		return
-	}
-	pingCtx, pingCancel := withRedisTimeout(r.Context())
-	err := s.rdb.Ping(pingCtx).Err()
-	pingCancel()
-	if err != nil {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-		return
-	}
+	s.SetPendingDependency("")
 	writeJSON(w, map[string]string{"status": "ready"})
 }
 
@@ -383,6 +428,7 @@ func (s *Server) StartNATSSubscriber(ctx context.Context, natsURL, subject, queu
 	if strings.TrimSpace(queue) == "" {
 		queue = s.policy.NATSQueue
 	}
+	s.subscriberUp.Store(false)
 	s.ensureIngestionWorker(ctx)
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
@@ -410,8 +456,10 @@ func (s *Server) StartNATSSubscriber(ctx context.Context, natsURL, subject, queu
 		nc.Close()
 		return err
 	}
+	s.subscriberUp.Store(true)
 	go func() {
 		<-ctx.Done()
+		s.subscriberUp.Store(false)
 		_ = sub.Unsubscribe()
 		nc.Close()
 	}()
@@ -693,6 +741,7 @@ type statsAccumulator struct {
 	Count              int
 	TotalLatencyUsSum  int64
 	UpstreamLatencySum int64
+	UpstreamSamples    int
 	RateLimiterUsSum   int64
 	Totals             *boundedPercentiles
 	RateLimiter        *boundedPercentiles
@@ -794,7 +843,10 @@ func (a *statsAccumulator) add(e types.AnalyticsEntry) {
 	}
 	a.Count++
 	a.TotalLatencyUsSum += totalUs
-	a.UpstreamLatencySum += upstreamUs
+	if !e.CacheHit && e.ResponseCode != http.StatusTooManyRequests {
+		a.UpstreamLatencySum += upstreamUs
+		a.UpstreamSamples++
+	}
 	a.RateLimiterUsSum += rateLimiterUs
 	a.Totals.add(totalUs)
 	a.RateLimiter.add(rateLimiterUs)
@@ -831,6 +883,7 @@ func (a *statsAccumulator) merge(other *statsAccumulator) {
 	a.Count += other.Count
 	a.TotalLatencyUsSum += other.TotalLatencyUsSum
 	a.UpstreamLatencySum += other.UpstreamLatencySum
+	a.UpstreamSamples += other.UpstreamSamples
 	a.RateLimiterUsSum += other.RateLimiterUsSum
 	a.Totals.merge(other.Totals)
 	a.RateLimiter.merge(other.RateLimiter)
@@ -851,7 +904,9 @@ func (a *statsAccumulator) toSummary() summary {
 		return out
 	}
 	out.AvgTotalLatencyMs = microsecondsToMilliseconds(float64(a.TotalLatencyUsSum) / float64(a.Count))
-	out.AvgUpstreamLatencyMs = microsecondsToMilliseconds(float64(a.UpstreamLatencySum) / float64(a.Count))
+	if a.UpstreamSamples > 0 {
+		out.AvgUpstreamLatencyMs = microsecondsToMilliseconds(float64(a.UpstreamLatencySum) / float64(a.UpstreamSamples))
+	}
 	out.AvgRateLimiterMs = microsecondsToMilliseconds(float64(a.RateLimiterUsSum) / float64(a.Count))
 	out.P95RateLimiterMs = microsecondsToMilliseconds(a.RateLimiter.percentile(95))
 	out.CacheHitRatePct = (float64(a.CacheHits) / float64(a.Count)) * 100

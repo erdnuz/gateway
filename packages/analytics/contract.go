@@ -8,21 +8,19 @@ import (
 )
 
 const (
-	summaryKeyRequests           = "requests"
-	summaryKeyLatencyTotalP90    = "latency_total_p90"
-	summaryKeyLatencyUpstreamP90 = "latency_upstream_p90"
-	summaryKeyLatencyAddedP90    = "latency_added_p90"
-	summaryKeyVolumeRequestAvg   = "volume_request_avg"
-	summaryKeyVolumeResponseAvg  = "volume_response_avg"
-	summaryKeyRatesCacheHit      = "rates_cache_hit"
-	summaryKeyRatesUpstreamErr   = "rates_upstream_err"
-	summaryKeyRatesRateLimited   = "rates_rate_limited"
+	summaryKeyRequests          = "requests"
+	summaryKeyLatencyTotalP90   = "latency_total_p90"
+	summaryKeyLatencyAddedP90   = "latency_added_p90"
+	summaryKeyVolumeRequestAvg  = "volume_request_avg"
+	summaryKeyVolumeResponseAvg = "volume_response_avg"
+	summaryKeyRatesCacheHit     = "rates_cache_hit"
+	summaryKeyRatesUpstreamErr  = "rates_upstream_err"
+	summaryKeyRatesRateLimited  = "rates_rate_limited"
 )
 
 var contractSummaryKeys = []string{
 	summaryKeyRequests,
 	summaryKeyLatencyTotalP90,
-	summaryKeyLatencyUpstreamP90,
 	summaryKeyLatencyAddedP90,
 	summaryKeyVolumeRequestAvg,
 	summaryKeyVolumeResponseAvg,
@@ -37,25 +35,22 @@ type contractMetric struct {
 }
 
 type contractLatencyPoint struct {
+	SampleCount        int64   `json:"sample_count"`
 	Time               string  `json:"time"`
-	LatencyTotalP50    float64 `json:"latency_total_p50"`
 	LatencyTotalP90    float64 `json:"latency_total_p90"`
-	LatencyTotalP95    float64 `json:"latency_total_p95"`
-	LatencyUpstreamP50 float64 `json:"latency_upstream_p50"`
 	LatencyUpstreamP90 float64 `json:"latency_upstream_p90"`
-	LatencyUpstreamP95 float64 `json:"latency_upstream_p95"`
-	LatencyAddedP50    float64 `json:"latency_added_p50"`
 	LatencyAddedP90    float64 `json:"latency_added_p90"`
-	LatencyAddedP95    float64 `json:"latency_added_p95"`
 }
 
 type contractVolumePoint struct {
+	SampleCount int64   `json:"sample_count"`
 	Time        string  `json:"time"`
 	RequestAvg  float64 `json:"request_avg"`
 	ResponseAvg float64 `json:"response_avg"`
 }
 
 type contractRatesPoint struct {
+	SampleCount int64   `json:"sample_count"`
 	Time        string  `json:"time"`
 	CacheHit    float64 `json:"cache_hit"`
 	UpstreamErr float64 `json:"upstream_err"`
@@ -69,6 +64,7 @@ type contractSeries struct {
 	Prefixes []map[string]interface{} `json:"prefixes"`
 	Services []map[string]interface{} `json:"services"`
 	Edges    []map[string]interface{} `json:"edges"`
+	Tiers    []map[string]interface{} `json:"tiers"`
 }
 
 type contractSummaryResponse struct {
@@ -113,6 +109,7 @@ func newContractSummaryResponse() contractSummaryResponse {
 			Prefixes: []map[string]interface{}{},
 			Services: []map[string]interface{}{},
 			Edges:    []map[string]interface{}{},
+			Tiers:    []map[string]interface{}{},
 		},
 	}
 	for _, key := range contractSummaryKeys {

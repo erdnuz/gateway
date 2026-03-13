@@ -8,6 +8,7 @@ Gate is a distributed API governance platform built from three services:
 
 ## Documentation
 
+- Demo Walkthrough: [docs/demo.md](docs/demo.md)
 - Architecture: [docs/architecture.md](docs/architecture.md)
 - Deployments: [docs/deployments.md](docs/deployments.md)
 - Configuration: [docs/configuration.md](docs/configuration.md)

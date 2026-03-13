@@ -2,6 +2,10 @@ services:
   analytics-clickhouse:
     image: clickhouse/clickhouse-server:25.3-alpine
     container_name: analytics-clickhouse
+    environment:
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-analytics}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-analytics-pass}
     volumes:
       - analytics_clickhouse_data:/var/lib/clickhouse
     healthcheck:
@@ -34,7 +38,8 @@ services:
       - NATS_ANALYTICS_QUEUE=${NATS_ANALYTICS_QUEUE:-analytics-subscribers}
       - ANALYTICS_API_TOKEN=${ANALYTICS_API_TOKEN:?Set ANALYTICS_API_TOKEN}
       - ANALYTICS_ENABLE_TESTING_CLEAR=${ANALYTICS_ENABLE_TESTING_CLEAR:-false}
-      - HUB_ADDR=${HUB_ADDR:?Set HUB_ADDR (for deployment-time reference to Hub IP)}
+      - HUB_ADDR=${HUB_ADDR:-http://hub-server:8080}
+      - HUB_AUTH_TOKEN=${HUB_AUTH_TOKEN:-}
     ports:
       - "${ANALYTICS_PORT:-8091}:8091"
     healthcheck:

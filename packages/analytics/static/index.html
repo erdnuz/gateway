@@ -9,9 +9,9 @@
 <body>
   <main class="app-shell">
     <header class="hero panel">
-      <p class="eyebrow">Gate Analytics</p>
-      <h1>Analytics Contract Dashboard</h1>
-      <p class="subtle">Minimal summary and contract series view with dynamic edge traffic visibility.</p>
+    <p class="eyebrow">Gate Platform</p>
+    <h1>Operations Overview</h1>
+    <p class="subtle">Real-time health, traffic distribution, and policy enforcement across the distributed gateway.</p>
       <p id="authBanner" class="auth-banner" role="alert" hidden>Authentication failed. Update token and refresh.</p>
     </header>
 
@@ -24,7 +24,7 @@
         </label>
         <label class="col-6">
           Bearer Token
-          <input id="token" type="password" placeholder="token or Bearer token">
+          <input id="token" type="password" placeholder="Auth Token">
         </label>
 
         <label class="col-2">
@@ -108,17 +108,15 @@
     </section>
 
     <section class="summary-block">
-      <h2>Summary</h2>
       <div id="summaryGrid" class="summary-grid"></div>
     </section>
 
     <section class="series-block">
-      <h2>Time Series</h2>
 
       <article class="panel series-card">
         <div class="series-head">
           <h3>Latency</h3>
-          <p>Contract series: latency_total, latency_upstream, latency_added</p>
+          <p>latency_total, latency_upstream, latency_added</p>
         </div>
         <div class="chart-wrap"><svg id="latencyChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
         <div id="latencyLegend" class="legend"></div>
@@ -142,31 +140,40 @@
         <div id="ratesLegend" class="legend"></div>
       </article>
 
-      <article class="panel series-card">
+      <article id="prefixesCard" class="panel series-card">
         <div class="series-head">
           <h3>Prefixes</h3>
-          <p>Dynamic top prefix counts per bucket</p>
+          <p>Traffic count by prefix</p>
         </div>
         <div class="chart-wrap"><svg id="prefixesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
         <div id="prefixesLegend" class="legend"></div>
       </article>
 
-      <article class="panel series-card">
+      <article id="servicesCard" class="panel series-card">
         <div class="series-head">
           <h3>Services</h3>
-          <p>Dynamic top service counts per bucket</p>
+          <p>Traffic counts by service</p>
         </div>
         <div class="chart-wrap"><svg id="servicesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
         <div id="servicesLegend" class="legend"></div>
       </article>
 
-      <article class="panel series-card">
+      <article id="edgesCard" class="panel series-card">
         <div class="series-head">
           <h3>Edges</h3>
-          <p>Dynamic traffic counts by edge per bucket</p>
+          <p>Traffic counts by edge</p>
         </div>
         <div class="chart-wrap"><svg id="edgesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
         <div id="edgesLegend" class="legend"></div>
+      </article>
+
+      <article id="tiersCard" class="panel series-card">
+        <div class="series-head">
+          <h3>Tiers</h3>
+          <p>Traffic counts by tier</p>
+        </div>
+        <div class="chart-wrap"><svg id="tiersChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
+        <div id="tiersLegend" class="legend"></div>
       </article>
     </section>
   </main>

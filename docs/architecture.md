@@ -36,20 +36,37 @@ Gate is a distributed API governance platform with three services:
 ## High-Level Topology
 
 ```mermaid
-flowchart LR
-  C[Client] --> E[Edge]
-  E --> U[Upstream]
-  U --> E
+flowchart TD
+    subgraph Hub [Hub - Control Plane]
+        H_S[(Redis)]
+    end
 
-  H[Hub] -->|tier updates| N1[(NATS)]
-  N1 --> E
+    subgraph Edge [Edge - Data Plane]
+        E_S[(Redis)]
+    end
 
-  E -->|analytics events| N2[(NATS)]
-  N2 --> A[Analytics]
-  A --> CH[(ClickHouse)]
+    subgraph Analytics [Analytics - Observability Plane]
+        A_S[(ClickHouse)]
+    end
 
-  H -->|config| E
-  H -->|config| A
+    C[Client] -->|HTTP| E_Proxy[Edge Proxy]
+    E_Proxy -->|HTTP| U[Upstream]
+    U -->|HTTP| E_Proxy
+
+    E_Proxy -.->|HTTP: getConfig| H_API[Hub API]
+    A_API[Analytics API] -.->|HTTP: getConfig | H_API
+    
+    NATS_Tier[(NATS: Tier Updates)]
+    H_API -->|NATS: publishTierUpdate| NATS_Tier
+    NATS_Tier -->|Subscribe: onTierUpdate| E_Proxy
+
+    NATS_Events[(NATS: Analytics Events)]
+    E_Proxy -->|NATS: emitAnalytics| NATS_Events
+    NATS_Events -->|Consume: ingest| A_API
+    A_API -->|Native: write| A_S
+
+    H_API -->|Native: setLease/getTier| H_S
+    E_Proxy -->|Native: getCache/checkQuota| E_S
 ```
 
 ## Code Map

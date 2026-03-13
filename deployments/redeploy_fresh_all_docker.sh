@@ -25,11 +25,18 @@ wait_for_http() {
   local attempts="${3:-30}"
   local delay_seconds="${4:-2}"
   local i
+  local body
 
   for ((i = 1; i <= attempts; i++)); do
     if curl -fsS "${url}" >/dev/null 2>&1; then
-      echo "${name} is ready"
+      echo "${name} is ready (${url})"
       return 0
+    fi
+    body="$(curl -sS "${url}" 2>/dev/null || true)"
+    if [ -n "${body}" ]; then
+      echo "${name} pending (${url}) attempt=${i}/${attempts} payload=${body}"
+    else
+      echo "${name} pending (${url}) attempt=${i}/${attempts}"
     fi
     sleep "${delay_seconds}"
   done
@@ -76,8 +83,8 @@ This will:
 1) Stop and remove ALL Docker containers
 2) Remove ALL Docker images
 3) Start the mock upstream service on port 9000
-4) Redeploy hub, edge, and analytics compose stacks
-5) Wait for health endpoints and start the live simulator
+4) Redeploy compose stacks in strict order: hub -> analytics -> edge
+5) Wait for /readyz at each stage and optionally start the live simulator
 
 Re-run with: CONFIRM=YES ./redeploy_fresh_all_docker.sh
 Optional: START_SIMULATION=no CONFIRM=YES ./redeploy_fresh_all_docker.sh
@@ -85,7 +92,7 @@ EOF
   exit 1
 fi
 
-echo "[1/7] Stopping/removing all containers..."
+echo "[1/8] Stopping/removing all containers..."
 ALL_CONTAINERS="$(docker ps -aq || true)"
 if [ -n "${ALL_CONTAINERS}" ]; then
   # shellcheck disable=SC2086
@@ -94,7 +101,7 @@ else
   echo "No containers found."
 fi
 
-echo "[2/7] Removing all images..."
+echo "[2/8] Removing all images..."
 ALL_IMAGES="$(docker images -aq | sort -u || true)"
 if [ -n "${ALL_IMAGES}" ]; then
   # shellcheck disable=SC2086
@@ -103,23 +110,29 @@ else
   echo "No images found."
 fi
 
-echo "[3/7] Pruning leftover build cache/networks/volumes..."
+echo "[3/8] Pruning leftover build cache/networks/volumes..."
 docker system prune -af --volumes
 
-echo "[4/7] Starting upstream dependency..."
+echo "[4/8] Starting upstream dependency..."
 start_upstream
 
-echo "[5/7] Redeploying compose stacks..."
+echo "[5/8] Redeploying compose stacks in dependency order..."
+echo "[5/8] Starting hub stack..."
 docker compose -f docker-compose.hub.yaml --env-file .env.hub up -d --build --force-recreate
-docker compose -f docker-compose.edge.yaml --env-file .env.edge up -d --build --force-recreate
+echo "Waiting for hub readiness..."
+wait_for_http "hub" "http://localhost:8080/readyz"
+
+echo "[6/8] Starting analytics stack..."
 docker compose -f docker-compose.analytics.yaml --env-file .env.analytics up -d --build --force-recreate
+echo "Waiting for analytics readiness..."
+wait_for_http "analytics" "http://localhost:8091/readyz"
 
-echo "[6/7] Waiting for service health..."
-wait_for_http "hub" "http://localhost:8080/healthz"
-wait_for_http "edge" "http://localhost:8082/healthz"
-wait_for_http "analytics" "http://localhost:8091/healthz"
+echo "[7/8] Starting edge stack..."
+docker compose -f docker-compose.edge.yaml --env-file .env.edge up -d --build --force-recreate
+echo "Waiting for edge readiness..."
+wait_for_http "edge" "http://localhost:8082/readyz"
 
-echo "[7/7] Final container status:"
+echo "[8/8] Final container status:"
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 
 echo "Redeploy complete."

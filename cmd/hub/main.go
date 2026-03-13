@@ -6,6 +6,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"gateway/packages/common/config"
+	"gateway/packages/common/ready"
+	"gateway/packages/common/startup"
 	"gateway/packages/common/types"
 	"gateway/packages/hub"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9" // Updated to v9
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -27,17 +30,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	configFilePath := config.String("CONFIG_FILE_PATH", "/cmd/config.json")
-	if _, statErr := os.Stat(configFilePath); statErr != nil {
-		for _, candidate := range []string{"config/policies.json", "cmd/config.json", "/cmd/config.json"} {
-			if _, err := os.Stat(candidate); err == nil {
-				log.Printf("CONFIG_FILE_PATH not found (%s), falling back to %s", configFilePath, candidate)
-				configFilePath = candidate
-				break
-			}
-		}
+	checks, err := newHubStartupChecks()
+	if err != nil {
+		startup.FailFast("hub", "config", err, "ensure .env variables and config path are set correctly")
 	}
-	cfgManager := hub.MustNewConfigManager(configFilePath)
+	if err := checks.ValidateConfig(ctx); err != nil {
+		startup.FailFast("hub", "config_validation", err, "ensure hub configuration and TLS settings are valid")
+	}
+
+	configFilePath := checks.configPath
+	hubAuthToken := checks.hubAuthToken
+
+	cfgManager, err := hub.NewConfigManager(configFilePath)
+	if err != nil {
+		startup.FailFast("hub", "gateway_config", err, "fix gateway config file and restart")
+	}
 	hubPolicy := cfgManager.HubPolicy()
 
 	// 3. Infrastructure (Redis)
@@ -50,19 +57,7 @@ func main() {
 		PoolSize:     config.Int("HUB_REDIS_POOL_SIZE", 64),
 		MinIdleConns: config.Int("HUB_REDIS_MIN_IDLE_CONNS", 16),
 	})
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Redis Ping Error: %v", err)
-	}
-	if config.Bool("HUB_ENFORCE_REDIS_NOEVICTION", true) {
-		if err := enforceNoEvictionPolicy(ctx, rdb); err != nil {
-			log.Fatalf("Redis policy check failed: %v", err)
-		}
-	}
 
-	hubAuthToken := strings.TrimSpace(config.String("HUB_AUTH_TOKEN", ""))
-	if hubAuthToken == "" {
-		log.Fatal("HUB_AUTH_TOKEN must be set: hub only accepts authenticated edge requests")
-	}
 	hubUpdatesChannel := config.String("HUB_UPDATES_CHANNEL", types.DefaultHubUpdatesChannel)
 	natsURL := config.String("NATS_URL", "nats://localhost:4222")
 	natsTierURL := config.String("NATS_TIER_URL", natsURL)
@@ -99,7 +94,8 @@ func main() {
 		config.Int("HUB_QUEUE_RETRY_MAX", hubPolicy.QueueRetryMax),
 		config.Duration("HUB_QUEUE_RETRY_BACKOFF", hubPolicy.QueueRetryBackoff),
 	)
-	server.SetTierUpdateMessaging(natsTierURL, natsTierUpdatesSubject)
+	server.SetStartupReady(false)
+	server.SetPendingDependency("redis")
 	server.StartBackgroundWorkers(ctx)
 
 	grpcAddr := ":" + config.String("HUB_GRPC_PORT", "9090")
@@ -108,17 +104,17 @@ func main() {
 	hubTLSCAFile := config.String("HUB_TLS_CA_FILE", "")
 	hubGRPCClientAuthMode := strings.TrimSpace(config.String("HUB_GRPC_CLIENT_AUTH_MODE", "require-and-verify"))
 	if hubTLSCertFile == "" || hubTLSKeyFile == "" || hubTLSCAFile == "" {
-		log.Fatal("HUB_TLS_CERT_FILE, HUB_TLS_KEY_FILE and HUB_TLS_CA_FILE must be set")
+		startup.FailFast("hub", "grpc_tls", fmt.Errorf("missing tls env vars"), "set HUB_TLS_CERT_FILE, HUB_TLS_KEY_FILE and HUB_TLS_CA_FILE")
 	}
 	grpcServer, grpcErr := newHubGRPCServer(hubTLSCertFile, hubTLSKeyFile, hubTLSCAFile, hubGRPCClientAuthMode)
 	if grpcErr != nil {
-		log.Fatalf("Failed to create hub grpc server: %v", grpcErr)
+		startup.FailFast("hub", "grpc_tls", grpcErr, "verify hub TLS cert, key, CA, and auth mode")
 	}
 	leaseServer := hub.NewQuotaLeaseServer(rdb, cfgManager, tierStore)
 	types.RegisterQuotaLeaseServiceServer(grpcServer, leaseServer)
 	grpcListener, grpcErr := net.Listen("tcp", grpcAddr)
 	if grpcErr != nil {
-		log.Fatalf("Failed to listen on grpc addr %s: %v", grpcAddr, grpcErr)
+		startup.FailFast("hub", "grpc_listener", grpcErr, "ensure HUB_GRPC_PORT is free and valid")
 	}
 	go func() {
 		log.Printf("Hub gRPC lease server listening on %s", grpcAddr)
@@ -146,6 +142,66 @@ func main() {
 			log.Fatalf("Server failed: %v", err)
 		}
 	}()
+
+	// Keep hub process alive in pending state until local dependencies are ready.
+	hubReadyWatcher := ready.NewReadyWatcher("hub", 500*time.Millisecond, 5*time.Second)
+	tierMessagingConfigured := false
+	go hubReadyWatcher.WatchAll(ctx, []ready.Check{
+		{
+			Name: "redis",
+			URL:  checks.redisAddr,
+			Probe: func(probeCtx context.Context) error {
+				if err := rdb.Ping(probeCtx).Err(); err != nil {
+					server.SetPendingDependency("redis")
+					return err
+				}
+				if checks.enforceNoEviction {
+					if err := enforceNoEvictionPolicy(probeCtx, rdb); err != nil {
+						server.SetPendingDependency("redis")
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		{
+			Name: "nats",
+			URL:  natsTierURL,
+			Probe: func(probeCtx context.Context) error {
+				nc, err := nats.Connect(natsTierURL)
+				if err != nil {
+					server.SetPendingDependency("nats")
+					return err
+				}
+				defer nc.Close()
+				if err := nc.Flush(); err != nil {
+					server.SetPendingDependency("nats")
+					return err
+				}
+				if err := nc.LastError(); err != nil {
+					server.SetPendingDependency("nats")
+					return err
+				}
+				return nil
+			},
+		},
+	}, func(isReady bool) {
+		server.SetStartupReady(isReady)
+		if !isReady {
+			return
+		}
+		if tierMessagingConfigured {
+			return
+		}
+		if err := server.SetTierUpdateMessaging(natsTierURL, natsTierUpdatesSubject); err != nil {
+			server.SetPendingDependency("nats")
+			log.Printf("hub readiness pending dependency=nats_messaging url=%s err=%v", natsTierURL, err)
+			server.SetStartupReady(false)
+			return
+		}
+		server.SetPendingDependency("")
+		tierMessagingConfigured = true
+	})
 
 	// 8. Graceful Shutdown
 	<-ctx.Done()

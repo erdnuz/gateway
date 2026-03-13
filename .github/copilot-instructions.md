@@ -1,29 +1,31 @@
-# Deployment Robustness & Validation Standards
+## Distributed Readiness Handshake Plan
 
-## 1. Sequential Startup & Dependency Handshake
+### Goals
+- Expose dual probes on all services:
+	- `/healthz`: liveness, returns `200` once process is running.
+	- `/readyz`: readiness, returns `200` only when service dependencies are satisfied.
+- Keep services alive in pending mode when dependencies are missing.
+- Never exit on readiness probe failures; continuously retry and log missing dependencies.
 
-All services must implement a `HealthCheck` interface that is executed **before** the main server loop starts. Startup must strictly follow this order:
+### Dependency Contract
+- Hub (root): `/readyz` is healthy only when local Redis and local NATS are healthy.
+- Analytics (middle): `/readyz` is healthy only when Hub `/readyz` is healthy and local ClickHouse + NATS are healthy.
+- Edge (leaf): `/readyz` is healthy only when Hub `/readyz` and Analytics `/readyz` are both healthy.
 
-1. **Hub:** Must boot first. It must perform a self-validation of `.env` and `GatewayConfig.json`. It must establish a successful connection to its internal database and NATS before declaring itself `READY`.
-2. **Analytics:** Must boot after the Hub. It must perform its own dependency check (Database/NATS) and verify connectivity to the Hub's health endpoint.
-3. **Edge:** Must boot last. It must verify local configuration and perform a **3-way handshake**:
-* Verify connectivity to the local NATS broker.
-* Ping the Hub’s `/health` endpoint.
-* (If enabled) Ping the Analytics API’s `/health` endpoint.
+### Startup Contract
+- Hub HTTP starts immediately so `/healthz`, `/readyz`, and `/config` are available even if NATS/Redis are not yet ready.
+- Analytics and Edge start HTTP and remain pending (`/readyz=503`) until watchers confirm dependencies.
+- Edge blocks all client proxy traffic until upstream readiness is achieved.
 
+### ReadyWatcher Contract
+- Use shared `ReadyWatcher` with exponential backoff.
+- Initial backoff: `500ms`.
+- Maximum backoff: `5s`.
+- Run continuously in background with dependency-specific logging.
 
-4. **Fail-Fast Mechanism:** If any dependency fails a health check during startup, the process **must** log a descriptive, actionable error (e.g., "Failed to connect to NATS at [URL]: Connection Refused") and exit with `os.Exit(1)`.
-
-## 2. Configuration Validation
-
-* **Schema Enforcement:** Use a library to validate `GatewayConfig` against a JSON Schema on boot. If required fields are missing, the process must terminate immediately.
-* **Connectivity Tests:** Startup code must include a "Canary Call"—a lightweight request to verify that the service can actually communicate with its declared dependencies (e.g., a simple `SELECT 1` for DBs, or a `PUB/SUB` test for NATS).
-
-## 3. Deployment Flow
-
-* **Orchestration:** Orchestrators (or scripts) must use wait-for-it or native readiness probes to ensure each service in the chain is confirmed "Healthy" before moving to the next.
-
-
-
-
-
+### Rollout Phases
+1. Build shared watcher utility in `packages/common/ready`.
+2. Wire Hub local dependency watcher and non-blocking startup.
+3. Wire Analytics watcher against Hub `/readyz` + local deps.
+4. Wire Edge watcher against Hub and Analytics `/readyz` + client traffic gate.
+5. Validate with fast full suite (`go test ./... -count=1`).

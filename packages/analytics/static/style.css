@@ -128,6 +128,26 @@ select {
   outline: none;
 }
 
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 34px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #aeb4c0 50%),
+    linear-gradient(135deg, #aeb4c0 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) calc(50% - 3px),
+    calc(100% - 12px) calc(50% - 3px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
+select option {
+  color: var(--ink);
+  background: #11151d;
+}
+
 input[type="datetime-local"] {
   color-scheme: dark;
 }
@@ -175,6 +195,73 @@ button:hover {
   border-radius: 12px;
   padding: 14px;
   background: rgba(255, 255, 255, 0.02);
+}
+
+.summary-pie-card {
+  grid-column: span 2;
+}
+
+.summary-pie-wrap {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.summary-pie {
+  width: 160px;
+  height: 160px;
+  display: block;
+}
+
+.summary-pie-empty {
+  width: 160px;
+  height: 160px;
+  border-radius: 50%;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.summary-pie-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.summary-pie-legend li {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.summary-pie-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.summary-pie-label {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-pie-value {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 
 .summary-name {
@@ -276,6 +363,19 @@ svg {
   .app-shell {
     width: calc(100% - 36px);
     margin-top: 24px;
+  }
+
+  .summary-pie-card {
+    grid-column: span 1;
+  }
+
+  .summary-pie-wrap {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .summary-pie-legend {
+    width: 100%;
   }
 
   .col-6,

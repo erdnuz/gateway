@@ -93,6 +93,30 @@ func TestAuthRequired(t *testing.T) {
 	}
 }
 
+func TestReadyzRequiresSubscriberAndIngestionWorker(t *testing.T) {
+	mr, _ := miniredis.Run()
+	defer mr.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	srv := NewServer(rdb, types.DefaultAnalyticsKey, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	res := httptest.NewRecorder()
+	srv.ServeHTTP(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 before subscriber/worker startup, got %d", res.Code)
+	}
+
+	srv.ingestStarted.Store(true)
+	srv.subscriberUp.Store(true)
+
+	req2 := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	res2 := httptest.NewRecorder()
+	srv.ServeHTTP(res2, req2)
+	if res2.Code != http.StatusOK {
+		t.Fatalf("expected 200 when subscriber and worker are ready, got %d", res2.Code)
+	}
+}
+
 func TestServesFrontendRoot(t *testing.T) {
 	mr, _ := miniredis.Run()
 	defer mr.Close()
@@ -106,7 +130,7 @@ func TestServesFrontendRoot(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", res.Code)
 	}
-	if !bytes.Contains(res.Body.Bytes(), []byte("Analytics Contract Dashboard")) {
+	if !bytes.Contains(res.Body.Bytes(), []byte("Operations Overview")) {
 		t.Fatalf("expected frontend html content")
 	}
 }
@@ -122,8 +146,8 @@ func TestComputeSummarySubMillisecondPrecision(t *testing.T) {
 	if math.Abs(s.AvgTotalLatencyMs-1.0) > 0.0001 {
 		t.Fatalf("expected avg_total_latency_ms=1.0, got %f", s.AvgTotalLatencyMs)
 	}
-	if math.Abs(s.AvgUpstreamLatencyMs-0.5) > 0.0001 {
-		t.Fatalf("expected avg_upstream_latency_ms=0.5, got %f", s.AvgUpstreamLatencyMs)
+	if math.Abs(s.AvgUpstreamLatencyMs-0.75) > 0.0001 {
+		t.Fatalf("expected avg_upstream_latency_ms=0.75, got %f", s.AvgUpstreamLatencyMs)
 	}
 	if math.Abs(s.AvgRateLimiterMs-0.5) > 0.0001 {
 		t.Fatalf("expected avg_rate_limiter_latency_ms=0.5, got %f", s.AvgRateLimiterMs)

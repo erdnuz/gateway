@@ -11,7 +11,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /edge-app ./cmd/edge/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /edge-app ./cmd/edge
 
 # --- FINAL STAGE ---
 FROM alpine:latest

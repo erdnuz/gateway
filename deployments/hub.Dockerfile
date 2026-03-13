@@ -13,7 +13,7 @@ RUN go mod download
 # 2. Copy source and build
 COPY . .
 # We build a static binary to ensure it runs perfectly on the slim alpine final image
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /hub-app ./cmd/hub/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /hub-app ./cmd/hub
 
 # --- FINAL STAGE ---
 FROM alpine:latest

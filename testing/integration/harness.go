@@ -275,7 +275,9 @@ func (h *integrationHarness) startHubAndLeaseGRPC(configPath string) {
 	}
 	rateMgr := hub.NewRateManager(h.rdb, cfgMgr)
 	hubSrv := hub.NewHubServerWithManagers(h.rdb, cfgMgr, h.hubTierStore, rateMgr, "", 10_000, types.DefaultHubUpdatesChannel)
-	hubSrv.SetTierUpdateMessaging(h.natsURL, "tier.updates")
+	if err := hubSrv.SetTierUpdateMessaging(h.natsURL, "tier.updates"); err != nil {
+		h.t.Fatalf("hub tier update messaging setup failed: %v", err)
+	}
 	hubSrv.StartBackgroundWorkers(h.ctx)
 	h.hubHTTP = httptest.NewServer(hubSrv)
 
@@ -314,11 +316,20 @@ func (h *integrationHarness) startLeaseGRPCServer(files *mtlsFiles, cfgMgr *hub.
 
 func (h *integrationHarness) startAnalytics() {
 	api := analyticsapi.NewServer(h.rdb, h.analyticsKey, "")
+	if err := api.StartNATSSubscriber(h.ctx, h.natsURL, types.DefaultRuntimePolicy().Analytics.NATSSubject, "analytics-it-primary"); err != nil {
+		h.t.Fatalf("start primary analytics nats subscriber: %v", err)
+	}
+	api.StartBackgroundAggregator(h.ctx, 2*time.Second)
 	h.analyticsSrv = httptest.NewServer(api)
 	h.analyticsAll = append(h.analyticsAll, h.analyticsSrv)
 
 	// Secondary analytics API simulates multiple analytics instances on separate hosts.
-	secondary := httptest.NewServer(analyticsapi.NewServer(h.rdb, h.analyticsKey, ""))
+	secondaryAPI := analyticsapi.NewServer(h.rdb, h.analyticsKey, "")
+	if err := secondaryAPI.StartNATSSubscriber(h.ctx, h.natsURL, types.DefaultRuntimePolicy().Analytics.NATSSubject, "analytics-it-secondary"); err != nil {
+		h.t.Fatalf("start secondary analytics nats subscriber: %v", err)
+	}
+	secondaryAPI.StartBackgroundAggregator(h.ctx, 2*time.Second)
+	secondary := httptest.NewServer(secondaryAPI)
 	h.analyticsAll = append(h.analyticsAll, secondary)
 }
 

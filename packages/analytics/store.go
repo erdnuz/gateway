@@ -267,6 +267,7 @@ type contractWindowAggregate struct {
 }
 
 type contractBucketAggregate struct {
+	SampleCount        int64
 	Bucket             time.Time
 	LatencyTotalP50    float64
 	LatencyTotalP90    float64
@@ -297,6 +298,8 @@ func (s *clickHouseAnalyticsStore) QueryContractSummary(ctx context.Context, spe
 	if err != nil {
 		return resp, err
 	}
+	bucketTimes := enumerateBuckets(spec.WindowStart, spec.WindowEnd, spec.BucketSize)
+	latestBucket, previousBucket, hasBucketPair := lastTwoSampledBuckets(buckets, bucketTimes)
 
 	prefixCurrent, err := s.queryWindowCountsByDimension(ctx, spec.WindowStart, spec.WindowEnd, spec.Filters, "prefix")
 	if err != nil {
@@ -322,6 +325,14 @@ func (s *clickHouseAnalyticsStore) QueryContractSummary(ctx context.Context, spe
 	if err != nil {
 		return resp, err
 	}
+	tierCurrent, err := s.queryWindowCountsByDimension(ctx, spec.WindowStart, spec.WindowEnd, spec.Filters, "tier")
+	if err != nil {
+		return resp, err
+	}
+	tierPrevious, err := s.queryWindowCountsByDimension(ctx, spec.PreviousStart, spec.PreviousEnd, spec.Filters, "tier")
+	if err != nil {
+		return resp, err
+	}
 
 	prefixSeries, err := s.queryBucketCountsByDimension(ctx, spec, "prefix")
 	if err != nil {
@@ -335,16 +346,19 @@ func (s *clickHouseAnalyticsStore) QueryContractSummary(ctx context.Context, spe
 	if err != nil {
 		return resp, err
 	}
+	tierSeries, err := s.queryBucketCountsByDimension(ctx, spec, "tier")
+	if err != nil {
+		return resp, err
+	}
 
-	resp.Summary[summaryKeyRequests] = contractMetric{LastValue: current.Requests, Trend: trendDelta(current.Requests, previous.Requests)}
-	resp.Summary[summaryKeyLatencyTotalP90] = contractMetric{LastValue: current.LatencyTotalP90, Trend: trendDelta(current.LatencyTotalP90, previous.LatencyTotalP90)}
-	resp.Summary[summaryKeyLatencyUpstreamP90] = contractMetric{LastValue: current.LatencyUpstreamP90, Trend: trendDelta(current.LatencyUpstreamP90, previous.LatencyUpstreamP90)}
-	resp.Summary[summaryKeyLatencyAddedP90] = contractMetric{LastValue: current.LatencyTotalP90 - current.LatencyUpstreamP90, Trend: trendDelta(current.LatencyTotalP90-current.LatencyUpstreamP90, previous.LatencyTotalP90-previous.LatencyUpstreamP90)}
-	resp.Summary[summaryKeyVolumeRequestAvg] = contractMetric{LastValue: current.VolumeRequestAvg, Trend: trendDelta(current.VolumeRequestAvg, previous.VolumeRequestAvg)}
-	resp.Summary[summaryKeyVolumeResponseAvg] = contractMetric{LastValue: current.VolumeResponseAvg, Trend: trendDelta(current.VolumeResponseAvg, previous.VolumeResponseAvg)}
-	resp.Summary[summaryKeyRatesCacheHit] = contractMetric{LastValue: current.RatesCacheHit, Trend: trendDelta(current.RatesCacheHit, previous.RatesCacheHit)}
-	resp.Summary[summaryKeyRatesUpstreamErr] = contractMetric{LastValue: current.RatesUpstreamErr, Trend: trendDelta(current.RatesUpstreamErr, previous.RatesUpstreamErr)}
-	resp.Summary[summaryKeyRatesRateLimited] = contractMetric{LastValue: current.RatesRateLimited, Trend: trendDelta(current.RatesRateLimited, previous.RatesRateLimited)}
+	resp.Summary[summaryKeyRequests] = contractMetric{LastValue: current.Requests, Trend: trendDeltaWithRecentFallback(current.Requests, previous.Requests, hasBucketPair, float64(latestBucket.SampleCount), float64(previousBucket.SampleCount))}
+	resp.Summary[summaryKeyLatencyTotalP90] = contractMetric{LastValue: current.LatencyTotalP90, Trend: trendDeltaWithRecentFallback(current.LatencyTotalP90, previous.LatencyTotalP90, hasBucketPair, latestBucket.LatencyTotalP90, previousBucket.LatencyTotalP90)}
+	resp.Summary[summaryKeyLatencyAddedP90] = contractMetric{LastValue: current.LatencyTotalP90 - current.LatencyUpstreamP90, Trend: trendDeltaWithRecentFallback(current.LatencyTotalP90-current.LatencyUpstreamP90, previous.LatencyTotalP90-previous.LatencyUpstreamP90, hasBucketPair, latestBucket.LatencyTotalP90-latestBucket.LatencyUpstreamP90, previousBucket.LatencyTotalP90-previousBucket.LatencyUpstreamP90)}
+	resp.Summary[summaryKeyVolumeRequestAvg] = contractMetric{LastValue: current.VolumeRequestAvg, Trend: trendDeltaWithRecentFallback(current.VolumeRequestAvg, previous.VolumeRequestAvg, hasBucketPair, latestBucket.VolumeRequestAvg, previousBucket.VolumeRequestAvg)}
+	resp.Summary[summaryKeyVolumeResponseAvg] = contractMetric{LastValue: current.VolumeResponseAvg, Trend: trendDeltaWithRecentFallback(current.VolumeResponseAvg, previous.VolumeResponseAvg, hasBucketPair, latestBucket.VolumeResponseAvg, previousBucket.VolumeResponseAvg)}
+	resp.Summary[summaryKeyRatesCacheHit] = contractMetric{LastValue: current.RatesCacheHit, Trend: trendDeltaWithRecentFallback(current.RatesCacheHit, previous.RatesCacheHit, hasBucketPair, latestBucket.RatesCacheHit, previousBucket.RatesCacheHit)}
+	resp.Summary[summaryKeyRatesUpstreamErr] = contractMetric{LastValue: current.RatesUpstreamErr, Trend: trendDeltaWithRecentFallback(current.RatesUpstreamErr, previous.RatesUpstreamErr, hasBucketPair, latestBucket.RatesUpstreamErr, previousBucket.RatesUpstreamErr)}
+	resp.Summary[summaryKeyRatesRateLimited] = contractMetric{LastValue: current.RatesRateLimited, Trend: trendDeltaWithRecentFallback(current.RatesRateLimited, previous.RatesRateLimited, hasBucketPair, latestBucket.RatesRateLimited, previousBucket.RatesRateLimited)}
 
 	for key, currentCount := range prefixCurrent {
 		prev := prefixPrevious[key]
@@ -358,28 +372,27 @@ func (s *clickHouseAnalyticsStore) QueryContractSummary(ctx context.Context, spe
 		prev := edgePrevious[key]
 		resp.Summary["edges_"+key] = contractMetric{LastValue: currentCount, Trend: trendDelta(currentCount, prev)}
 	}
+	for key, currentCount := range tierCurrent {
+		prev := tierPrevious[key]
+		resp.Summary["tiers_"+key] = contractMetric{LastValue: currentCount, Trend: trendDelta(currentCount, prev)}
+	}
 
-	for _, bucketTime := range enumerateBuckets(spec.WindowStart, spec.WindowEnd, spec.BucketSize) {
+	for _, bucketTime := range bucketTimes {
 		bucket, ok := buckets[bucketTime.Unix()]
 		if !ok {
-			resp.Series.Latency = append(resp.Series.Latency, contractLatencyPoint{Time: bucketTime.UTC().Format(time.RFC3339)})
-			resp.Series.Volume = append(resp.Series.Volume, contractVolumePoint{Time: bucketTime.UTC().Format(time.RFC3339)})
-			resp.Series.Rates = append(resp.Series.Rates, contractRatesPoint{Time: bucketTime.UTC().Format(time.RFC3339)})
+			resp.Series.Latency = append(resp.Series.Latency, contractLatencyPoint{Time: bucketTime.UTC().Format(time.RFC3339), SampleCount: 0})
+			resp.Series.Volume = append(resp.Series.Volume, contractVolumePoint{Time: bucketTime.UTC().Format(time.RFC3339), SampleCount: 0})
+			resp.Series.Rates = append(resp.Series.Rates, contractRatesPoint{Time: bucketTime.UTC().Format(time.RFC3339), SampleCount: 0})
 		} else {
 			resp.Series.Latency = append(resp.Series.Latency, contractLatencyPoint{
+				SampleCount:        bucket.SampleCount,
 				Time:               bucketTime.UTC().Format(time.RFC3339),
-				LatencyTotalP50:    bucket.LatencyTotalP50,
 				LatencyTotalP90:    bucket.LatencyTotalP90,
-				LatencyTotalP95:    bucket.LatencyTotalP95,
-				LatencyUpstreamP50: bucket.LatencyUpstreamP50,
 				LatencyUpstreamP90: bucket.LatencyUpstreamP90,
-				LatencyUpstreamP95: bucket.LatencyUpstreamP95,
-				LatencyAddedP50:    bucket.LatencyTotalP50 - bucket.LatencyUpstreamP50,
 				LatencyAddedP90:    bucket.LatencyTotalP90 - bucket.LatencyUpstreamP90,
-				LatencyAddedP95:    bucket.LatencyTotalP95 - bucket.LatencyUpstreamP95,
 			})
-			resp.Series.Volume = append(resp.Series.Volume, contractVolumePoint{Time: bucketTime.UTC().Format(time.RFC3339), RequestAvg: bucket.VolumeRequestAvg, ResponseAvg: bucket.VolumeResponseAvg})
-			resp.Series.Rates = append(resp.Series.Rates, contractRatesPoint{Time: bucketTime.UTC().Format(time.RFC3339), CacheHit: bucket.RatesCacheHit, UpstreamErr: bucket.RatesUpstreamErr, RateLimited: bucket.RatesRateLimited})
+			resp.Series.Volume = append(resp.Series.Volume, contractVolumePoint{SampleCount: bucket.SampleCount, Time: bucketTime.UTC().Format(time.RFC3339), RequestAvg: bucket.VolumeRequestAvg, ResponseAvg: bucket.VolumeResponseAvg})
+			resp.Series.Rates = append(resp.Series.Rates, contractRatesPoint{SampleCount: bucket.SampleCount, Time: bucketTime.UTC().Format(time.RFC3339), CacheHit: bucket.RatesCacheHit, UpstreamErr: bucket.RatesUpstreamErr, RateLimited: bucket.RatesRateLimited})
 		}
 
 		prefixRow := map[string]interface{}{"time": bucketTime.UTC().Format(time.RFC3339)}
@@ -405,6 +418,14 @@ func (s *clickHouseAnalyticsStore) QueryContractSummary(ctx context.Context, spe
 			}
 		}
 		resp.Series.Edges = append(resp.Series.Edges, edgeRow)
+
+		tierRow := map[string]interface{}{"time": bucketTime.UTC().Format(time.RFC3339)}
+		if values, ok := tierSeries[bucketTime.Unix()]; ok {
+			for name, count := range values {
+				tierRow[name] = count
+			}
+		}
+		resp.Series.Tiers = append(resp.Series.Tiers, tierRow)
 	}
 
 	return resp, nil
@@ -419,9 +440,9 @@ func (s *clickHouseAnalyticsStore) queryWindowAggregate(ctx context.Context, sta
 			if(count() = 0, 0.0, quantileTDigest(0.50)(toFloat64(total_latency_ns)) / 1000000.0) AS latency_total_p50,
 			if(count() = 0, 0.0, quantileTDigest(0.90)(toFloat64(total_latency_ns)) / 1000000.0) AS latency_total_p90,
 			if(count() = 0, 0.0, quantileTDigest(0.95)(toFloat64(total_latency_ns)) / 1000000.0) AS latency_total_p95,
-			if(count() = 0, 0.0, quantileTDigest(0.50)(toFloat64(upstream_latency_ns)) / 1000000.0) AS latency_upstream_p50,
-			if(count() = 0, 0.0, quantileTDigest(0.90)(toFloat64(upstream_latency_ns)) / 1000000.0) AS latency_upstream_p90,
-			if(count() = 0, 0.0, quantileTDigest(0.95)(toFloat64(upstream_latency_ns)) / 1000000.0) AS latency_upstream_p95,
+			if(countIf(cache_hit = 0 AND response_code != 429) = 0, 0.0, quantileTDigestIf(0.50)(toFloat64(upstream_latency_ns), cache_hit = 0 AND response_code != 429) / 1000000.0) AS latency_upstream_p50,
+			if(countIf(cache_hit = 0 AND response_code != 429) = 0, 0.0, quantileTDigestIf(0.90)(toFloat64(upstream_latency_ns), cache_hit = 0 AND response_code != 429) / 1000000.0) AS latency_upstream_p90,
+			if(countIf(cache_hit = 0 AND response_code != 429) = 0, 0.0, quantileTDigestIf(0.95)(toFloat64(upstream_latency_ns), cache_hit = 0 AND response_code != 429) / 1000000.0) AS latency_upstream_p95,
 			if(count() = 0, 0.0, avg(toFloat64(request_size_bytes))) AS volume_request_avg,
 			if(count() = 0, 0.0, avg(toFloat64(response_size_bytes))) AS volume_response_avg,
 			if(count() = 0, 0.0, avg(toFloat64(cache_hit))) AS rates_cache_hit,
@@ -454,12 +475,13 @@ func (s *clickHouseAnalyticsStore) queryBucketAggregates(ctx context.Context, sp
 	query := fmt.Sprintf(`
 		SELECT
 			toStartOfInterval(timestamp, toIntervalSecond(?)) AS bucket_time,
+			count() AS sample_count,
 			if(count() = 0, 0.0, quantileTDigest(0.50)(toFloat64(total_latency_ns)) / 1000000.0) AS latency_total_p50,
 			if(count() = 0, 0.0, quantileTDigest(0.90)(toFloat64(total_latency_ns)) / 1000000.0) AS latency_total_p90,
 			if(count() = 0, 0.0, quantileTDigest(0.95)(toFloat64(total_latency_ns)) / 1000000.0) AS latency_total_p95,
-			if(count() = 0, 0.0, quantileTDigest(0.50)(toFloat64(upstream_latency_ns)) / 1000000.0) AS latency_upstream_p50,
-			if(count() = 0, 0.0, quantileTDigest(0.90)(toFloat64(upstream_latency_ns)) / 1000000.0) AS latency_upstream_p90,
-			if(count() = 0, 0.0, quantileTDigest(0.95)(toFloat64(upstream_latency_ns)) / 1000000.0) AS latency_upstream_p95,
+			if(countIf(cache_hit = 0 AND response_code != 429) = 0, 0.0, quantileTDigestIf(0.50)(toFloat64(upstream_latency_ns), cache_hit = 0 AND response_code != 429) / 1000000.0) AS latency_upstream_p50,
+			if(countIf(cache_hit = 0 AND response_code != 429) = 0, 0.0, quantileTDigestIf(0.90)(toFloat64(upstream_latency_ns), cache_hit = 0 AND response_code != 429) / 1000000.0) AS latency_upstream_p90,
+			if(countIf(cache_hit = 0 AND response_code != 429) = 0, 0.0, quantileTDigestIf(0.95)(toFloat64(upstream_latency_ns), cache_hit = 0 AND response_code != 429) / 1000000.0) AS latency_upstream_p95,
 			if(count() = 0, 0.0, avg(toFloat64(request_size_bytes))) AS volume_request_avg,
 			if(count() = 0, 0.0, avg(toFloat64(response_size_bytes))) AS volume_response_avg,
 			if(count() = 0, 0.0, avg(toFloat64(cache_hit))) AS rates_cache_hit,
@@ -483,6 +505,7 @@ func (s *clickHouseAnalyticsStore) queryBucketAggregates(ctx context.Context, sp
 		var row contractBucketAggregate
 		if err := rows.Scan(
 			&row.Bucket,
+			&row.SampleCount,
 			&row.LatencyTotalP50,
 			&row.LatencyTotalP90,
 			&row.LatencyTotalP95,
@@ -651,6 +674,37 @@ func trendDelta(current, previous float64) float64 {
 		return 0
 	}
 	return (current - previous) / previous
+}
+
+func trendDeltaWithRecentFallback(currentWindow, previousWindow float64, hasBucketPair bool, latestBucketValue, previousBucketValue float64) float64 {
+	trend := trendDelta(currentWindow, previousWindow)
+	if trend != 0 || previousWindow != 0 {
+		return trend
+	}
+	if !hasBucketPair {
+		return trend
+	}
+	return trendDelta(latestBucketValue, previousBucketValue)
+}
+
+func lastTwoSampledBuckets(buckets map[int64]contractBucketAggregate, ordered []time.Time) (contractBucketAggregate, contractBucketAggregate, bool) {
+	var latest contractBucketAggregate
+	var previous contractBucketAggregate
+	count := 0
+	for i := len(ordered) - 1; i >= 0; i-- {
+		bucket, ok := buckets[ordered[i].Unix()]
+		if !ok || bucket.SampleCount <= 0 {
+			continue
+		}
+		if count == 0 {
+			latest = bucket
+			count++
+			continue
+		}
+		previous = bucket
+		return latest, previous, true
+	}
+	return contractBucketAggregate{}, contractBucketAggregate{}, false
 }
 
 func scanAnalyticsEntries(rows *sql.Rows) ([]types.AnalyticsEntry, error) {

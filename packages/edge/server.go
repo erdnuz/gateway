@@ -74,7 +74,7 @@ type EdgeServer struct {
 	client                    *http.Client
 	maxCacheableResponseBytes int64
 	readyHealthy              atomic.Bool
-	readyProbeStarted         atomic.Bool
+	pendingDependency         atomic.Value
 }
 
 type EdgeServerOptions struct {
@@ -125,16 +125,14 @@ func NewEdgeServerWithOptions(configMgr *ConfigManager, tierMgr *TierManager, ra
 		es.edgeID = "unknown-edge"
 	}
 	es.readyHealthy.Store(true)
+	es.pendingDependency.Store("hub_readyz")
 
 	return es
 }
 
 func (s *EdgeServer) startReadinessProbe(ctx context.Context) {
 	if s.rdb == nil {
-		s.readyHealthy.Store(true)
-		return
-	}
-	if !s.readyProbeStarted.CompareAndSwap(false, true) {
+		s.readyHealthy.Store(false)
 		return
 	}
 	go func() {
@@ -156,7 +154,6 @@ func (s *EdgeServer) startReadinessProbe(ctx context.Context) {
 }
 
 func (s *EdgeServer) StartBackgroundWorkers(ctx context.Context) {
-	s.startReadinessProbe(ctx)
 	if s.rateManager != nil {
 		s.rateManager.StartBackgroundWorkers(ctx)
 	}
@@ -186,12 +183,21 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/readyz" {
 		if !s.readyHealthy.Load() {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "pending", "missing_dependency": s.pendingDependencyValue()})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
+		return
+	}
+	if !s.readyHealthy.Load() {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "upstream dependencies not ready", "status": "pending", "missing_dependency": s.pendingDependencyValue()})
 		return
 	}
 
@@ -219,6 +225,28 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		),
 	)
 	pipeline(w, r.WithContext(ctx))
+}
+
+func (s *EdgeServer) SetStartupReady(ready bool) {
+	s.readyHealthy.Store(ready)
+}
+
+func (s *EdgeServer) SetPendingDependency(dependency string) {
+	v := strings.TrimSpace(dependency)
+	if v == "" {
+		v = "unknown"
+	}
+	s.pendingDependency.Store(v)
+}
+
+func (s *EdgeServer) pendingDependencyValue() string {
+	v := s.pendingDependency.Load()
+	dep, _ := v.(string)
+	dep = strings.TrimSpace(dep)
+	if dep == "" {
+		return "unknown"
+	}
+	return dep
 }
 
 func (s *EdgeServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {

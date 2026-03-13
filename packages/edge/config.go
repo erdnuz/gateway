@@ -87,14 +87,16 @@ func NewConfigManagerWithFallback(hubAddr, authToken string, client *http.Client
 	cfg, err := cm.fetchConfig()
 	if err != nil {
 		if bootstrapFile == "" {
-			return nil, fmt.Errorf("failed to hydrate config on startup: %w", err)
+			log.Printf("edge config bootstrap pending: hub config unavailable (%v); using empty config until hub recovers", err)
+			cfg = &types.GatewayConfig{}
+		} else {
+			fallbackCfg, fallbackErr := loadConfigFromFile(bootstrapFile)
+			if fallbackErr != nil {
+				return nil, fmt.Errorf("failed to hydrate config on startup from hub (%v) and bootstrap file (%v)", err, fallbackErr)
+			}
+			cfg = fallbackCfg
+			log.Printf("edge config bootstrap fallback activated: using %s", bootstrapFile)
 		}
-		fallbackCfg, fallbackErr := loadConfigFromFile(bootstrapFile)
-		if fallbackErr != nil {
-			return nil, fmt.Errorf("failed to hydrate config on startup from hub (%v) and bootstrap file (%v)", err, fallbackErr)
-		}
-		cfg = fallbackCfg
-		log.Printf("edge config bootstrap fallback activated: using %s", bootstrapFile)
 	}
 
 	cm.active.Store(cfg)
