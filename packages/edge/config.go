@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ type ConfigManager struct {
 	hubAddr   string
 	authToken string
 	client    *http.Client
+	lastEpoch atomic.Uint64
 }
 
 type configIndexes struct {
@@ -275,16 +277,47 @@ func (cm *ConfigManager) StartConfigReloadSubscriber(ctx context.Context, rdb *r
 		ch := sub.Channel()
 		for {
 			select {
-			case _, ok := <-ch:
+			case msg, ok := <-ch:
 				if !ok {
 					return
 				}
+				event, hasEvent := parseConfigReloadEvent(msg.Payload)
+				if hasEvent {
+					if event.Epoch > 0 {
+						last := cm.lastEpoch.Load()
+						if event.Epoch <= last {
+							continue
+						}
+						cm.lastEpoch.Store(event.Epoch)
+					}
+				}
 				if err := cm.RefreshConfig(); err != nil {
 					log.Printf("edge config pubsub refresh failed: %v", err)
+					continue
+				}
+				if hasEvent && len(event.Invalidations.ResponseCache) > 0 {
+					if err := InvalidateResponseCacheScopes(ctx, rdb, event.Invalidations.ResponseCache); err != nil {
+						log.Printf("edge response cache invalidation failed: %v", err)
+					}
 				}
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
+}
+
+func parseConfigReloadEvent(payload string) (types.ConfigReloadEvent, bool) {
+	trimmed := strings.TrimSpace(payload)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+		return types.ConfigReloadEvent{}, false
+	}
+	var event types.ConfigReloadEvent
+	if err := json.Unmarshal([]byte(trimmed), &event); err != nil {
+		return types.ConfigReloadEvent{}, false
+	}
+	if event.Version != types.ConfigReloadEventVersion {
+		return types.ConfigReloadEvent{}, false
+	}
+	return event, true
 }

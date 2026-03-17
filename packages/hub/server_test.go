@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"gateway/packages/common/types"
 	"gateway/packages/common/workers"
@@ -340,6 +341,87 @@ func TestHandleConfig_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHandleConfigReloadDryRun_WithPayload(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+
+	base := hs.cfgManager.Snapshot()
+	if base == nil || len(base.Prefixes) == 0 || len(base.Prefixes[0].Services) == 0 {
+		t.Fatal("expected seeded config")
+	}
+
+	next := cloneGatewayConfig(t, base)
+	next.Runtime = types.DefaultRuntimePolicy()
+	next.Prefixes[0].Services[0].Transform.StripPrefix = !next.Prefixes[0].Services[0].Transform.StripPrefix
+
+	payload, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/config-reload/dry-run", bytes.NewReader(payload))
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
+	}
+
+	var report struct {
+		Mode     string `json:"mode"`
+		Valid    bool   `json:"valid"`
+		Analysis struct {
+			ChangedSections []string `json:"changed_sections"`
+			Invalidations   struct {
+				ResponseCache []types.ConfigInvalidationScope `json:"response_cache"`
+			} `json:"invalidations"`
+		} `json:"analysis"`
+	}
+	if err := json.NewDecoder(rw.Body).Decode(&report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if !report.Valid {
+		t.Fatal("expected valid dry-run")
+	}
+	if report.Mode != "payload" {
+		t.Fatalf("expected payload mode, got %q", report.Mode)
+	}
+	if len(report.Analysis.ChangedSections) == 0 {
+		t.Fatal("expected changed sections")
+	}
+	if len(report.Analysis.Invalidations.ResponseCache) == 0 {
+		t.Fatal("expected response cache invalidation scopes")
+	}
+}
+
+func TestHandleConfigReload_WithPayloadAppliesConfig(t *testing.T) {
+	hs, cleanup := newTestHubServer(t)
+	defer cleanup()
+
+	base := hs.cfgManager.Snapshot()
+	next := cloneGatewayConfig(t, base)
+	next.Runtime = types.DefaultRuntimePolicy()
+	next.Prefixes[0].Services[0].TargetURL = "http://127.0.0.1:9999"
+
+	payload, err := json.Marshal(next)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/config-reload", bytes.NewReader(payload))
+	rw := httptest.NewRecorder()
+	hs.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rw.Code, rw.Body.String())
+	}
+
+	updated := hs.cfgManager.Snapshot()
+	if got := updated.Prefixes[0].Services[0].TargetURL; got != "http://127.0.0.1:9999" {
+		t.Fatalf("expected updated target URL, got %q", got)
+	}
+}
+
 // TestHandleRate_Get verifies that GET /rate/{prefix}/{apiKey} returns the current total.
 func TestHandleRate_Get(t *testing.T) {
 	hs, cleanup := newTestHubServer(t)
@@ -357,6 +439,19 @@ func TestHandleRate_Get(t *testing.T) {
 	if err := json.NewDecoder(rw.Body).Decode(&total); err != nil {
 		t.Fatalf("decode total: %v", err)
 	}
+}
+
+func cloneGatewayConfig(t *testing.T, cfg *types.GatewayConfig) *types.GatewayConfig {
+	t.Helper()
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config clone: %v", err)
+	}
+	var out types.GatewayConfig
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal config clone: %v", err)
+	}
+	return &out
 }
 
 // TestHandleRate_Post verifies that POST /rate/{prefix}/{apiKey}?delta=N increments the counter.

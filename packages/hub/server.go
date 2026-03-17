@@ -3,8 +3,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"gateway/packages/common/types"
 	"gateway/packages/common/workers"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -73,6 +75,22 @@ type HubServer struct {
 	pendingDependency atomic.Value
 	readyProbeStarted atomic.Bool
 	tierPublishErrors atomic.Uint64
+	configEpoch       atomic.Uint64
+}
+
+type configFileLoader interface {
+	LoadFromFile() (*types.GatewayConfig, error)
+}
+
+type configPayloadReloader interface {
+	ReloadFromPayload(cfg *types.GatewayConfig) error
+}
+
+type configUpdateReport struct {
+	Mode      string               `json:"mode"`
+	Valid     bool                 `json:"valid"`
+	Analysis  configUpdateAnalysis `json:"analysis"`
+	NextEpoch uint64               `json:"next_epoch"`
 }
 
 func NewHubServerWithManagers(
@@ -301,6 +319,10 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "config":
 		s.handleConfig(w, r)
 	case "config-reload":
+		if len(parts) > 1 && parts[1] == "dry-run" {
+			s.handleConfigReloadDryRun(w, r)
+			return
+		}
 		s.handleConfigReload(w, r)
 	case "queue-metrics":
 		s.handleQueueMetrics(w, r)
@@ -430,23 +452,104 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	cfgMgr, ok := s.cfgManager.(interface{ ReloadFromFile() error })
-	if !ok {
-		http.Error(w, "config reload unsupported", http.StatusNotImplemented)
-		return
-	}
-	if err := cfgMgr.ReloadFromFile(); err != nil {
+	nextCfg, mode, err := s.resolveReloadTargetConfig(r)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if s.rdb != nil {
-		go func(channel, payload string) {
-			pubCtx, cancel := context.WithTimeout(context.Background(), hubReadyRedisTimeout)
-			defer cancel()
-			_ = s.rdb.Publish(pubCtx, channel, payload).Err()
-		}(s.configReloadChan, time.Now().UTC().Format(time.RFC3339Nano))
+	current := s.cfgManager.Snapshot()
+	analysis := analyzeConfigUpdate(current, nextCfg)
+
+	if mode == "payload" {
+		reloader, ok := s.cfgManager.(configPayloadReloader)
+		if !ok {
+			http.Error(w, "config payload reload unsupported", http.StatusNotImplemented)
+			return
+		}
+		if err := reloader.ReloadFromPayload(nextCfg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		reloader, ok := s.cfgManager.(interface{ ReloadFromFile() error })
+		if !ok {
+			http.Error(w, "config reload unsupported", http.StatusNotImplemented)
+			return
+		}
+		if err := reloader.ReloadFromFile(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
+
+	event := types.ConfigReloadEvent{
+		Version:       types.ConfigReloadEventVersion,
+		Epoch:         s.configEpoch.Add(1),
+		ReloadedAtUTC: time.Now().UTC().Format(time.RFC3339Nano),
+		Invalidations: analysis.Invalidations,
+	}
+	s.publishConfigReloadEvent(event)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *HubServer) handleConfigReloadDryRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nextCfg, mode, err := s.resolveReloadTargetConfig(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	analysis := analyzeConfigUpdate(s.cfgManager.Snapshot(), nextCfg)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(configUpdateReport{
+		Mode:      mode,
+		Valid:     true,
+		Analysis:  analysis,
+		NextEpoch: s.configEpoch.Load() + 1,
+	})
+}
+
+func (s *HubServer) resolveReloadTargetConfig(r *http.Request) (*types.GatewayConfig, string, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+	if err != nil {
+		return nil, "", err
+	}
+	payloadBody := strings.TrimSpace(string(body))
+	if payloadBody != "" {
+		cfg, err := decodeAndValidateConfig(body)
+		if err != nil {
+			return nil, "", err
+		}
+		return cfg, "payload", nil
+	}
+	loader, ok := s.cfgManager.(configFileLoader)
+	if !ok {
+		return nil, "", fmt.Errorf("config file reload unsupported")
+	}
+	cfg, err := loader.LoadFromFile()
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, "file", nil
+}
+
+func (s *HubServer) publishConfigReloadEvent(event types.ConfigReloadEvent) {
+	if s.rdb == nil {
+		return
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		log.Printf("hub config reload event marshal failed: %v", err)
+		return
+	}
+	go func(channel string, data []byte) {
+		pubCtx, cancel := context.WithTimeout(context.Background(), hubReadyRedisTimeout)
+		defer cancel()
+		_ = s.rdb.Publish(pubCtx, channel, data).Err()
+	}(s.configReloadChan, payload)
 }
 
 func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {

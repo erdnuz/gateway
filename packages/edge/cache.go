@@ -188,3 +188,48 @@ func matchCacheToken(s string) (bool, cacheToken, int) {
 		return false, tokenLiteral, 0
 	}
 }
+
+func InvalidateResponseCacheScopes(ctx context.Context, rdb *redis.Client, scopes []types.ConfigInvalidationScope) error {
+	if rdb == nil || len(scopes) == 0 {
+		return nil
+	}
+	for _, scope := range scopes {
+		if strings.TrimSpace(scope.Prefix) == "" {
+			continue
+		}
+		pattern := "c:/" + strings.TrimPrefix(scope.Prefix, "/")
+		if scope.ServiceID != "" {
+			pattern += "/" + scope.ServiceID
+		}
+		pattern += "*"
+		if err := deleteKeysByPattern(ctx, rdb, pattern); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteKeysByPattern(ctx context.Context, rdb *redis.Client, pattern string) error {
+	var cursor uint64
+	for {
+		redisCtx, cancel := withCacheRedisTimeout(ctx)
+		keys, next, err := rdb.Scan(redisCtx, cursor, pattern, 256).Result()
+		cancel()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			redisCtx, delCancel := withCacheRedisTimeout(ctx)
+			if err := rdb.Del(redisCtx, keys...).Err(); err != nil {
+				delCancel()
+				return err
+			}
+			delCancel()
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return nil
+}

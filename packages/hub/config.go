@@ -36,25 +36,55 @@ func MustNewConfigManager(filePath string) *ConfigManager {
 }
 
 func (cm *ConfigManager) ReloadFromFile() error {
+	cfg, err := cm.LoadFromFile()
+	if err != nil {
+		return err
+	}
+	cm.active.Store(cfg)
+	return nil
+}
+
+func (cm *ConfigManager) LoadFromFile() (*types.GatewayConfig, error) {
 	data, err := os.ReadFile(cm.filePath)
 	if err != nil {
-		return fmt.Errorf("failed to read config file %s: %w", cm.filePath, err)
+		return nil, fmt.Errorf("failed to read config file %s: %w", cm.filePath, err)
 	}
+	cfg, err := decodeAndValidateConfig(data)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gateway config %s: %w", cm.filePath, err)
+	}
+	return cfg, nil
+}
 
+func (cm *ConfigManager) ReloadFromPayload(cfg *types.GatewayConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("config payload is nil")
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to encode config payload: %w", err)
+	}
+	parsed, err := decodeAndValidateConfig(b)
+	if err != nil {
+		return fmt.Errorf("invalid gateway config payload: %w", err)
+	}
+	cm.active.Store(parsed)
+	return nil
+}
+
+func decodeAndValidateConfig(data []byte) (*types.GatewayConfig, error) {
 	var cfg types.GatewayConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("failed to decode %s: %w", cm.filePath, err)
+		return nil, fmt.Errorf("failed to decode config: %w", err)
 	}
 	if err := validateRuntimePolicyProvided(cfg.Runtime); err != nil {
-		return fmt.Errorf("invalid gateway config %s: %w", cm.filePath, err)
+		return nil, err
 	}
 	cfg.Runtime = cfg.Runtime.Effective()
 	if err := ValidateGatewayConfig(&cfg); err != nil {
-		return fmt.Errorf("invalid gateway config %s: %w", cm.filePath, err)
+		return nil, err
 	}
-
-	cm.active.Store(&cfg)
-	return nil
+	return &cfg, nil
 }
 
 // ValidateGatewayConfig performs structural and semantic validation before the
