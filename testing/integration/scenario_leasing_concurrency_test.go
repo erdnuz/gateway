@@ -59,20 +59,22 @@ func (f *delayedGrantLeaseClient) callCount() int {
 func TestIntegration_TCON1ConcurrentRenewalSuppression(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-con-1", "free")
+	h.setTier("v1", "kcon1", "free")
 	fake := &delayedGrantLeaseClient{grants: []int64{10, 10}, ttlSeconds: 3}
 	h.setLeaseClient(fake)
 
 	// First request fetches lease A and consumes 1 => remaining 9.
-	resp, _ := h.edgeRequest("POST", "/v1/auth-api/con-1", "k-con-1")
+	resp, _ := h.edgeRequest("POST", "/v1/auth-api/con-1", "kcon1")
 	if resp.StatusCode != 200 {
 		t.Fatalf("initial request expected 200 got=%d", resp.StatusCode)
 	}
 
 	// Drain to remaining=3 so no low-water renewal fires before the combined trigger.
 	for i := 0; i < 6; i++ {
-		resp, _ = h.edgeRequest("POST", "/v1/auth-api/con-1-drain", "k-con-1")
+		resp, _ = h.edgeRequest("POST", "/v1/auth-api/con-1-drain", "kcon1")
 		if resp.StatusCode != 200 {
 			t.Fatalf("drain request %d expected 200 got=%d", i+1, resp.StatusCode)
 		}
@@ -88,7 +90,7 @@ func TestIntegration_TCON1ConcurrentRenewalSuppression(t *testing.T) {
 	// - temporal trigger (near expiry)
 	// - volume trigger (remaining <= low-water)
 	// and still issue only one renewal call.
-	resp, _ = h.edgeRequest("POST", "/v1/auth-api/con-1-trigger", "k-con-1")
+	resp, _ = h.edgeRequest("POST", "/v1/auth-api/con-1-trigger", "kcon1")
 	if resp.StatusCode != 200 {
 		t.Fatalf("trigger request expected 200 got=%d", resp.StatusCode)
 	}
@@ -108,7 +110,7 @@ func TestIntegration_TCON2MultiEdgeGlobalDrain(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k-con-2", "free")
+	h.setTier("v1", "kcon2", "free")
 
 	const (
 		concurrentEdges = 5
@@ -142,7 +144,7 @@ func TestIntegration_TCON2MultiEdgeGlobalDrain(t *testing.T) {
 			resp, err := clients[idx].RequestQuotaLease(h.ctx, &types.QuotaLeaseRequest{
 				Prefix:          "v1",
 				ServiceId:       "auth-api",
-				ApiKey:          "k-con-2",
+				ApiKey:          "kcon2",
 				RequestedTokens: requestTokens,
 			})
 			if err != nil {
@@ -175,8 +177,10 @@ func TestIntegration_TCON2MultiEdgeGlobalDrain(t *testing.T) {
 func TestIntegration_TCON3AtomicMergeTopUp(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-con-3", "free")
+	h.setTier("v1", "kcon3", "free")
 	fake := &delayedGrantLeaseClient{
 		grants:     []int64{10, 10},
 		ttlSeconds: 10,
@@ -187,14 +191,14 @@ func TestIntegration_TCON3AtomicMergeTopUp(t *testing.T) {
 	h.setLeaseClient(fake)
 
 	// Initial lease A and consume 1 => remaining 9.
-	resp, _ := h.edgeRequest("POST", "/v1/auth-api/con-3", "k-con-3")
+	resp, _ := h.edgeRequest("POST", "/v1/auth-api/con-3", "kcon3")
 	if resp.StatusCode != 200 {
 		t.Fatalf("initial request expected 200 got=%d", resp.StatusCode)
 	}
 
 	// Drain to remaining 3.
 	for i := 0; i < 6; i++ {
-		resp, _ = h.edgeRequest("POST", "/v1/auth-api/con-3-drain", "k-con-3")
+		resp, _ = h.edgeRequest("POST", "/v1/auth-api/con-3-drain", "kcon3")
 		if resp.StatusCode != 200 {
 			t.Fatalf("drain request %d expected 200 got=%d", i+1, resp.StatusCode)
 		}
@@ -206,7 +210,7 @@ func TestIntegration_TCON3AtomicMergeTopUp(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = h.edgeRequest("POST", "/v1/auth-api/con-3-burst", "k-con-3")
+			_, _ = h.edgeRequest("POST", "/v1/auth-api/con-3-burst", "kcon3")
 		}()
 	}
 	wg.Wait()
@@ -214,7 +218,7 @@ func TestIntegration_TCON3AtomicMergeTopUp(t *testing.T) {
 	// Wait for delayed top-up to apply.
 	time.Sleep(300 * time.Millisecond)
 
-	key := "edge:lease:tokens:v1:k-con-3"
+	key := "edge:lease:tokens:v1:auth-api:kcon3"
 	balance, err := h.rdb.Get(h.ctx, key).Int64()
 	if err != nil {
 		t.Fatalf("read local token balance: %v", err)

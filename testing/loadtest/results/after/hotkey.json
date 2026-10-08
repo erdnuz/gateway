@@ -1,0 +1,30 @@
+{
+  "scenario": "hotkey",
+  "data": {
+    "level": {
+      "concurrency": 256,
+      "requests": 32858,
+      "rps": 3249.341339656993,
+      "latency_all": {
+        "count": 32858,
+        "p50_ms": 66.12,
+        "p90_ms": 152.242,
+        "p99_ms": 253.633,
+        "p999_ms": 392.348,
+        "max_ms": 460.39
+      },
+      "latency_2xx": {
+        "count": 32858,
+        "p50_ms": 66.12,
+        "p90_ms": 152.242,
+        "p99_ms": 253.633,
+        "p999_ms": 392.348,
+        "max_ms": 460.39
+      },
+      "statuses": {
+        "200": 32858
+      }
+    },
+    "total_requests": 32858
+  }
+}

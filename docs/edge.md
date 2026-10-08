@@ -42,7 +42,14 @@ Implemented in packages/edge/server.go:
 
 - /healthz
 - /readyz
-- /analytics/metrics (when analytics sink exposes stats)
+- /analytics/metrics (requires `Authorization: Bearer $EDGE_ADMIN_TOKEN`; 404 when unset)
+
+## Rate Limiting
+
+- Quotas are per `(prefix, service, api key)` per epoch-aligned window of the prefix `quota_period`; usage resets when the window rolls and leftover leased tokens are dropped.
+- Responses carry `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`; a `429` also carries `Retry-After`.
+- API keys must match `runtime.hub.api_key_pattern`; malformed or unknown keys get `401`, keys the hub refuses for a service get `403`.
+- When the hub is unreachable and `failure.hub.allow_on_rate_service_error` is set, the service's `safety_tier` quota is enforced locally per window.
 
 ## Key Edge Packages
 

@@ -44,7 +44,7 @@ func (f *fakeLeaseClient) callCount() int {
 func (f *fakeLeaseClient) Close() error { return nil }
 
 func TestEdgeRateManager_RequestsLeaseAndConsumesTokens(t *testing.T) {
-	rm := NewRateManagerWithOptions("", nil, 100, RateManagerOptions{LeaseSize: 5, LowWaterPct: 20})
+	rm := NewRateManagerWithOptions(nil, RateManagerOptions{LeaseSize: 5, LowWaterPct: 20})
 	client := &fakeLeaseClient{grants: []int64{5, 5}}
 	rm.SetLeaseClient(client)
 
@@ -64,7 +64,7 @@ func TestEdgeRateManager_RequestsLeaseAndConsumesTokens(t *testing.T) {
 }
 
 func TestEdgeRateManager_DeniesWhenNoLeaseAvailable(t *testing.T) {
-	rm := NewRateManagerWithOptions("", nil, 100, RateManagerOptions{LeaseSize: 2, LowWaterPct: 20, MinTokens: 0})
+	rm := NewRateManagerWithOptions(nil, RateManagerOptions{LeaseSize: 2, LowWaterPct: 20, MinTokens: 0})
 	client := &fakeLeaseClient{grants: []int64{2, 0}}
 	rm.SetLeaseClient(client)
 
@@ -85,7 +85,7 @@ func TestEdgeRateManager_DeniesWhenNoLeaseAvailable(t *testing.T) {
 }
 
 func TestEdgeRateManager_UsesMinTokensReserveUntilExpiry(t *testing.T) {
-	rm := NewRateManagerWithOptions("", nil, 100, RateManagerOptions{LeaseSize: 2, LowWaterPct: 20, MinTokens: 1})
+	rm := NewRateManagerWithOptions(nil, RateManagerOptions{LeaseSize: 2, LowWaterPct: 20, MinTokens: 1})
 	client := &fakeLeaseClient{grants: []int64{2, 0}}
 	rm.SetLeaseClient(client)
 
@@ -110,7 +110,7 @@ func TestEdgeRateManager_UsesMinTokensReserveUntilExpiry(t *testing.T) {
 }
 
 func TestEdgeRateManager_DoesNotUseReserveAfterExpiry(t *testing.T) {
-	rm := NewRateManagerWithOptions("", nil, 100, RateManagerOptions{LeaseSize: 1, LowWaterPct: 20, MinTokens: 1})
+	rm := NewRateManagerWithOptions(nil, RateManagerOptions{LeaseSize: 1, LowWaterPct: 20, MinTokens: 1})
 	client := &fakeLeaseClient{grants: []int64{1, 0}, ttlSeconds: 1}
 	rm.SetLeaseClient(client)
 
@@ -139,7 +139,7 @@ func TestEdgeRateManager_UsesRedisLuaLocalTokens(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	defer rdb.Close()
 
-	rm := NewRateManagerWithOptions("", rdb, 100, RateManagerOptions{LeaseSize: 2, LowWaterPct: 20, MinTokens: 0})
+	rm := NewRateManagerWithOptions(rdb, RateManagerOptions{LeaseSize: 2, LowWaterPct: 20, MinTokens: 0})
 	client := &fakeLeaseClient{grants: []int64{2, 0}, ttlSeconds: 30}
 	rm.SetLeaseClient(client)
 
@@ -172,7 +172,7 @@ func TestEdgeRateManager_RedisLeaseTokensExpireWithTTL(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	defer rdb.Close()
 
-	rm := NewRateManagerWithOptions("", rdb, 100, RateManagerOptions{LeaseSize: 1, LowWaterPct: 20, MinTokens: 0})
+	rm := NewRateManagerWithOptions(rdb, RateManagerOptions{LeaseSize: 1, LowWaterPct: 20, MinTokens: 0})
 	client := &fakeLeaseClient{grants: []int64{1}, ttlSeconds: 1}
 	rm.SetLeaseClient(client)
 
@@ -180,7 +180,7 @@ func TestEdgeRateManager_RedisLeaseTokensExpireWithTTL(t *testing.T) {
 		t.Fatalf("first increment failed: %v", incErr)
 	}
 
-	counter := rm.getLeaseCounter("v1", "k-ttl")
+	counter := rm.getLeaseCounter("v1", "svc", "k-ttl")
 	if ttl := mr.TTL(counter.localTokenKey); ttl <= 0 {
 		t.Fatalf("expected positive ttl on local token key, got %s", ttl)
 	}
@@ -195,9 +195,6 @@ func TestDefaultRateManagerOptions_FollowsRuntimePolicyDefaults(t *testing.T) {
 	opts := DefaultRateManagerOptions()
 	defaults := types.DefaultRuntimePolicy().Edge
 
-	if opts.HardThresholdPct != defaults.RateHardThresholdPct {
-		t.Fatalf("expected hard threshold pct %f, got %f", defaults.RateHardThresholdPct, opts.HardThresholdPct)
-	}
 	if opts.LeaseSize != defaults.RateLeaseSize {
 		t.Fatalf("expected lease size %d, got %d", defaults.RateLeaseSize, opts.LeaseSize)
 	}
@@ -246,7 +243,7 @@ func TestT1_TemporalOverlap(t *testing.T) {
 	ctx := context.Background()
 	// LeaseTTL=10s, RenewalBuffer=2s, very low LWM so only
 	// the temporal trigger causes a renewal.
-	rm := NewRateManagerWithOptions("", rdb, 10000, RateManagerOptions{
+	rm := NewRateManagerWithOptions(rdb, RateManagerOptions{
 		LeaseSize: 100, LowWaterPct: 1, LeaseTTL: 10 * time.Second, RenewalBuffer: 2 * time.Second,
 	})
 	// Two grants of 100 tokens each at 10s TTL — Lease A then Lease B.
@@ -258,7 +255,7 @@ func TestT1_TemporalOverlap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	counter := rm.getLeaseCounter("v1", "k-t1")
+	counter := rm.getLeaseCounter("v1", "svc", "k-t1")
 	balanceAfterA, _ := rdb.Get(ctx, counter.localTokenKey).Int64()
 	if balanceAfterA != 99 {
 		t.Fatalf("expected 99 tokens after Lease A (1 consumed), got %d", balanceAfterA)
@@ -304,7 +301,7 @@ func TestT2_LWMTopUpUnderPressure(t *testing.T) {
 
 	ctx := context.Background()
 	// lease_quantum = 1000, low_water_mark = 200 (LowWaterPct = 20%)
-	rm := NewRateManagerWithOptions("", rdb, 100000, RateManagerOptions{
+	rm := NewRateManagerWithOptions(rdb, RateManagerOptions{
 		LeaseSize: 1000, LowWaterPct: 20, LeaseTTL: 60 * time.Second, RenewalBuffer: 2 * time.Second,
 	})
 	client := &fakeLeaseClient{grants: []int64{1000, 1000}, ttlSeconds: 60}
@@ -320,7 +317,7 @@ func TestT2_LWMTopUpUnderPressure(t *testing.T) {
 	// Allow async LWM-triggered renewal to complete.
 	time.Sleep(100 * time.Millisecond)
 
-	counter := rm.getLeaseCounter("v1", "k-t2")
+	counter := rm.getLeaseCounter("v1", "svc", "k-t2")
 	balance, _ := rdb.Get(ctx, counter.localTokenKey).Int64()
 	// After 850 consumes from the first 1000: 1000-850 = 150 remaining before
 	// top-up hits; after the second 1000-grant INCRBY: balance ≥ 1000.
@@ -336,7 +333,7 @@ func TestT2_LWMTopUpUnderPressure(t *testing.T) {
 // T3: Global Exhaustion and Backoff — when the Hub reports zero capacity, the
 // Edge enters WAITING, 429s all traffic, and retries only after retry_after_ms.
 func TestT3_GlobalExhaustionAndBackoff(t *testing.T) {
-	rm := NewRateManagerWithOptions("", nil, 10, RateManagerOptions{LeaseSize: 10, LowWaterPct: 20})
+	rm := NewRateManagerWithOptions(nil, RateManagerOptions{LeaseSize: 10, LowWaterPct: 20})
 	client := &fakeWaitingLeaseClient{retryAfterMs: 500}
 	rm.SetLeaseClient(client)
 
@@ -351,7 +348,7 @@ func TestT3_GlobalExhaustionAndBackoff(t *testing.T) {
 		t.Fatalf("expected 429 (usage > limit) on first request, got %d", usage)
 	}
 
-	counter := rm.getLeaseCounter("v1", "k-t3")
+	counter := rm.getLeaseCounter("v1", "svc", "k-t3")
 	if leaseState(counter.state.Load()) != leaseStateWaiting {
 		t.Fatalf("expected counter to be in WAITING state after Hub 202, got state %d", counter.state.Load())
 	}
@@ -381,7 +378,11 @@ func TestT3_GlobalExhaustionAndBackoff(t *testing.T) {
 		t.Fatalf("expected 429 during WAITING→retry transition, got %d", usage)
 	}
 
-	// The Hub was contacted for a second poll.
+	// The Hub is polled again by the (asynchronous) background renewal.
+	deadline := time.Now().Add(time.Second)
+	for client.callCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	calls := client.callCount()
 	if calls < 2 {
 		t.Fatalf("expected at least 2 Hub polls, got %d", calls)
@@ -402,7 +403,7 @@ func TestT4_StaleLeasePartitionHardExpiry(t *testing.T) {
 
 	ctx := context.Background()
 	// lease_ttl = 5s; very low LWM so only TTL-expiry causes denial.
-	rm := NewRateManagerWithOptions("", rdb, 100000, RateManagerOptions{
+	rm := NewRateManagerWithOptions(rdb, RateManagerOptions{
 		LeaseSize: 500, LowWaterPct: 0.1, LeaseTTL: 5 * time.Second, RenewalBuffer: 500 * time.Millisecond,
 		MinTokens: 0,
 	})
@@ -415,7 +416,7 @@ func TestT4_StaleLeasePartitionHardExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	counter := rm.getLeaseCounter("v1", "k-t4")
+	counter := rm.getLeaseCounter("v1", "svc", "k-t4")
 
 	// Verify the key has a ~5s TTL set via PEXPIRE.
 	if ttl := mr.TTL(counter.localTokenKey); ttl < 4*time.Second {

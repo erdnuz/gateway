@@ -1,0 +1,12 @@
+{
+  "scenario": "bypass",
+  "pass": true,
+  "checks": [
+    "PASS: 0 malformed/unknown-key requests admitted (want 0)"
+  ],
+  "data": {
+    "statuses": {
+      "401": 1010
+    }
+  }
+}

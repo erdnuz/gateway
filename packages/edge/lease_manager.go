@@ -18,11 +18,8 @@ import (
 const leaseManagerQueueSize = 256
 
 type renewalRequest struct {
-	prefix    string
-	serviceID string
-	apiKey    string
-	counter   *leaseCounter
-	minimum   int64
+	req     RateRequest
+	counter *leaseCounter
 }
 
 // LeaseManager owns the background renewal goroutine.
@@ -50,9 +47,9 @@ func (lm *LeaseManager) Start(ctx context.Context) {
 // Enqueue adds a renewal request to the work channel.
 // The call is non-blocking: if the channel is full the request is silently
 // dropped — the next volume or temporal trigger will retry naturally.
-func (lm *LeaseManager) Enqueue(prefix, serviceID, apiKey string, counter *leaseCounter, minimum int64) bool {
+func (lm *LeaseManager) Enqueue(req RateRequest, counter *leaseCounter) bool {
 	select {
-	case lm.ch <- renewalRequest{prefix: prefix, serviceID: serviceID, apiKey: apiKey, counter: counter, minimum: minimum}:
+	case lm.ch <- renewalRequest{req: req, counter: counter}:
 		return true
 	default:
 		// Channel full — drop and rely on next trigger.
@@ -91,14 +88,10 @@ func (lm *LeaseManager) handle(ctx context.Context, req renewalRequest) {
 		case <-ctx.Done():
 			return
 		}
-		// Transition WAITING → IDLE so ensureLease can proceed.
+		// Transition WAITING → IDLE so the renewal can proceed.
 		req.counter.state.CompareAndSwap(int32(leaseStateWaiting), int32(leaseStateIdle))
 	}
 
-	// Acquire RENEWING slot before calling ensureLease to deduplicate work.
-	if !req.counter.state.CompareAndSwap(int32(leaseStateIdle), int32(leaseStateRenewing)) {
-		return // another goroutine already in-flight
-	}
-	defer req.counter.state.CompareAndSwap(int32(leaseStateRenewing), int32(leaseStateIdle))
-	_ = lm.rm.ensureLease(ctx, req.prefix, req.serviceID, req.apiKey, req.counter, req.minimum)
+	// renewNow takes the RENEWING slot, deduplicating concurrent work.
+	lm.rm.renewNow(ctx, req.req, req.counter)
 }

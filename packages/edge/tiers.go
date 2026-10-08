@@ -7,6 +7,7 @@ import (
 	"gateway/packages/common/types"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 const (
 	tierCacheTTL          = 1 * time.Hour
+	tierNegativeCacheTTL  = 30 * time.Second
 	defaultTierRedisOpTTL = 150 * time.Millisecond
 	defaultTierHubOpTTL   = 500 * time.Millisecond
 )
@@ -31,13 +33,11 @@ type TierManager struct {
 	group       singleflight.Group
 	natsConn    *nats.Conn
 	natsSubject string
-	natsQueue   string
 }
 
 type TierManagerOptions struct {
-	NATSURL   string
-	NATSSubj  string
-	NATSQueue string
+	NATSURL  string
+	NATSSubj string
 }
 
 type tierSnapshot struct {
@@ -76,10 +76,6 @@ func NewTierManagerWithOptions(hubAddr string, rdb *redis.Client, hubUpdatesChan
 	if subject == "" {
 		subject = "tier.updates"
 	}
-	queue := strings.TrimSpace(options.NATSQueue)
-	if queue == "" {
-		queue = "edge-tier-updates"
-	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		log.Printf("edge tier nats connect failed url=%s err=%v", natsURL, err)
@@ -91,7 +87,6 @@ func NewTierManagerWithOptions(hubAddr string, rdb *redis.Client, hubUpdatesChan
 		client:      client,
 		natsConn:    nc,
 		natsSubject: subject,
-		natsQueue:   queue,
 	}
 }
 
@@ -105,7 +100,9 @@ func (tm *TierManager) GetUserTier(ctx context.Context, prefix, apiKey string) (
 	val, err := tm.rdb.Get(redisCtx, cacheKey).Result()
 	redisCancel()
 	if err == nil {
-		tm.stale.Store(cacheKey, tierSnapshot{tier: val, updatedAt: time.Now()})
+		if val != "" {
+			tm.stale.Store(cacheKey, tierSnapshot{tier: val, updatedAt: time.Now()})
+		}
 		return val, nil
 	}
 
@@ -118,15 +115,21 @@ func (tm *TierManager) GetUserTier(ctx context.Context, prefix, apiKey string) (
 			return "", err
 		}
 
-		// 3. Backfill Redis so the next request is O(1)
-		// We use a background context here so the client request doesn't
-		// wait for the Redis write to finish.
+		// 3. Backfill Redis so the next request is O(1). Unknown keys are
+		// cached briefly so a flood of bogus keys cannot pin cache memory,
+		// and newly issued keys still arrive via the NATS tier update.
+		ttl := tierCacheTTL
+		if tier == "" {
+			ttl = tierNegativeCacheTTL
+		}
 		backfillCtx, backfillCancel := context.WithTimeout(context.Background(), defaultTierRedisOpTTL)
 		defer backfillCancel()
-		if err := tm.rdb.Set(backfillCtx, cacheKey, tier, tierCacheTTL).Err(); err != nil {
-			log.Printf("edge tier cache set failed key=%s err=%v", cacheKey, err)
+		if err := tm.rdb.Set(backfillCtx, cacheKey, tier, ttl).Err(); err != nil {
+			log.Printf("edge tier cache set failed prefix=%s err=%v", prefix, err)
 		}
-		tm.stale.Store(cacheKey, tierSnapshot{tier: tier, updatedAt: time.Now()})
+		if tier != "" {
+			tm.stale.Store(cacheKey, tierSnapshot{tier: tier, updatedAt: time.Now()})
+		}
 
 		return tier, nil
 	})
@@ -139,7 +142,7 @@ func (tm *TierManager) GetUserTier(ctx context.Context, prefix, apiKey string) (
 }
 
 func (tm *TierManager) fetchFromHub(ctx context.Context, prefix, apiKey string) (string, error) {
-	url := fmt.Sprintf("%s/tiers/%s/%s", tm.hubAddr, prefix, apiKey)
+	url := fmt.Sprintf("%s/tiers/%s/%s", tm.hubAddr, neturl.PathEscape(prefix), neturl.PathEscape(apiKey))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -199,7 +202,9 @@ func (tm *TierManager) StartHubUpdateListener(ctx context.Context) error {
 	if tm.natsConn == nil {
 		return nil
 	}
-	sub, err := tm.natsConn.QueueSubscribe(tm.natsSubject, tm.natsQueue, func(msg *nats.Msg) {
+	// Plain Subscribe, not a queue group: every edge owns its tier cache, so
+	// every edge must see every update.
+	sub, err := tm.natsConn.Subscribe(tm.natsSubject, func(msg *nats.Msg) {
 		tm.applyTierUpdatePayload(ctx, string(msg.Data))
 	})
 	if err != nil {

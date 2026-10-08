@@ -1,0 +1,63 @@
+{
+  "scenario": "outage",
+  "pass": false,
+  "checks": [
+    "FAIL: window 179142690 still serves traffic during hub outage (admitted 0)",
+    "FAIL: window 179142691 still serves traffic during hub outage (admitted 0)",
+    "PASS: window 179142691 admitted 0 \u003c= safety cap 100",
+    "FAIL: window 179142692 still serves traffic during hub outage (admitted 0)",
+    "PASS: window 179142692 admitted 0 \u003c= safety cap 100"
+  ],
+  "data": {
+    "windows": [
+      {
+        "window": 179142690,
+        "sent": 995,
+        "admitted": 0,
+        "admitted_per_edge": [
+          0,
+          0
+        ],
+        "statuses": {
+          "503": 995
+        }
+      },
+      {
+        "window": 179142691,
+        "sent": 1000,
+        "admitted": 0,
+        "admitted_per_edge": [
+          0,
+          0
+        ],
+        "statuses": {
+          "503": 1000
+        }
+      },
+      {
+        "window": 179142692,
+        "sent": 1001,
+        "admitted": 0,
+        "admitted_per_edge": [
+          0,
+          0
+        ],
+        "statuses": {
+          "503": 1001
+        }
+      },
+      {
+        "window": 179142693,
+        "sent": 4,
+        "admitted": 0,
+        "admitted_per_edge": [
+          0,
+          0
+        ],
+        "statuses": {
+          "503": 4
+        }
+      }
+    ]
+  }
+}

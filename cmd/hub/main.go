@@ -88,6 +88,7 @@ func main() {
 		log.Fatalf("invalid runtime.hub.api_key_pattern: %v", err)
 	}
 	server.SetConfigReloadChannel(config.String("HUB_CONFIG_RELOAD_CHANNEL", types.DefaultConfigReloadChannel))
+	server.SetConfigReloadSubject(config.String("HUB_CONFIG_RELOAD_SUBJECT", types.DefaultConfigReloadSubject))
 	server.SetAsyncQueueConfig(
 		config.Int("HUB_QUEUE_WORKERS", hubPolicy.QueueWorkers),
 		config.Duration("HUB_QUEUE_SUBMIT_TIMEOUT", hubPolicy.QueueSubmitTimeout),
@@ -232,19 +233,17 @@ func splitCSV(value string) []string {
 	return out
 }
 
+// enforceNoEvictionPolicy verifies that hub Redis will never evict lease or
+// tier keys. It only checks: changing server config belongs to whoever
+// operates Redis, not to a client at startup.
 func enforceNoEvictionPolicy(ctx context.Context, rdb *redis.Client) error {
 	res, err := rdb.ConfigGet(ctx, "maxmemory-policy").Result()
 	if err != nil {
 		return fmt.Errorf("config get maxmemory-policy: %w", err)
 	}
-	policy := strings.TrimSpace(res["maxmemory-policy"])
-	if policy == "noeviction" {
-		return nil
+	if policy := strings.TrimSpace(res["maxmemory-policy"]); policy != "noeviction" {
+		return fmt.Errorf("redis maxmemory-policy is %q; hub requires noeviction (set it on the Redis server, or HUB_ENFORCE_REDIS_NOEVICTION=false to skip)", policy)
 	}
-	if err := rdb.ConfigSet(ctx, "maxmemory-policy", "noeviction").Err(); err != nil {
-		return fmt.Errorf("expected maxmemory-policy=noeviction, got=%q and failed to set: %w", policy, err)
-	}
-	log.Printf("redis maxmemory-policy changed from %q to noeviction", policy)
 	return nil
 }
 

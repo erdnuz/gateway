@@ -1,0 +1,28 @@
+{
+  "scenario": "carryover",
+  "pass": false,
+  "checks": [
+    "FAIL: window N+1 admitted 1140 (limit 1000)",
+    "PASS: window N+1 admitted 1140 is not starved (\u003e= 800)"
+  ],
+  "data": {
+    "flood": [
+      {
+        "window": 179142678,
+        "sent": 2850,
+        "admitted": 1140,
+        "admitted_per_edge": [
+          570,
+          570
+        ],
+        "statuses": {
+          "200": 1140,
+          "429": 1710
+        }
+      }
+    ],
+    "warm_statuses": {
+      "200": 20
+    }
+  }
+}

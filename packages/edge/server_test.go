@@ -408,16 +408,16 @@ func TestEdgeServer_AnalyticsPolicyDisabledSkipsCapture(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
 
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 	sink := &captureAnalyticsSink{}
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, sink, rdb)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/svc/resource", nil)
-	req.Header.Set("X-API-Key", "test-key")
+	req.Header.Set("X-API-Key", "testkey")
 	rr := httptest.NewRecorder()
 	edgeServer.ServeHTTP(rr, req)
 
@@ -459,16 +459,16 @@ func TestEdgeServer_AnalyticsPolicySamplingZeroSkipsCapture(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
 
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 	sink := &captureAnalyticsSink{}
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, sink, rdb)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/svc/resource", nil)
-	req.Header.Set("X-API-Key", "test-key")
+	req.Header.Set("X-API-Key", "testkey")
 	rr := httptest.NewRecorder()
 	edgeServer.ServeHTTP(rr, req)
 
@@ -557,20 +557,20 @@ func TestEdgeServer_CacheHitPathReachable(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 
 	sink := &captureAnalyticsSink{}
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, sink, rdb)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/svc/resource?a=1", nil)
-	req.Header.Set("X-API-Key", "test-key")
+	req.Header.Set("X-API-Key", "testkey")
 	req.Header.Set("Accept-Encoding", "gzip")
 
 	cm := NewCacheManager(rdb, *svc.Cache)
-	cacheKey := cm.generateCacheKey(req, "test-key")
+	cacheKey := cm.generateCacheKey(req, "testkey")
 	if err := rdb.Set(context.Background(), cacheKey, []byte(`{"source":"cache"}`), time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -627,15 +627,15 @@ func TestEdgeServer_CacheHitPreservesStatusCode(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, NoOpAnalyticsSink{}, rdb)
 
 	req1 := httptest.NewRequest(http.MethodGet, "/v1/svc/not-found", nil)
-	req1.Header.Set("X-API-Key", "test-key")
+	req1.Header.Set("X-API-Key", "testkey")
 	res1 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(res1, req1)
 	if res1.Code != http.StatusNotFound {
@@ -643,7 +643,7 @@ func TestEdgeServer_CacheHitPreservesStatusCode(t *testing.T) {
 	}
 
 	req2 := httptest.NewRequest(http.MethodGet, "/v1/svc/not-found", nil)
-	req2.Header.Set("X-API-Key", "test-key")
+	req2.Header.Set("X-API-Key", "testkey")
 	res2 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(res2, req2)
 	if res2.Code != http.StatusNotFound {
@@ -742,15 +742,15 @@ func TestEdgeServer_BoundedCachingBehavior(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, NoOpAnalyticsSink{}, rdb)
 
 	// Small response should be cached after first MISS, then served as HIT.
 	smallReq1 := httptest.NewRequest(http.MethodGet, "/v1/svc/small", nil)
-	smallReq1.Header.Set("X-API-Key", "test-key")
+	smallReq1.Header.Set("X-API-Key", "testkey")
 	smallRes1 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(smallRes1, smallReq1)
 	if smallRes1.Header().Get("X-Cache") != "MISS" {
@@ -758,7 +758,7 @@ func TestEdgeServer_BoundedCachingBehavior(t *testing.T) {
 	}
 
 	smallReq2 := httptest.NewRequest(http.MethodGet, "/v1/svc/small", nil)
-	smallReq2.Header.Set("X-API-Key", "test-key")
+	smallReq2.Header.Set("X-API-Key", "testkey")
 	smallRes2 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(smallRes2, smallReq2)
 	if smallRes2.Header().Get("X-Cache") != "HIT" {
@@ -770,7 +770,7 @@ func TestEdgeServer_BoundedCachingBehavior(t *testing.T) {
 
 	// Large response should never be cached.
 	largeReq1 := httptest.NewRequest(http.MethodGet, "/v1/svc/large", nil)
-	largeReq1.Header.Set("X-API-Key", "test-key")
+	largeReq1.Header.Set("X-API-Key", "testkey")
 	largeRes1 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(largeRes1, largeReq1)
 	if largeRes1.Header().Get("X-Cache") != "MISS" {
@@ -781,7 +781,7 @@ func TestEdgeServer_BoundedCachingBehavior(t *testing.T) {
 	}
 
 	largeReq2 := httptest.NewRequest(http.MethodGet, "/v1/svc/large", nil)
-	largeReq2.Header.Set("X-API-Key", "test-key")
+	largeReq2.Header.Set("X-API-Key", "testkey")
 	largeRes2 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(largeRes2, largeReq2)
 	if largeRes2.Header().Get("X-Cache") != "MISS" {
@@ -825,12 +825,12 @@ func TestEdgeServer_HubTierLookupFallbackToDefaultTier(t *testing.T) {
 	configMgr.active.Store(cfg)
 	// Hub address intentionally unreachable to force tier lookup fallback path.
 	tierMgr := NewTierManager("http://127.0.0.1:1", rdb, types.DefaultHubUpdatesChannel)
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, NoOpAnalyticsSink{}, rdb)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/svc/resource", nil)
-	req.Header.Set("X-API-Key", "fallback-user")
+	req.Header.Set("X-API-Key", "fallbackuser")
 	rw := httptest.NewRecorder()
 	edgeServer.ServeHTTP(rw, req)
 
@@ -879,14 +879,14 @@ func TestEdgeServer_UpstreamRetriesOnConfiguredStatus(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, NoOpAnalyticsSink{}, rdb)
 	req := httptest.NewRequest(http.MethodGet, "/v1/svc/retry", nil)
-	req.Header.Set("X-API-Key", "test-key")
+	req.Header.Set("X-API-Key", "testkey")
 	rw := httptest.NewRecorder()
 	edgeServer.ServeHTTP(rw, req)
 
@@ -926,14 +926,14 @@ func TestEdgeServer_UpstreamFailOpenFallbackResponse(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 
 	edgeServer := NewEdgeServer(configMgr, tierMgr, rateMgr, NoOpAnalyticsSink{}, rdb)
 	req := httptest.NewRequest(http.MethodGet, "/v1/svc/fallback", nil)
-	req.Header.Set("X-API-Key", "test-key")
+	req.Header.Set("X-API-Key", "testkey")
 	rw := httptest.NewRecorder()
 	edgeServer.ServeHTTP(rw, req)
 
@@ -973,15 +973,15 @@ func TestEdgeServer_UsesConfiguredMaxCacheableResponseBytes(t *testing.T) {
 	configMgr := &ConfigManager{}
 	configMgr.active.Store(cfg)
 	tierMgr := NewTierManager("http://hub.invalid", rdb, types.DefaultHubUpdatesChannel)
-	if err := rdb.Set(context.Background(), "tier:v1:test-key", "free", time.Hour).Err(); err != nil {
+	if err := rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
 		t.Fatal(err)
 	}
-	rateMgr := NewRateManager("", rdb, 100)
+	rateMgr := NewRateManager(rdb)
 
 	edgeServer := NewEdgeServerWithOptions(configMgr, tierMgr, rateMgr, NoOpAnalyticsSink{}, rdb, EdgeServerOptions{MaxCacheableResponseBytes: 64})
 
 	req1 := httptest.NewRequest(http.MethodGet, "/v1/svc/large", nil)
-	req1.Header.Set("X-API-Key", "test-key")
+	req1.Header.Set("X-API-Key", "testkey")
 	res1 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(res1, req1)
 	if res1.Header().Get("X-Cache") != "MISS" {
@@ -989,7 +989,7 @@ func TestEdgeServer_UsesConfiguredMaxCacheableResponseBytes(t *testing.T) {
 	}
 
 	req2 := httptest.NewRequest(http.MethodGet, "/v1/svc/large", nil)
-	req2.Header.Set("X-API-Key", "test-key")
+	req2.Header.Set("X-API-Key", "testkey")
 	res2 := httptest.NewRecorder()
 	edgeServer.ServeHTTP(res2, req2)
 	if res2.Header().Get("X-Cache") != "MISS" {
@@ -1022,8 +1022,17 @@ func TestEdgeServer_AnalyticsMetricsEndpoint(t *testing.T) {
 	mgr := NewAnalyticsManager(4)
 	mgr.Capture(&types.AnalyticsEntry{Prefix: "v1", Service: "svc", Method: http.MethodGet})
 
-	edgeServer := NewEdgeServer(nil, nil, nil, mgr, nil)
+	edgeServer := NewEdgeServerWithOptions(nil, nil, nil, mgr, nil, EdgeServerOptions{AdminToken: "admin-secret"})
+
+	// Internal endpoint is hidden without the admin token.
+	anon := httptest.NewRecorder()
+	edgeServer.ServeHTTP(anon, httptest.NewRequest(http.MethodGet, "/analytics/metrics", nil))
+	if anon.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 without admin token, got %d", anon.Code)
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "/analytics/metrics", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
 	rw := httptest.NewRecorder()
 	edgeServer.ServeHTTP(rw, req)
 

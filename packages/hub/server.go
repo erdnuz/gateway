@@ -2,6 +2,10 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"gateway/packages/common/types"
@@ -69,6 +73,8 @@ type HubServer struct {
 	tierUpdateConn    *nats.Conn
 	tierUpdateSubj    string
 	configReloadChan  string
+	configReloadSubj  string
+	bootID            string
 	corsPolicy        atomic.Pointer[corsPolicy]
 	apiKeyPattern     atomic.Pointer[regexp.Regexp]
 	readyHealthy      atomic.Bool
@@ -123,6 +129,8 @@ func NewHubServerWithManagers(
 		retryMax:         1,
 		retryBackoff:     10 * time.Millisecond,
 		configReloadChan: types.DefaultConfigReloadChannel,
+		configReloadSubj: types.DefaultConfigReloadSubject,
+		bootID:           newBootID(),
 	}
 	server.readyHealthy.Store(false)
 	server.corsPolicy.Store(newCORSPolicy(
@@ -190,6 +198,22 @@ func (s *HubServer) SetConfigReloadChannel(channel string) {
 		return
 	}
 	s.configReloadChan = channel
+}
+
+// SetConfigReloadSubject sets the NATS subject for config reload events.
+func (s *HubServer) SetConfigReloadSubject(subject string) {
+	if strings.TrimSpace(subject) == "" {
+		return
+	}
+	s.configReloadSubj = subject
+}
+
+func newBootID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 func (s *HubServer) SetCORSPreflightPolicy(allowedHeaders, allowedMethods []string, maxAge time.Duration) {
@@ -484,6 +508,7 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 
 	event := types.ConfigReloadEvent{
 		Version:       types.ConfigReloadEventVersion,
+		BootID:        s.bootID,
 		Epoch:         s.configEpoch.Add(1),
 		ReloadedAtUTC: time.Now().UTC().Format(time.RFC3339Nano),
 		Invalidations: analysis.Invalidations,
@@ -536,13 +561,22 @@ func (s *HubServer) resolveReloadTargetConfig(r *http.Request) (*types.GatewayCo
 	return cfg, "file", nil
 }
 
+// publishConfigReloadEvent fans the event out on NATS (reaches every edge and
+// analytics instance) and on hub Redis pub/sub (legacy single-Redis setups).
 func (s *HubServer) publishConfigReloadEvent(event types.ConfigReloadEvent) {
-	if s.rdb == nil {
-		return
-	}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		log.Printf("hub config reload event marshal failed: %v", err)
+		return
+	}
+	if s.tierUpdateConn != nil {
+		if err := s.tierUpdateConn.Publish(s.configReloadSubj, payload); err != nil {
+			log.Printf("hub config reload nats publish failed subject=%s err=%v", s.configReloadSubj, err)
+		}
+	} else {
+		log.Printf("hub config reload: nats not connected; edges with private Redis will not see epoch %d", event.Epoch)
+	}
+	if s.rdb == nil {
 		return
 	}
 	go func(channel string, data []byte) {
@@ -614,8 +648,13 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 		var req struct {
 			TierID string `json:"tier_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.TierID = strings.TrimSpace(req.TierID)
+		if !s.tierDefinedInPrefix(prefix, req.TierID) {
+			http.Error(w, "unknown tier_id for prefix", http.StatusBadRequest)
 			return
 		}
 
@@ -648,16 +687,34 @@ func (s *HubServer) writeInternalError(w http.ResponseWriter, op string, err err
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
+// authorize checks the bearer token in constant time. An empty authToken
+// disables auth; cmd/hub refuses to start without HUB_AUTH_TOKEN, so that
+// only happens for embedded/test servers.
 func (s *HubServer) authorize(r *http.Request) bool {
 	if s.authToken == "" {
 		return true
 	}
-	authz := r.Header.Get("Authorization")
-	const bearer = "Bearer "
-	if !strings.HasPrefix(authz, bearer) {
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(got), []byte(s.authToken)) == 1
+}
+
+// tierDefinedInPrefix reports whether any service under prefix defines tierID
+// (as a regular or safety tier). Assigning an undefined tier would make every
+// request for the key fail at the edge.
+func (s *HubServer) tierDefinedInPrefix(prefix, tierID string) bool {
+	if tierID == "" {
 		return false
 	}
-	return strings.TrimPrefix(authz, bearer) == s.authToken
+	p, ok := s.cfgManager.FindPrefix(prefix)
+	if !ok {
+		return false
+	}
+	for i := range p.Services {
+		if _, ok := findTier(&p.Services[i], tierID); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *HubServer) isAllowedPrefix(prefix string) bool {
@@ -689,7 +746,7 @@ func (s *HubServer) publishTierUpdate(prefix, apiKey, tierID string) {
 		errorCnt: &s.tierPublishErrors,
 	}
 	if err := s.asyncQueue.Submit(task, 0); err != nil {
-		log.Printf("hub tier update queue submit failed prefix=%s api_key=%s tier=%s err=%v", prefix, apiKey, tierID, err)
+		log.Printf("hub tier update queue submit failed prefix=%s key=%s tier=%s err=%v", prefix, redactKey(apiKey), tierID, err)
 	}
 }
 
@@ -714,7 +771,7 @@ func (t *tierUpdateTask) Execute(ctx context.Context) error {
 		if t.errorCnt != nil {
 			t.errorCnt.Add(1)
 		}
-		log.Printf("hub tier update nats publish failed prefix=%s api_key=%s tier=%s subject=%s err=%v", t.prefix, t.apiKey, t.tierID, t.subject, err)
+		log.Printf("hub tier update nats publish failed prefix=%s key=%s tier=%s subject=%s err=%v", t.prefix, redactKey(t.apiKey), t.tierID, t.subject, err)
 		return err
 	}
 	return nil
@@ -722,4 +779,10 @@ func (t *tierUpdateTask) Execute(ctx context.Context) error {
 
 func (t *tierUpdateTask) RetryPolicy() *workers.RetryPolicy {
 	return &workers.RetryPolicy{MaxRetries: t.retryMax, Backoff: t.backoff}
+}
+
+// redactKey returns a log-safe fingerprint of an API key.
+func redactKey(apiKey string) string {
+	sum := sha256.Sum256([]byte(apiKey))
+	return "sha256:" + hex.EncodeToString(sum[:6])
 }

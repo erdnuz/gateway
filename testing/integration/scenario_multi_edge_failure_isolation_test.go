@@ -15,7 +15,7 @@ func TestIntegration_MultiEdgeLeaseFailureIsolation(t *testing.T) {
 		t.Fatalf("expected at least 2 edges, got %d", h.edgeCount())
 	}
 
-	const apiKey = "iso-client"
+	const apiKey = "isoclient"
 	h.setTier("v1", apiKey, "free")
 
 	// Break lease on edge 0 only; edge 1 should remain healthy.

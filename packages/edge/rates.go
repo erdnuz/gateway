@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,9 @@ import (
 	"gateway/packages/common/types"
 
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // leaseState tracks the current lifecycle stage of a lease for a given key.
@@ -32,13 +36,7 @@ if current < amount then
   return -1
 end
 
-local remaining = redis.call("DECRBY", key, amount)
-if tonumber(remaining) < 0 then
-  redis.call("INCRBY", key, amount)
-  return -1
-end
-
-return tonumber(remaining)
+return tonumber(redis.call("DECRBY", key, amount))
 `)
 
 // addLeaseTokensLua atomically increments the local token bucket and sets its
@@ -57,18 +55,69 @@ end
 return tonumber(updated)
 `)
 
+// ErrLeaseUnavailable is returned while the edge is backing off after a failed
+// lease RPC, so a hub outage costs one RPC per backoff interval instead of one
+// per request.
+var ErrLeaseUnavailable = errors.New("quota lease service unavailable")
+
+// ErrLeaseRejected means the hub refused the key (unknown key, tier, or
+// service). It is a policy decision and must not trigger safety fallback.
+var ErrLeaseRejected = errors.New("quota lease rejected")
+
+func classifyLeaseError(err error) error {
+	switch status.Code(err) {
+	case codes.InvalidArgument, codes.NotFound, codes.PermissionDenied:
+		return fmt.Errorf("%w: %v", ErrLeaseRejected, err)
+	}
+	return fmt.Errorf("%w: %v", ErrLeaseUnavailable, err)
+}
+
+const (
+	edgeLeaseRedisTimeout = 150 * time.Millisecond
+	leaseFailureBackoff   = 500 * time.Millisecond
+	leaseRPCTimeout       = 2 * time.Second
+	leaseMissRetries      = 64
+	counterSweepInterval  = 30 * time.Second
+	counterMinIdle        = time.Minute
+)
+
 type leaseCounter struct {
-	remaining       atomic.Int64
-	consumed        atomic.Int64
+	remaining       atomic.Int64 // local tokens (in-memory store only)
+	consumed        atomic.Int64 // admitted cost in the current window on this edge
 	reserveUsed     atomic.Int64
-	expiresAtUnixMs atomic.Int64 // millisecond precision (was expiresAtUnix)
+	hubRemaining    atomic.Int64 // hub's global remaining as of the last grant
+	windowID        atomic.Int64 // quota window the counter currently accounts for
+	expiresAtUnixMs atomic.Int64 // end of the current lease (millisecond precision)
+	lastSeenUnixMs  atomic.Int64
 	state           atomic.Int32 // leaseState enum: idle / renewing / waiting
 	renewalQueued   atomic.Int32 // 1 while a background renewal request is queued or in-flight
 	retryAfterMs    atomic.Int64 // populated from Hub WAITING response
 	nextRetryUnixMs atomic.Int64 // when WAITING, earliest time to retry
-	leaseSize       int64
+	leaseSize       atomic.Int64
 	localTokenKey   string
-	renewalBuffer   time.Duration // look-ahead window before expiry that triggers temporal renewal
+}
+
+// RateRequest describes one admission decision.
+type RateRequest struct {
+	Prefix  string
+	Service string
+	APIKey  string
+	Limit   int64
+	Cost    int64
+	// Period is the prefix quota period. Counters reset when the epoch-aligned
+	// window (unix / period, the same alignment the hub uses) rolls over.
+	// Zero means a single unbounded window.
+	Period time.Duration
+	// LeaseSize overrides the manager default lease quantum when > 0.
+	LeaseSize int64
+}
+
+// RateDecision is the outcome of RateManager.Allow.
+type RateDecision struct {
+	Allowed   bool
+	Limit     int64
+	Remaining int64     // best-effort quota left in the window across all edges
+	ResetAt   time.Time // zero when the request has no period
 }
 
 type RateManager struct {
@@ -76,15 +125,16 @@ type RateManager struct {
 	leaseSize     int64
 	lowWaterPct   float64
 	minTokens     int64
-	leaseTTL      time.Duration // TTL for the Redis local token key
+	leaseTTL      time.Duration // lease lifetime when the request has no period
 	renewalBuffer time.Duration // look-ahead window before expiry
 	rdb           *redis.Client
-	leaseMap      sync.Map
-	refillGroup   singleflightGroup
+	leaseMap      sync.Map // "prefix\x00service\x00apiKey" -> *leaseCounter
+	safetyMap     sync.Map // same key -> *leaseCounter (only consumed/windowID used)
+	refillGroup   singleflight.Group
 	leaseManager  *LeaseManager
+	// leaseBackoffUntilMs short-circuits lease RPCs after a failure.
+	leaseBackoffUntilMs atomic.Int64
 }
-
-const edgeLeaseRedisTimeout = 150 * time.Millisecond
 
 func withLeaseRedisTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx == nil {
@@ -97,35 +147,33 @@ func withLeaseRedisTimeout(ctx context.Context) (context.Context, context.Cancel
 }
 
 type RateManagerOptions struct {
-	HardThresholdPct float64
-	LeaseSize        int64
-	LowWaterPct      float64 // percentage 0–100; 0 → policy default (20%)
-	MinTokens        int64
-	LeaseTTL         time.Duration // Redis key TTL; 0 → 60s default
-	RenewalBuffer    time.Duration // look-ahead window before expiry; 0 → 2s default
+	LeaseSize     int64
+	LowWaterPct   float64 // percentage 0–100; 0 → policy default (20%)
+	MinTokens     int64
+	LeaseTTL      time.Duration // lease lifetime for period-less requests; 0 → 60s
+	RenewalBuffer time.Duration // look-ahead window before expiry; 0 → 2s
 }
 
 func DefaultRateManagerOptions() RateManagerOptions {
 	edgeDefaults := types.DefaultRuntimePolicy().Edge
 	return RateManagerOptions{
-		HardThresholdPct: edgeDefaults.RateHardThresholdPct,
-		LeaseSize:        edgeDefaults.RateLeaseSize,
-		LowWaterPct:      edgeDefaults.RateLowWaterPct,
-		MinTokens:        1,
+		LeaseSize:   edgeDefaults.RateLeaseSize,
+		LowWaterPct: edgeDefaults.RateLowWaterPct,
+		MinTokens:   1,
 	}
 }
 
 var _ types.Limiter = (*RateManager)(nil)
 
-func NewRateManager(_ string, counterStore interface{}, maxDelta int64, channels ...string) *RateManager {
-	return NewRateManagerWithOptions("", counterStore, maxDelta, DefaultRateManagerOptions(), channels...)
+func NewRateManager(counterStore *redis.Client) *RateManager {
+	return NewRateManagerWithOptions(counterStore, DefaultRateManagerOptions())
 }
 
-func NewRateManagerWithOptions(_ string, counterStore interface{}, maxDelta int64, options RateManagerOptions, _ ...string) *RateManager {
+// NewRateManagerWithOptions builds an edge rate manager. counterStore holds
+// local lease tokens in Redis; pass nil to keep them in process memory, which
+// is faster and correct whenever each edge owns its Redis.
+func NewRateManagerWithOptions(counterStore *redis.Client, options RateManagerOptions) *RateManager {
 	edgeDefaults := types.DefaultRuntimePolicy().Edge
-	if options.HardThresholdPct <= 0 || options.HardThresholdPct > 1 {
-		options.HardThresholdPct = edgeDefaults.RateHardThresholdPct
-	}
 	if options.LeaseSize <= 0 {
 		options.LeaseSize = edgeDefaults.RateLeaseSize
 	}
@@ -141,19 +189,13 @@ func NewRateManagerWithOptions(_ string, counterStore interface{}, maxDelta int6
 	if options.RenewalBuffer <= 0 {
 		options.RenewalBuffer = 2 * time.Second
 	}
-	var rdb *redis.Client
-	if c, ok := counterStore.(*redis.Client); ok {
-		rdb = c
-	}
 	return &RateManager{
-		// maxDelta/hard-threshold are currently enforced by lease semantics,
-		// while options are preserved for future policy expansion.
 		leaseSize:     options.LeaseSize,
 		lowWaterPct:   options.LowWaterPct,
 		minTokens:     options.MinTokens,
 		leaseTTL:      options.LeaseTTL,
 		renewalBuffer: options.RenewalBuffer,
-		rdb:           rdb,
+		rdb:           counterStore,
 	}
 }
 
@@ -166,148 +208,239 @@ func (rm *RateManager) StartBackgroundWorkers(ctx context.Context) {
 		rm.leaseManager = NewLeaseManager(rm)
 	}
 	rm.leaseManager.Start(ctx)
+	go rm.sweepIdleCounters(ctx)
 }
 
-func (rm *RateManager) enqueueLeaseRenewal(prefix, serviceID, apiKey string, counter *leaseCounter, minimum int64) {
-	if !counter.renewalQueued.CompareAndSwap(0, 1) {
-		return
-	}
-	if rm.leaseManager == nil {
-		if counter.state.CompareAndSwap(int32(leaseStateIdle), int32(leaseStateRenewing)) {
-			go func() {
-				defer counter.renewalQueued.Store(0)
-				defer counter.state.CompareAndSwap(int32(leaseStateRenewing), int32(leaseStateIdle))
-				_ = rm.ensureLease(context.Background(), prefix, serviceID, apiKey, counter, minimum)
-			}()
-			return
-		}
-		counter.renewalQueued.Store(0)
-		return
-	}
-	if !rm.leaseManager.Enqueue(prefix, serviceID, apiKey, counter, minimum) {
-		counter.renewalQueued.Store(0)
-	}
-}
-
+// Increment implements types.Limiter for period-less callers.
 func (rm *RateManager) Increment(ctx context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
 	return rm.IncrementWithService(ctx, prefix, "", apiKey, limit, amount)
 }
 
+// IncrementWithService is the legacy usage-style API: it returns the admitted
+// usage, or limit+1 when the request is denied. New code should call Allow.
 func (rm *RateManager) IncrementWithService(ctx context.Context, prefix, serviceID, apiKey string, limit, amount int64) (int64, error) {
-	if amount <= 0 {
-		amount = 1
-	}
-	counter := rm.getLeaseCounter(prefix, apiKey)
-	if rm.leaseClient == nil {
-		used := counter.consumed.Add(amount)
-		return used, nil
-	}
-
-	// WAITING short-circuit: Hub reported zero global quota; return 429 until
-	// the retry deadline has elapsed and a background poll succeeds.
-	if leaseState(counter.state.Load()) == leaseStateWaiting {
-		if time.Now().UnixMilli() < counter.nextRetryUnixMs.Load() {
-			return limit + 1, nil
-		}
-		// Retry window elapsed — enqueue non-blocking background renewal.
-		if counter.state.CompareAndSwap(int32(leaseStateWaiting), int32(leaseStateIdle)) {
-			rm.enqueueLeaseRenewal(prefix, serviceID, apiKey, counter, 0)
-		}
-		return limit + 1, nil
-	}
-
-	if err := rm.ensureLease(ctx, prefix, serviceID, apiKey, counter, amount); err != nil {
-		return 0, err
-	}
-
-	// Temporal trigger: fire an async renewal when we're within renewalBuffer
-	// of the current lease expiry (independent of token balance).
-	if rm.needsTemporalRenewal(counter) {
-		if leaseState(counter.state.Load()) == leaseStateIdle {
-			rm.enqueueLeaseRenewal(prefix, serviceID, apiKey, counter, 0)
-		}
-	}
-
-	remaining, err := rm.consumeLocalTokens(ctx, counter, amount)
+	d, err := rm.Allow(ctx, RateRequest{Prefix: prefix, Service: serviceID, APIKey: apiKey, Limit: limit, Cost: amount})
 	if err != nil {
 		return 0, err
 	}
-	if remaining < 0 {
-		if err := rm.ensureLease(ctx, prefix, serviceID, apiKey, counter, amount); err != nil {
-			return 0, err
-		}
-		remaining, err = rm.consumeLocalTokens(ctx, counter, amount)
-		if err != nil {
-			return 0, err
-		}
-		if remaining < 0 {
-			if rm.tryConsumeReserve(counter, amount) {
-				used := counter.consumed.Add(amount)
-				if leaseState(counter.state.Load()) == leaseStateIdle {
-					rm.enqueueLeaseRenewal(prefix, serviceID, apiKey, counter, 0)
-				}
-				if used > limit {
-					return used, nil
-				}
-				return used, nil
-			}
-			return limit + 1, nil
-		}
-	}
-	used := counter.consumed.Add(amount)
-
-	// Volume trigger: fire async renewal when below low-water mark.
-	if remaining <= int64(float64(counter.leaseSize)*rm.lowWaterPct/100.0) {
-		if leaseState(counter.state.Load()) == leaseStateIdle {
-			rm.enqueueLeaseRenewal(prefix, serviceID, apiKey, counter, 0)
-		}
-	}
-	if used > limit {
-		return used, nil
-	}
-	return used, nil
-}
-
-func (rm *RateManager) IncrementSafety(_ context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
-	key := "safety:" + prefix
-	counter := rm.getLeaseCounter(key, apiKey)
-	if counter.remaining.Load() == 0 {
-		counter.remaining.Store(limit)
-	}
-	remaining := counter.remaining.Add(-amount)
-	if remaining < 0 {
-		counter.remaining.Add(amount)
+	if !d.Allowed {
 		return limit + 1, nil
 	}
-	used := counter.consumed.Add(amount)
-	return used, nil
+	c := rm.getLeaseCounter(prefix, serviceID, apiKey)
+	return c.consumed.Load(), nil
 }
 
-func (rm *RateManager) ensureLease(ctx context.Context, prefix, serviceID, apiKey string, counter *leaseCounter, minimum int64) error {
-	// minimum == 0 is a sentinel meaning "top-up proactively" (temporal / LWM async
-	// triggers). Positive minimum = synchronous hot-path gate.
-	if minimum > 0 && rm.hasMinimumLocalTokens(ctx, counter, minimum) {
-		return nil
+// Allow admits or denies one request against the key's leased quota.
+func (rm *RateManager) Allow(ctx context.Context, req RateRequest) (RateDecision, error) {
+	if req.Cost <= 0 {
+		req.Cost = 1
 	}
+	now := time.Now()
+	counter := rm.getLeaseCounter(req.Prefix, req.Service, req.APIKey)
+	counter.lastSeenUnixMs.Store(now.UnixMilli())
+	if req.LeaseSize > 0 {
+		counter.leaseSize.Store(req.LeaseSize)
+	}
+	windowEnd := rm.rollWindow(ctx, counter, req.Period, now)
+
+	decision := RateDecision{Limit: req.Limit, ResetAt: windowEnd}
+
 	if rm.leaseClient == nil {
-		return fmt.Errorf("lease client is not configured")
-	}
-	_, err, _ := rm.refillGroup.Do(prefix+":"+serviceID+":"+apiKey, func() (interface{}, error) {
-		if minimum > 0 && rm.hasMinimumLocalTokens(ctx, counter, minimum) {
-			return nil, nil
+		used := counter.consumed.Add(req.Cost)
+		if used > req.Limit {
+			counter.consumed.Add(-req.Cost)
+			decision.Remaining = max(0, req.Limit-counter.consumed.Load())
+			return decision, nil
 		}
-		resp, err := rm.leaseClient.RequestQuotaLease(ctx, &types.QuotaLeaseRequest{
-			Prefix:          prefix,
-			ServiceId:       serviceID,
-			ApiKey:          apiKey,
-			RequestedTokens: rm.leaseSize,
+		decision.Allowed = true
+		decision.Remaining = req.Limit - used
+		return decision, nil
+	}
+
+	// WAITING: the hub reported zero global quota, so do not ask it again
+	// before the retry deadline (then poll in the background). Tokens this
+	// edge already holds remain spendable.
+	waiting := leaseState(counter.state.Load()) == leaseStateWaiting
+	if waiting && now.UnixMilli() >= counter.nextRetryUnixMs.Load() &&
+		counter.state.CompareAndSwap(int32(leaseStateWaiting), int32(leaseStateIdle)) {
+		rm.enqueueLeaseRenewal(req, counter)
+	}
+
+	// Local guard: one edge can never legitimately admit more than the whole
+	// quota in a window, whatever the hub grants (e.g. after a quota cut).
+	if req.Period > 0 && counter.consumed.Load()+req.Cost > req.Limit {
+		return decision, nil
+	}
+
+	remaining, err := rm.consumeLocalTokens(ctx, counter, req.Cost)
+	if err != nil {
+		return decision, err
+	}
+	if remaining < 0 && waiting {
+		return decision, nil
+	}
+	// Miss: fetch a lease synchronously (collapsed per key) and retry. Peers
+	// can drain a refill before this caller consumes, so a miss after a
+	// successful grant is retried rather than reported as "over quota"; only
+	// the hub (WAITING or an empty grant) ends the loop with a denial. The
+	// attempt cap only guards against livelock.
+	for attempt := 0; remaining < 0 && attempt < leaseMissRetries; attempt++ {
+		granted, err := rm.fetchLease(ctx, req, counter, windowEnd)
+		if err != nil {
+			return decision, err
+		}
+		if granted <= 0 || leaseState(counter.state.Load()) == leaseStateWaiting {
+			break
+		}
+		if remaining, err = rm.consumeLocalTokens(ctx, counter, req.Cost); err != nil {
+			return decision, err
+		}
+	}
+	if remaining < 0 {
+		if !rm.tryConsumeReserve(counter, req.Cost) {
+			return decision, nil
+		}
+		remaining = 0
+		rm.enqueueLeaseRenewal(req, counter)
+	}
+	counter.consumed.Add(req.Cost)
+
+	// Volume trigger (low-water mark) and temporal trigger (lease near expiry).
+	// A lease that expires with its window is not renewed early: the renewal
+	// would only fetch tokens that are about to be dropped.
+	lowWater := int64(float64(counter.leaseSize.Load()) * rm.lowWaterPct / 100.0)
+	endsBeforeWindow := windowEnd.IsZero() || counter.expiresAtUnixMs.Load() < windowEnd.UnixMilli()
+	if remaining <= lowWater || (endsBeforeWindow && rm.needsTemporalRenewal(counter, now)) {
+		rm.enqueueLeaseRenewal(req, counter)
+	}
+
+	decision.Allowed = true
+	decision.Remaining = max(0, min(req.Limit, counter.hubRemaining.Load()+remaining))
+	return decision, nil
+}
+
+// AllowSafety enforces the service's safety tier locally (no hub involved)
+// with the same epoch-aligned window as normal quotas.
+func (rm *RateManager) AllowSafety(req RateRequest) RateDecision {
+	if req.Cost <= 0 {
+		req.Cost = 1
+	}
+	now := time.Now()
+	key := counterKey(req.Prefix, req.Service, req.APIKey)
+	v, ok := rm.safetyMap.Load(key)
+	if !ok {
+		v, _ = rm.safetyMap.LoadOrStore(key, &leaseCounter{})
+	}
+	counter := v.(*leaseCounter)
+	counter.lastSeenUnixMs.Store(now.UnixMilli())
+	windowEnd := rm.rollWindow(context.Background(), counter, req.Period, now)
+	decision := RateDecision{Limit: req.Limit, ResetAt: windowEnd}
+	used := counter.consumed.Add(req.Cost)
+	if used > req.Limit {
+		counter.consumed.Add(-req.Cost)
+		return decision
+	}
+	decision.Allowed = true
+	decision.Remaining = req.Limit - used
+	return decision
+}
+
+// IncrementSafety is the legacy usage-style safety API (single unbounded
+// window per edge process). Prefer AllowSafety.
+func (rm *RateManager) IncrementSafety(_ context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
+	d := rm.AllowSafety(RateRequest{Prefix: prefix, APIKey: apiKey, Limit: limit, Cost: amount})
+	if !d.Allowed {
+		return limit + 1, nil
+	}
+	return limit - d.Remaining, nil
+}
+
+// rollWindow resets per-window state when the epoch-aligned quota window has
+// advanced, dropping leftover lease tokens so they cannot inflate the next
+// window. It returns the end of the current window (zero when period <= 0).
+func (rm *RateManager) rollWindow(ctx context.Context, counter *leaseCounter, period time.Duration, now time.Time) time.Time {
+	periodSec := int64(period / time.Second)
+	if periodSec <= 0 {
+		return time.Time{}
+	}
+	wid := now.Unix() / periodSec
+	windowEnd := time.Unix((wid+1)*periodSec, 0)
+	prev := counter.windowID.Load()
+	if prev == wid || !counter.windowID.CompareAndSwap(prev, wid) {
+		return windowEnd
+	}
+	counter.consumed.Store(0)
+	counter.reserveUsed.Store(0)
+	counter.hubRemaining.Store(0)
+	counter.expiresAtUnixMs.Store(0)
+	counter.nextRetryUnixMs.Store(0)
+	counter.state.CompareAndSwap(int32(leaseStateWaiting), int32(leaseStateIdle))
+	if prev != 0 && counter.localTokenKey != "" {
+		rm.dropLocalTokens(ctx, counter)
+	}
+	return windowEnd
+}
+
+func (rm *RateManager) enqueueLeaseRenewal(req RateRequest, counter *leaseCounter) {
+	if leaseState(counter.state.Load()) != leaseStateIdle {
+		return
+	}
+	if !counter.renewalQueued.CompareAndSwap(0, 1) {
+		return
+	}
+	if rm.leaseManager == nil {
+		go func() {
+			defer counter.renewalQueued.Store(0)
+			rm.renewNow(context.Background(), req, counter)
+		}()
+		return
+	}
+	if !rm.leaseManager.Enqueue(req, counter) {
+		counter.renewalQueued.Store(0)
+	}
+}
+
+// renewNow performs a proactive (non-blocking path) top-up.
+func (rm *RateManager) renewNow(ctx context.Context, req RateRequest, counter *leaseCounter) {
+	if !counter.state.CompareAndSwap(int32(leaseStateIdle), int32(leaseStateRenewing)) {
+		return
+	}
+	defer counter.state.CompareAndSwap(int32(leaseStateRenewing), int32(leaseStateIdle))
+	windowEnd := rm.rollWindow(ctx, counter, req.Period, time.Now())
+	_, _ = rm.fetchLease(ctx, req, counter, windowEnd)
+}
+
+// fetchLease requests tokens from the hub. Concurrent callers for the same key
+// share one RPC, so a burst of misses costs one RPC per drained lease; the RPC
+// runs detached from any single caller's context so a disconnecting client
+// cannot fail its peers.
+// It returns the number of tokens the (possibly shared) RPC granted.
+func (rm *RateManager) fetchLease(ctx context.Context, req RateRequest, counter *leaseCounter, windowEnd time.Time) (int64, error) {
+	if rm.leaseClient == nil {
+		return 0, fmt.Errorf("lease client is not configured")
+	}
+	if time.Now().UnixMilli() < rm.leaseBackoffUntilMs.Load() {
+		return 0, ErrLeaseUnavailable
+	}
+	ch := rm.refillGroup.DoChan(counter.localTokenKey, func() (interface{}, error) {
+		rpcCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), leaseRPCTimeout)
+		defer cancel()
+		leaseSize := counter.leaseSize.Load()
+		resp, err := rm.leaseClient.RequestQuotaLease(rpcCtx, &types.QuotaLeaseRequest{
+			Prefix:          req.Prefix,
+			ServiceId:       req.Service,
+			ApiKey:          req.APIKey,
+			RequestedTokens: leaseSize,
 		})
 		if err != nil {
-			counter.state.CompareAndSwap(int32(leaseStateRenewing), int32(leaseStateIdle))
+			err = classifyLeaseError(err)
+			if errors.Is(err, ErrLeaseUnavailable) {
+				rm.leaseBackoffUntilMs.Store(time.Now().Add(leaseFailureBackoff).UnixMilli())
+			}
 			return nil, err
 		}
+		counter.hubRemaining.Store(resp.RemainingGlobal)
 		if resp.WaitingForCapacity {
-			// Hub has zero global quota — enter WAITING state.
 			retryMs := resp.RetryAfterMs
 			if retryMs <= 0 {
 				retryMs = 500
@@ -315,56 +448,55 @@ func (rm *RateManager) ensureLease(ctx context.Context, prefix, serviceID, apiKe
 			counter.retryAfterMs.Store(retryMs)
 			counter.nextRetryUnixMs.Store(time.Now().UnixMilli() + retryMs)
 			counter.state.Store(int32(leaseStateWaiting))
-			return nil, nil
+			return int64(0), nil
 		}
-		// Reset state to IDLE on a successful (possibly partial) grant.
-		counter.state.CompareAndSwap(int32(leaseStateRenewing), int32(leaseStateIdle))
 		if resp.GrantedTokens > 0 {
+			// Tokens live for the hub-provided (or default) lease TTL, and never
+			// past the end of the quota window they were granted for.
 			ttl := time.Duration(resp.LeaseTtlSeconds) * time.Second
 			if ttl <= 0 {
 				ttl = rm.leaseTTL
 			}
-			if err := rm.addLocalTokens(ctx, counter, resp.GrantedTokens, ttl); err != nil {
+			expiresAt := time.Now().Add(ttl)
+			if !windowEnd.IsZero() && windowEnd.Before(expiresAt) {
+				expiresAt = windowEnd
+			}
+			if err := rm.addLocalTokens(rpcCtx, counter, resp.GrantedTokens, time.Until(expiresAt)); err != nil {
 				return nil, err
 			}
 			counter.reserveUsed.Store(0)
-			counter.expiresAtUnixMs.Store(time.Now().Add(ttl).UnixMilli())
+			counter.expiresAtUnixMs.Store(expiresAt.UnixMilli())
 		}
-		return nil, nil
+		return resp.GrantedTokens, nil
 	})
-	return err
-}
-
-func (rm *RateManager) hasMinimumLocalTokens(ctx context.Context, counter *leaseCounter, minimum int64) bool {
-	if minimum <= 0 {
-		return true
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return 0, res.Err
+		}
+		return res.Val.(int64), nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
-	if rm.rdb == nil {
-		return counter.remaining.Load() >= minimum
-	}
-	redisCtx, cancel := withLeaseRedisTimeout(ctx)
-	defer cancel()
-	remaining, err := rm.rdb.Get(redisCtx, counter.localTokenKey).Int64()
-	if err == redis.Nil {
-		return false
-	}
-	if err != nil {
-		return false
-	}
-	return remaining >= minimum
 }
 
 func (rm *RateManager) consumeLocalTokens(ctx context.Context, counter *leaseCounter, amount int64) (int64, error) {
-	if amount <= 0 {
-		amount = 1
-	}
 	if rm.rdb == nil {
-		remaining := counter.remaining.Add(-amount)
-		if remaining < 0 {
-			counter.remaining.Add(amount)
+		// Lease expiry is enforced here for the in-memory store; Redis enforces
+		// it via PEXPIRE.
+		if exp := counter.expiresAtUnixMs.Load(); exp > 0 && time.Now().UnixMilli() >= exp {
+			counter.remaining.Store(0)
 			return -1, nil
 		}
-		return remaining, nil
+		for {
+			cur := counter.remaining.Load()
+			if cur < amount {
+				return -1, nil
+			}
+			if counter.remaining.CompareAndSwap(cur, cur-amount) {
+				return cur - amount, nil
+			}
+		}
 	}
 
 	redisCtx, cancel := withLeaseRedisTimeout(ctx)
@@ -379,7 +511,7 @@ func (rm *RateManager) consumeLocalTokens(ctx context.Context, counter *leaseCou
 	return remaining, nil
 }
 
-func (rm *RateManager) addLocalTokens(ctx context.Context, counter *leaseCounter, amount int64, leaseTTL time.Duration) error {
+func (rm *RateManager) addLocalTokens(ctx context.Context, counter *leaseCounter, amount int64, ttl time.Duration) error {
 	if amount <= 0 {
 		return nil
 	}
@@ -387,11 +519,23 @@ func (rm *RateManager) addLocalTokens(ctx context.Context, counter *leaseCounter
 		counter.remaining.Add(amount)
 		return nil
 	}
-
+	if ttl < time.Millisecond {
+		ttl = time.Millisecond
+	}
 	redisCtx, cancel := withLeaseRedisTimeout(ctx)
 	defer cancel()
-	_, err := addLeaseTokensLua.Run(redisCtx, rm.rdb, []string{counter.localTokenKey}, amount, leaseTTL.Milliseconds()).Int64()
+	_, err := addLeaseTokensLua.Run(redisCtx, rm.rdb, []string{counter.localTokenKey}, amount, ttl.Milliseconds()).Int64()
 	return err
+}
+
+func (rm *RateManager) dropLocalTokens(ctx context.Context, counter *leaseCounter) {
+	counter.remaining.Store(0)
+	if rm.rdb == nil {
+		return
+	}
+	redisCtx, cancel := withLeaseRedisTimeout(ctx)
+	defer cancel()
+	_ = rm.rdb.Del(redisCtx, counter.localTokenKey).Err()
 }
 
 func (rm *RateManager) tryConsumeReserve(counter *leaseCounter, amount int64) bool {
@@ -416,60 +560,56 @@ func (rm *RateManager) tryConsumeReserve(counter *leaseCounter, amount int64) bo
 
 // needsTemporalRenewal returns true when the current lease expires within
 // renewalBuffer — the temporal trigger from the Dual-Trigger Renewal Protocol.
-func (rm *RateManager) needsTemporalRenewal(counter *leaseCounter) bool {
+func (rm *RateManager) needsTemporalRenewal(counter *leaseCounter, now time.Time) bool {
 	expiresAtMs := counter.expiresAtUnixMs.Load()
 	if expiresAtMs <= 0 {
 		return false
 	}
-
-	return time.Now().UnixMilli() > expiresAtMs-rm.renewalBuffer.Milliseconds()
+	return now.UnixMilli() > expiresAtMs-rm.renewalBuffer.Milliseconds()
 }
 
-func (rm *RateManager) getLeaseCounter(prefix, apiKey string) *leaseCounter {
-	key := prefix + ":" + apiKey
+func counterKey(prefix, service, apiKey string) string {
+	return prefix + "\x00" + service + "\x00" + apiKey
+}
+
+func (rm *RateManager) getLeaseCounter(prefix, service, apiKey string) *leaseCounter {
+	key := counterKey(prefix, service, apiKey)
 	if v, ok := rm.leaseMap.Load(key); ok {
 		return v.(*leaseCounter)
 	}
 	counter := &leaseCounter{
-		leaseSize:     rm.leaseSize,
-		localTokenKey: "edge:lease:tokens:" + key,
-		renewalBuffer: rm.renewalBuffer,
+		localTokenKey: "edge:lease:tokens:" + prefix + ":" + service + ":" + apiKey,
 	}
+	counter.leaseSize.Store(rm.leaseSize)
 	actual, _ := rm.leaseMap.LoadOrStore(key, counter)
 	return actual.(*leaseCounter)
 }
 
-type singleflightGroup struct {
-	mu sync.Mutex
-	m  map[string]*singleflightCall
+// sweepIdleCounters evicts counters for keys that have gone quiet so the maps
+// stay proportional to the active key set.
+func (rm *RateManager) sweepIdleCounters(ctx context.Context) {
+	t := time.NewTicker(counterSweepInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rm.evictIdle(time.Now().Add(-counterMinIdle))
+		}
+	}
 }
 
-type singleflightCall struct {
-	wg  sync.WaitGroup
-	val interface{}
-	err error
-}
-
-func (g *singleflightGroup) Do(key string, fn func() (interface{}, error)) (interface{}, error, bool) {
-	g.mu.Lock()
-	if g.m == nil {
-		g.m = make(map[string]*singleflightCall)
+func (rm *RateManager) evictIdle(cutoff time.Time) {
+	cut := cutoff.UnixMilli()
+	for _, m := range []*sync.Map{&rm.leaseMap, &rm.safetyMap} {
+		m.Range(func(k, v any) bool {
+			c := v.(*leaseCounter)
+			if c.lastSeenUnixMs.Load() < cut && c.renewalQueued.Load() == 0 &&
+				leaseState(c.state.Load()) != leaseStateRenewing {
+				m.Delete(k)
+			}
+			return true
+		})
 	}
-	if c, ok := g.m[key]; ok {
-		g.mu.Unlock()
-		c.wg.Wait()
-		return c.val, c.err, true
-	}
-	c := &singleflightCall{}
-	c.wg.Add(1)
-	g.m[key] = c
-	g.mu.Unlock()
-
-	c.val, c.err = fn()
-	c.wg.Done()
-
-	g.mu.Lock()
-	delete(g.m, key)
-	g.mu.Unlock()
-	return c.val, c.err, false
 }

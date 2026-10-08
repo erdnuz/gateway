@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"gateway/packages/common/types"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -23,7 +25,10 @@ type ConfigManager struct {
 	hubAddr   string
 	authToken string
 	client    *http.Client
-	lastEpoch atomic.Uint64
+
+	reloadMu     sync.Mutex
+	reloadBootID string
+	reloadEpoch  uint64
 }
 
 type configIndexes struct {
@@ -264,6 +269,9 @@ func (cm *ConfigManager) SetHTTPClient(client *http.Client) {
 	cm.client = client
 }
 
+// StartConfigReloadSubscriber listens for reload events on Redis pub/sub.
+// It only works when the hub and edge share a Redis; prefer
+// StartConfigReloadNATSSubscriber. rdb is also used for cache invalidation.
 func (cm *ConfigManager) StartConfigReloadSubscriber(ctx context.Context, rdb *redis.Client, channel string) {
 	if rdb == nil {
 		return
@@ -281,30 +289,67 @@ func (cm *ConfigManager) StartConfigReloadSubscriber(ctx context.Context, rdb *r
 				if !ok {
 					return
 				}
-				event, hasEvent := parseConfigReloadEvent(msg.Payload)
-				if hasEvent {
-					if event.Epoch > 0 {
-						last := cm.lastEpoch.Load()
-						if event.Epoch <= last {
-							continue
-						}
-						cm.lastEpoch.Store(event.Epoch)
-					}
-				}
-				if err := cm.RefreshConfig(); err != nil {
-					log.Printf("edge config pubsub refresh failed: %v", err)
-					continue
-				}
-				if hasEvent && len(event.Invalidations.ResponseCache) > 0 {
-					if err := InvalidateResponseCacheScopes(ctx, rdb, event.Invalidations.ResponseCache); err != nil {
-						log.Printf("edge response cache invalidation failed: %v", err)
-					}
-				}
+				cm.handleReloadEvent(ctx, msg.Payload, rdb)
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
+}
+
+// StartConfigReloadNATSSubscriber listens for hub reload events on NATS, the
+// bus shared by every service. rdb (the edge's own Redis) is used for
+// response-cache invalidation and may be nil.
+func (cm *ConfigManager) StartConfigReloadNATSSubscriber(ctx context.Context, nc *nats.Conn, subject string, rdb *redis.Client) error {
+	if nc == nil {
+		return nil
+	}
+	if subject == "" {
+		subject = types.DefaultConfigReloadSubject
+	}
+	sub, err := nc.Subscribe(subject, func(msg *nats.Msg) {
+		cm.handleReloadEvent(ctx, string(msg.Data), rdb)
+	})
+	if err != nil {
+		return err
+	}
+	go func() {
+		<-ctx.Done()
+		_ = sub.Unsubscribe()
+	}()
+	return nil
+}
+
+// shouldApplyReload dedupes events delivered over more than one transport.
+// Ordering by epoch only holds within one hub boot; a new BootID always wins.
+func (cm *ConfigManager) shouldApplyReload(event types.ConfigReloadEvent) bool {
+	if event.Epoch == 0 {
+		return true
+	}
+	cm.reloadMu.Lock()
+	defer cm.reloadMu.Unlock()
+	if event.BootID == cm.reloadBootID && event.Epoch <= cm.reloadEpoch {
+		return false
+	}
+	cm.reloadBootID = event.BootID
+	cm.reloadEpoch = event.Epoch
+	return true
+}
+
+func (cm *ConfigManager) handleReloadEvent(ctx context.Context, payload string, rdb *redis.Client) {
+	event, hasEvent := parseConfigReloadEvent(payload)
+	if hasEvent && !cm.shouldApplyReload(event) {
+		return
+	}
+	if err := cm.RefreshConfig(); err != nil {
+		log.Printf("edge config reload refresh failed: %v", err)
+		return
+	}
+	if hasEvent && rdb != nil && len(event.Invalidations.ResponseCache) > 0 {
+		if err := InvalidateResponseCacheScopes(ctx, rdb, event.Invalidations.ResponseCache); err != nil {
+			log.Printf("edge response cache invalidation failed: %v", err)
+		}
+	}
 }
 
 func parseConfigReloadEvent(payload string) (types.ConfigReloadEvent, bool) {

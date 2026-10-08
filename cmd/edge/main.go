@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -37,7 +38,6 @@ func main() {
 	hubAddr := config.String("HUB_ADDR", "http://localhost:8081")
 	hubToken := config.String("HUB_AUTH_TOKEN", "")
 	hubUpdatesChannel := config.String("HUB_UPDATES_CHANNEL", types.DefaultHubUpdatesChannel)
-	maxDelta := config.Int64("EDGE_MAX_DELTA", 100)
 	analyticsEnabled := config.Bool("GATE_ANALYTICS_ENABLED", config.Bool("ANALYTICS_ENABLED", true))
 	natsAnalyticsSubject := config.String("NATS_ANALYTICS_SUBJECT", "")
 	hubHTTPTimeout := config.DurationSeconds("HUB_HTTP_TIMEOUT_SECONDS", int(types.DefaultRuntimePolicy().Edge.HubHTTPTimeout.Seconds()))
@@ -45,8 +45,6 @@ func main() {
 	configRefreshSeconds := config.Int("EDGE_CONFIG_REFRESH_SECONDS", 0)
 	configReloadChannel := config.String("EDGE_CONFIG_RELOAD_CHANNEL", types.DefaultConfigReloadChannel)
 	bootstrapConfigFile := config.String("EDGE_BOOTSTRAP_CONFIG_FILE", "")
-	rateHardThresholdPctRaw := config.Int("RATE_HARD_THRESHOLD_PERCENT", 0)
-	rateHardThresholdPct := float64(rateHardThresholdPctRaw) / 100.0
 	leaseSize := config.Int64("EDGE_LEASE_SIZE", 0)
 	leaseLowWaterPctRaw := config.Int("EDGE_LEASE_LOW_WATER_PERCENT", 0)
 	leaseLowWaterPct := float64(leaseLowWaterPctRaw) // 0–100 percentage
@@ -59,8 +57,13 @@ func main() {
 	natsTierURL := config.String("NATS_TIER_URL", natsURL)
 	natsAnalyticsURL := config.String("NATS_ANALYTICS_URL", natsURL)
 	natsTierUpdatesSubject := config.String("NATS_TIER_UPDATES_SUBJECT", "")
-	natsEdgeQueue := config.String("NATS_EDGE_QUEUE", "edge-tier-updates")
+	configReloadSubject := config.String("EDGE_CONFIG_RELOAD_SUBJECT", types.DefaultConfigReloadSubject)
 	edgeID := config.String("EDGE_ID", "")
+	edgeAdminToken := config.String("EDGE_ADMIN_TOKEN", "")
+	// memory (default): lease tokens live in process — each edge owns its
+	// quota slice, so Redis adds a network hop and nothing else.
+	// redis: share lease tokens between edge replicas that share one Redis.
+	leaseStore := strings.ToLower(strings.TrimSpace(config.String("EDGE_LEASE_STORE", "memory")))
 
 	// ConfigManager performs initial hydration from Hub
 	configMgr, err := edge.NewConfigManagerWithFallback(hubAddr, hubToken, hubHTTPClient, bootstrapConfigFile)
@@ -82,6 +85,14 @@ func main() {
 		configMgr.StartAutoRefresh(ctx, time.Duration(configRefreshSeconds)*time.Second)
 	}
 	configMgr.StartConfigReloadSubscriber(ctx, rdb, configReloadChannel)
+	if reloadNC, err := nats.Connect(natsTierURL, nats.MaxReconnects(-1)); err != nil {
+		log.Printf("edge config reload nats connect failed url=%s err=%v (reloads will not propagate)", natsTierURL, err)
+	} else {
+		defer reloadNC.Close()
+		if err := configMgr.StartConfigReloadNATSSubscriber(ctx, reloadNC, configReloadSubject, rdb); err != nil {
+			log.Printf("edge config reload nats subscribe failed subject=%s err=%v", configReloadSubject, err)
+		}
+	}
 
 	// TierManager caches user tier information
 	tierMgr := edge.NewTierManagerWithOptions(
@@ -91,9 +102,8 @@ func main() {
 		hubToken,
 		hubHTTPClient,
 		edge.TierManagerOptions{
-			NATSURL:   natsTierURL,
-			NATSSubj:  natsTierUpdatesSubject,
-			NATSQueue: natsEdgeQueue,
+			NATSURL:  natsTierURL,
+			NATSSubj: natsTierUpdatesSubject,
 		},
 	)
 
@@ -106,20 +116,23 @@ func main() {
 	}
 	defer leaseClient.Close()
 
-	// RateManager handles local rate limiting with hub synchronization
-	prefixLeasing := resolvePrefixLeasing(configMgr.Prefixes(), edgePolicy)
+	// RateManager handles local rate limiting with hub-granted leases. Lease
+	// size and quota window are resolved per prefix on each request.
+	var leaseRedis *redis.Client
+	switch leaseStore {
+	case "memory", "":
+	case "redis":
+		leaseRedis = rdb
+	default:
+		log.Fatalf("invalid EDGE_LEASE_STORE=%q (valid: memory, redis)", leaseStore)
+	}
 	rateMgr := edge.NewRateManagerWithOptions(
-		hubAddr,
-		rdb,
-		maxDelta,
+		leaseRedis,
 		edge.RateManagerOptions{
-			HardThresholdPct: chooseRatePct(rateHardThresholdPct, edgePolicy.RateHardThresholdPct),
-			LeaseSize:        chooseLeaseSize(leaseSize, prefixLeasing.LeaseQuantum),
-			LowWaterPct:      chooseLowWaterPct(leaseLowWaterPct, edgePolicy.RateLowWaterPct),
-			LeaseTTL:         prefixLeasing.LeaseTTL,
-			RenewalBuffer:    prefixLeasing.RenewalBuffer,
+			LeaseSize:   chooseLeaseSize(leaseSize, edgePolicy.RateLeaseSize),
+			LowWaterPct: chooseLowWaterPct(leaseLowWaterPct, edgePolicy.RateLowWaterPct),
+			MinTokens:   1,
 		},
-		"",
 	)
 	rateMgr.SetLeaseClient(leaseClient)
 
@@ -149,6 +162,7 @@ func main() {
 			UpstreamMaxIdleConns:      edgePolicy.UpstreamMaxIdleConns,
 			UpstreamIdleConnTimeout:   edgePolicy.UpstreamIdleConnTimeout,
 			EdgeID:                    edgeID,
+			AdminToken:                edgeAdminToken,
 		},
 	)
 	edgeServer.StartBackgroundWorkers(ctx)
@@ -163,11 +177,12 @@ func main() {
 	// 6. Configure HTTP Server
 	port := config.String("PORT", ":8080")
 	httpServer := &http.Server{
-		Addr:         port,
-		Handler:      edgeServer,
-		ReadTimeout:  edgePolicy.HTTPReadTimeout,
-		WriteTimeout: edgePolicy.HTTPWriteTimeout,
-		IdleTimeout:  edgePolicy.HTTPIdleTimeout,
+		Addr:              port,
+		Handler:           edgeServer,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       edgePolicy.HTTPReadTimeout,
+		WriteTimeout:      edgePolicy.HTTPWriteTimeout,
+		IdleTimeout:       edgePolicy.HTTPIdleTimeout,
 	}
 
 	// 6. Start Server
@@ -178,7 +193,6 @@ func main() {
 		}
 	}()
 
-	analyticsReadyURL := strings.TrimSuffix(config.String("ANALYTICS_ADDR", "http://localhost:8091"), "/") + "/readyz"
 	hubReadyURL := strings.TrimSuffix(startupChecks.hubAddr, "/") + "/readyz"
 	httpClient := &http.Client{Timeout: 2 * time.Second}
 	edgeWatcher := ready.NewReadyWatcher("edge", 500*time.Millisecond, 5*time.Second)
@@ -209,35 +223,20 @@ func main() {
 			},
 		},
 	}
-	if startupChecks.analyticsEnabled {
-		checks = append(checks, ready.Check{
-			Name: "analytics_readyz",
-			URL:  analyticsReadyURL,
-			Probe: func(probeCtx context.Context) error {
-				req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, analyticsReadyURL, nil)
-				if err != nil {
-					edgeServer.SetPendingDependency("analytics_readyz")
-					return err
-				}
-				resp, err := httpClient.Do(req)
-				if err != nil {
-					edgeServer.SetPendingDependency("analytics_readyz")
-					return err
-				}
-				defer resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					edgeServer.SetPendingDependency("analytics_readyz")
-					return fmt.Errorf("status=%d", resp.StatusCode)
-				}
-				return nil
-			},
-		})
-	}
-	go edgeWatcher.WatchAll(ctx, checks, func(isReady bool) {
-		edgeServer.SetStartupReady(isReady)
-		if isReady {
-			edgeServer.SetPendingDependency("")
+	// Hub readiness gates startup only. Afterwards /readyz tracks edge-local
+	// dependencies: a hub or analytics outage is handled per request by the
+	// failure policies (safety tier, stale tiers) instead of taking every edge
+	// out of rotation at once.
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	go edgeWatcher.WatchAll(watchCtx, checks, func(isReady bool) {
+		if !isReady {
+			return
 		}
+		stopWatch()
+		edgeServer.SetPendingDependency("")
+		edgeServer.SetStartupReady(true)
+		edgeServer.StartReadinessProbe(ctx)
+		log.Printf("edge startup complete; readiness now tracks edge-local dependencies")
 	})
 
 	// 7. Wait for shutdown signal
@@ -255,13 +254,6 @@ func main() {
 	log.Println("Edge Gateway shutdown complete")
 }
 
-func chooseRatePct(envValue, policyValue float64) float64 {
-	if envValue > 0 && envValue < 1 {
-		return envValue
-	}
-	return policyValue
-}
-
 func chooseLowWaterPct(envValue, policyValue float64) float64 {
 	if envValue > 0 && envValue <= 100 {
 		return envValue
@@ -274,15 +266,4 @@ func chooseLeaseSize(envValue, policyValue int64) int64 {
 		return envValue
 	}
 	return policyValue
-}
-
-// resolvePrefixLeasing returns the effective LeasingConfig for the first prefix
-// in the gateway config, falling back to global EdgeRuntimePolicy defaults.
-func resolvePrefixLeasing(prefixes []types.PrefixConfig, edgePolicy types.EdgeRuntimePolicy) types.LeasingConfig {
-	if len(prefixes) == 0 {
-		var zero types.LeasingConfig
-		return zero.Effective(edgePolicy, 0)
-	}
-	p := &prefixes[0]
-	return p.Leasing.Effective(edgePolicy, p.QuotaPeriod)
 }

@@ -14,14 +14,15 @@ Configuration is split across environment variables and gateway policy JSON.
 - HUB_ADDR
 - HUB_AUTH_TOKEN
 - HUB_HTTP_TIMEOUT_SECONDS
-- EDGE_CONFIG_RELOAD_CHANNEL
+- EDGE_CONFIG_RELOAD_SUBJECT (NATS, default `gate.config.reload`)
+- EDGE_CONFIG_RELOAD_CHANNEL (legacy Redis pub/sub; only works if hub and edge share Redis)
 - EDGE_BOOTSTRAP_CONFIG_FILE
 - EDGE_CONFIG_REFRESH_SECONDS
 - EDGE_ID
-- EDGE_MAX_DELTA
-- EDGE_LEASE_SIZE
+- EDGE_LEASE_STORE (`memory` default; `redis` only when several edge replicas share one Redis)
+- EDGE_LEASE_SIZE (default lease quantum; per-prefix `leasing.lease_quantum` wins)
 - EDGE_LEASE_LOW_WATER_PERCENT
-- RATE_HARD_THRESHOLD_PERCENT
+- EDGE_ADMIN_TOKEN (bearer token for `/analytics/metrics`; unset disables the endpoint)
 - NATS_URL
 - NATS_TIER_URL
 - NATS_ANALYTICS_URL
@@ -39,7 +40,8 @@ Configuration is split across environment variables and gateway policy JSON.
 - REDIS_ADDR
 - HUB_AUTH_TOKEN
 - CONFIG_FILE_PATH
-- HUB_CONFIG_RELOAD_CHANNEL
+- HUB_CONFIG_RELOAD_SUBJECT (NATS, default `gate.config.reload`)
+- HUB_CONFIG_RELOAD_CHANNEL (legacy Redis pub/sub, still published)
 - NATS_URL
 - NATS_TIER_URL
 - NATS_TIER_UPDATES_SUBJECT
@@ -104,8 +106,8 @@ Apply behavior:
 
 - Hub validates the next config.
 - Hub applies atomically.
-- Hub publishes a structured reload event to Redis Pub/Sub channel `HUB_CONFIG_RELOAD_CHANNEL` (default `gate:config:reload`).
-- Edge subscribes via `EDGE_CONFIG_RELOAD_CHANNEL` and refreshes config on receipt.
+- Hub publishes a structured reload event on NATS subject `HUB_CONFIG_RELOAD_SUBJECT` (default `gate.config.reload`) and, for single-Redis setups, on Redis channel `HUB_CONFIG_RELOAD_CHANNEL`.
+- Edge subscribes on NATS (and Redis) and refreshes config on receipt. Events are deduplicated by `(boot_id, epoch)`, so a hub restart (epoch back to 1) is still applied.
 
 Current invalidation scope:
 

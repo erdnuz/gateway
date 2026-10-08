@@ -15,9 +15,9 @@ func TestIntegration_CacheHitAndAnalyticsQuery(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k1", "free")
+	h.setTier("v1", "key1", "free")
 
-	resp1, body1 := h.edgeRequest(http.MethodGet, "/v1/auth-api/hello", "k1")
+	resp1, body1 := h.edgeRequest(http.MethodGet, "/v1/auth-api/hello", "key1")
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("first status=%d", resp1.StatusCode)
 	}
@@ -25,7 +25,7 @@ func TestIntegration_CacheHitAndAnalyticsQuery(t *testing.T) {
 		t.Fatalf("first request expected MISS got=%q", got)
 	}
 
-	resp2, body2 := h.edgeRequest(http.MethodGet, "/v1/auth-api/hello", "k1")
+	resp2, body2 := h.edgeRequest(http.MethodGet, "/v1/auth-api/hello", "key1")
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("second status=%d", resp2.StatusCode)
 	}

@@ -59,17 +59,19 @@ func (f *scriptedLeaseClient) callCount() int {
 func TestIntegration_TCLK1DurationBasedExpiry(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-clk-1", "free")
+	h.setTier("v1", "kclk1", "free")
 	fake := &scriptedLeaseClient{ttlSeconds: 2, grants: []int64{5}}
 	h.setLeaseClient(fake)
 
-	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-1", "k-clk-1")
+	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-1", "kclk1")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("initial request expected 200 got=%d", resp.StatusCode)
 	}
 
-	key := "edge:lease:tokens:v1:k-clk-1"
+	key := "edge:lease:tokens:v1:auth-api:kclk1"
 	pttl, err := h.rdb.PTTL(h.ctx, key).Result()
 	if err != nil {
 		t.Fatalf("read pttl: %v", err)
@@ -80,7 +82,7 @@ func TestIntegration_TCLK1DurationBasedExpiry(t *testing.T) {
 
 	// Before 2s TTL elapses, requests should still pass.
 	time.Sleep(1200 * time.Millisecond)
-	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-1-mid", "k-clk-1")
+	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-1-mid", "kclk1")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("request before ttl expiry expected 200 got=%d", resp.StatusCode)
 	}
@@ -91,26 +93,28 @@ func TestIntegration_TCLK1DurationBasedExpiry(t *testing.T) {
 func TestIntegration_TCLK2RenewalBufferPreventsReclaimGap(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-clk-2", "free")
+	h.setTier("v1", "kclk2", "free")
 	fake := &scriptedLeaseClient{ttlSeconds: 2, grants: []int64{5, 5}}
 	h.setLeaseClient(fake)
 
-	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-2-a", "k-clk-2")
+	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-2-a", "kclk2")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("first request expected 200 got=%d", resp.StatusCode)
 	}
 
 	// Enter temporal-renewal window and trigger proactive renewal.
 	time.Sleep(1100 * time.Millisecond)
-	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-2-b", "k-clk-2")
+	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-2-b", "kclk2")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("trigger request expected 200 got=%d", resp.StatusCode)
 	}
 
 	// Wait for async renewal and pass beyond the first lease's original TTL.
 	time.Sleep(1300 * time.Millisecond)
-	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-2-c", "k-clk-2")
+	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/clk-2-c", "kclk2")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("request after original ttl expected 200 (renewed lease), got=%d", resp.StatusCode)
 	}
@@ -125,7 +129,7 @@ func TestIntegration_TRES1MicroGrantNoSpin(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k-res-1", "free")
+	h.setTier("v1", "kres1", "free")
 	grants := make([]int64, 40)
 	for i := range grants {
 		grants[i] = 1
@@ -135,7 +139,7 @@ func TestIntegration_TRES1MicroGrantNoSpin(t *testing.T) {
 
 	const n = 20
 	for i := 0; i < n; i++ {
-		_, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/res-1", "k-res-1")
+		_, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/res-1", "kres1")
 	}
 
 	calls := fake.callCount()
@@ -149,8 +153,10 @@ func TestIntegration_TRES1MicroGrantNoSpin(t *testing.T) {
 func TestIntegration_TRES3Ghost202Recovery(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-res-3", "free")
+	h.setTier("v1", "kres3", "free")
 	fake := &scriptedLeaseClient{
 		ttlSeconds: 2,
 		grants:     []int64{0, 0, 5},
@@ -164,7 +170,7 @@ func TestIntegration_TRES3Ghost202Recovery(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/res-3", "k-res-3")
+		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/res-3", "kres3")
 		if resp.StatusCode == http.StatusOK {
 			break
 		}

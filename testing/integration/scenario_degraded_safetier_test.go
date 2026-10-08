@@ -24,14 +24,14 @@ func TestIntegration_DegradedRateServiceUsesSafetyTier(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k-safe", "free")
+	h.setTier("v1", "ksafe", "free")
 	h.setSafetyFallback(true, 3)
 	h.triggerConfigReload()
 	h.setLeaseClient(failingLeaseClient{})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/safe", "k-safe")
+		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/safe", "ksafe")
 		if resp.StatusCode == http.StatusOK {
 			break
 		}
@@ -42,15 +42,20 @@ func TestIntegration_DegradedRateServiceUsesSafetyTier(t *testing.T) {
 	}
 
 	for i := 2; i <= 3; i++ {
-		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/safe", "k-safe")
+		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/safe", "ksafe")
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("request %d expected 200 via safety tier, got %d", i, resp.StatusCode)
 		}
 	}
 
-	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/safe", "k-safe")
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 after safety tier exhausted, got %d", resp.StatusCode)
+	// Exhausting the safety tier is rate limiting, not unavailability: 429
+	// with Retry-After so clients back off until the window resets.
+	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/safe", "ksafe")
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after safety tier exhausted, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("expected Retry-After on safety-tier 429")
 	}
 
 	if hits := h.upstreamHits.Load(); hits != 3 {

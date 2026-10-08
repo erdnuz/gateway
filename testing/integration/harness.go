@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -340,13 +341,13 @@ func (h *integrationHarness) startEdge(configPath string) {
 		h.t.Fatalf("new edge config manager: %v", err)
 	}
 	configMgr.StartConfigReloadSubscriber(h.ctx, h.rdb, types.DefaultConfigReloadChannel)
+	h.subscribeConfigReloadNATS(configMgr)
 	tierMgr := edge.NewTierManagerWithOptions(h.hubHTTP.URL, h.rdb, types.DefaultHubUpdatesChannel, "", nil, edge.TierManagerOptions{
-		NATSURL:   h.natsURL,
-		NATSSubj:  types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
-		NATSQueue: "edge-tier-updates-it",
+		NATSURL:  h.natsURL,
+		NATSSubj: types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
 	})
 	rateDefaults := configMgr.Get().Runtime.Effective().Edge
-	rateMgr := edge.NewRateManagerWithOptions(h.hubHTTP.URL, h.rdb, 100, edge.RateManagerOptions{HardThresholdPct: rateDefaults.RateHardThresholdPct, LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
+	rateMgr := edge.NewRateManagerWithOptions(h.rdb, edge.RateManagerOptions{LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
 	h.edgeRateMgr = rateMgr
 	h.edgeRateAll = append(h.edgeRateAll, rateMgr)
 
@@ -369,13 +370,13 @@ func (h *integrationHarness) startAdditionalEdge(configPath string) {
 		h.t.Fatalf("new secondary edge config manager: %v", err)
 	}
 	configMgr.StartConfigReloadSubscriber(h.ctx, h.rdb, types.DefaultConfigReloadChannel)
+	h.subscribeConfigReloadNATS(configMgr)
 	tierMgr := edge.NewTierManagerWithOptions(h.hubHTTP.URL, h.rdb, types.DefaultHubUpdatesChannel, "", nil, edge.TierManagerOptions{
-		NATSURL:   h.natsURL,
-		NATSSubj:  types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
-		NATSQueue: "edge-tier-updates-it-secondary",
+		NATSURL:  h.natsURL,
+		NATSSubj: types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
 	})
 	rateDefaults := configMgr.Get().Runtime.Effective().Edge
-	rateMgr := edge.NewRateManagerWithOptions(h.hubHTTP.URL, h.rdb, 100, edge.RateManagerOptions{HardThresholdPct: rateDefaults.RateHardThresholdPct, LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
+	rateMgr := edge.NewRateManagerWithOptions(h.rdb, edge.RateManagerOptions{LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
 	h.edgeRateAll = append(h.edgeRateAll, rateMgr)
 
 	leaseClient, err := edge.NewGRPCQuotaLeaseClient(h.hubGRPCListener.Addr().String(), "hub-server", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, h.mtlsFiles.CAPath)
@@ -549,6 +550,31 @@ func (h *integrationHarness) setLeaseClientAt(index int, client edge.QuotaLeaseR
 		h.t.Fatalf("edge rate manager index out of range: %d", index)
 	}
 	h.edgeRateAll[index].SetLeaseClient(client)
+}
+
+// requireWindowHeadroom waits, if needed, until at least d remains in the
+// current quota window (config_builder uses 1-minute windows). Edges drop
+// leftover lease tokens when the window rolls, so tests that assert lease
+// balances over several seconds must not straddle a boundary.
+func (h *integrationHarness) requireWindowHeadroom(d time.Duration) {
+	const period = time.Minute
+	into := time.Duration(time.Now().UnixNano()) % period
+	if left := period - into; left < d {
+		time.Sleep(left + 100*time.Millisecond)
+	}
+}
+
+// subscribeConfigReloadNATS wires the production reload path (NATS) so the
+// harness does not depend on hub and edge sharing one Redis.
+func (h *integrationHarness) subscribeConfigReloadNATS(cm *edge.ConfigManager) {
+	nc, err := nats.Connect(h.natsURL)
+	if err != nil {
+		h.t.Fatalf("edge reload nats connect: %v", err)
+	}
+	go func() { <-h.ctx.Done(); nc.Close() }()
+	if err := cm.StartConfigReloadNATSSubscriber(h.ctx, nc, types.DefaultConfigReloadSubject, h.rdb); err != nil {
+		h.t.Fatalf("edge reload nats subscribe: %v", err)
+	}
 }
 
 type redisAnalyticsSink struct {

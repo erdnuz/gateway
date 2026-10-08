@@ -12,9 +12,9 @@ func TestIntegration_ConfigReloadDisablesCacheAtRuntime(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k-reload", "free")
+	h.setTier("v1", "kreload", "free")
 
-	resp1, _ := h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "k-reload")
+	resp1, _ := h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "kreload")
 	if resp1.StatusCode != http.StatusOK {
 		t.Fatalf("first status=%d", resp1.StatusCode)
 	}
@@ -22,7 +22,7 @@ func TestIntegration_ConfigReloadDisablesCacheAtRuntime(t *testing.T) {
 		t.Fatalf("first request expected MISS got=%q", got)
 	}
 
-	resp2, _ := h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "k-reload")
+	resp2, _ := h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "kreload")
 	if got := resp2.Header.Get("X-Cache"); got != "HIT" {
 		t.Fatalf("second request expected HIT got=%q", got)
 	}
@@ -35,7 +35,7 @@ func TestIntegration_ConfigReloadDisablesCacheAtRuntime(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		resp3, _ := h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "k-reload")
+		resp3, _ := h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "kreload")
 		if resp3.Header.Get("X-Cache") == "MISS" {
 			break
 		}
@@ -45,7 +45,7 @@ func TestIntegration_ConfigReloadDisablesCacheAtRuntime(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	_, _ = h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "k-reload")
+	_, _ = h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "kreload")
 	if hits := h.upstreamHits.Load(); hits < 3 {
 		t.Fatalf("expected upstream to be called after cache disabled; hits=%d", hits)
 	}
@@ -55,9 +55,9 @@ func TestIntegration_ConfigReloadInvalidatesResponseCacheAcrossEdges(t *testing.
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k-reload-multi", "free")
+	h.setTier("v1", "kreloadmulti", "free")
 
-	seed, _ := h.edgeRequestAt(0, http.MethodGet, "/v1/auth-api/reload-multi", "k-reload-multi")
+	seed, _ := h.edgeRequestAt(0, http.MethodGet, "/v1/auth-api/reload-multi", "kreloadmulti")
 	if seed.StatusCode != http.StatusOK {
 		t.Fatalf("seed status=%d", seed.StatusCode)
 	}
@@ -66,7 +66,7 @@ func TestIntegration_ConfigReloadInvalidatesResponseCacheAcrossEdges(t *testing.
 	}
 
 	for i := 0; i < h.edgeCount(); i++ {
-		resp, _ := h.edgeRequestAt(i, http.MethodGet, "/v1/auth-api/reload-multi", "k-reload-multi")
+		resp, _ := h.edgeRequestAt(i, http.MethodGet, "/v1/auth-api/reload-multi", "kreloadmulti")
 		if got := resp.Header.Get("X-Cache"); got != "HIT" {
 			t.Fatalf("edge %d warm verification expected HIT got=%q", i, got)
 		}
@@ -80,7 +80,7 @@ func TestIntegration_ConfigReloadInvalidatesResponseCacheAcrossEdges(t *testing.
 	sawMiss := false
 	for {
 		for i := 0; i < h.edgeCount(); i++ {
-			resp, _ := h.edgeRequestAt(i, http.MethodGet, "/v1/auth-api/reload-multi", "k-reload-multi")
+			resp, _ := h.edgeRequestAt(i, http.MethodGet, "/v1/auth-api/reload-multi", "kreloadmulti")
 			if resp.Header.Get("X-Cache") == "MISS" {
 				sawMiss = true
 				break
@@ -101,7 +101,7 @@ func TestIntegration_ConfigReloadInvalidatesResponseCacheAcrossEdges(t *testing.
 	}
 
 	for i := 0; i < h.edgeCount(); i++ {
-		resp, _ := h.edgeRequestAt(i, http.MethodGet, "/v1/auth-api/reload-multi", "k-reload-multi")
+		resp, _ := h.edgeRequestAt(i, http.MethodGet, "/v1/auth-api/reload-multi", "kreloadmulti")
 		if got := resp.Header.Get("X-Cache"); got != "HIT" {
 			t.Fatalf("edge %d expected converged HIT after refill got=%q", i, got)
 		}

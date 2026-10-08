@@ -1,0 +1,16 @@
+# Secrets: never commit private keys or real env files.
+*.key
+*.pem
+deployments/certs/
+deployments/.env.*
+!deployments/.env.*.example
+
+# Load test artifacts
+testing/loadtest/.certs/
+testing/loadtest/results/*/compose.log
+testing/loadtest/results/*/docker-stats.txt
+
+# Build output
+/bin/
+*.test
+*.out

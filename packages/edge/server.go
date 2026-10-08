@@ -2,17 +2,24 @@ package edge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"gateway/packages/common/types"
 	"io"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,7 +30,10 @@ import (
 
 const (
 	edgeReadyProbeInterval = 2 * time.Second
-	edgeReadyProbeTimeout  = 150 * time.Millisecond
+	edgeReadyProbeTimeout  = 500 * time.Millisecond
+	// edgeReadyProbeFailures consecutive failed probes mark the edge unready;
+	// one slow PING under load must not flip readiness.
+	edgeReadyProbeFailures = 3
 )
 
 type contextKey int
@@ -34,6 +44,7 @@ const (
 
 type requestState struct {
 	svcCfg       *types.ServiceConfig
+	prefixCfg    *types.PrefixConfig
 	tierPolicy   *types.TierConfig
 	analytics    *types.AnalyticsEntry
 	cacheManager *CacheManager
@@ -44,12 +55,26 @@ type requestState struct {
 
 func (s *requestState) reset() {
 	s.svcCfg = nil
+	s.prefixCfg = nil
 	s.tierPolicy = nil
 	s.analytics = nil
 	s.cacheManager = nil
 	s.prefixID = ""
 	s.serviceID = ""
 	s.apiKey = ""
+}
+
+// apiKeyMatcher caches the compiled runtime.hub.api_key_pattern so the edge
+// rejects malformed keys with the same rule the hub applies.
+type apiKeyMatcher struct {
+	src string
+	re  *regexp.Regexp
+}
+
+// redactKey returns a log-safe fingerprint of an API key.
+func redactKey(apiKey string) string {
+	sum := sha256.Sum256([]byte(apiKey))
+	return "sha256:" + hex.EncodeToString(sum[:6])
 }
 
 var requestStatePool = sync.Pool{New: func() interface{} { return &requestState{} }}
@@ -73,8 +98,13 @@ type EdgeServer struct {
 	rdb                       *redis.Client
 	client                    *http.Client
 	maxCacheableResponseBytes int64
-	readyHealthy              atomic.Bool
+	maxRequestBodyBytes       int64
+	adminToken                string
+	readyHealthy              atomic.Bool // startup gate: false blocks all traffic
+	localHealthy              atomic.Bool // edge-local deps; reported by /readyz only
 	pendingDependency         atomic.Value
+	keyMatcher                atomic.Pointer[apiKeyMatcher]
+	pipeline                  http.HandlerFunc
 }
 
 type EdgeServerOptions struct {
@@ -83,7 +113,14 @@ type EdgeServerOptions struct {
 	UpstreamMaxIdleConns      int
 	UpstreamIdleConnTimeout   time.Duration
 	EdgeID                    string
+	// MaxRequestBodyBytes caps proxied request bodies; 0 → 10 MiB.
+	MaxRequestBodyBytes int64
+	// AdminToken guards internal endpoints (/analytics/metrics). Empty
+	// disables them.
+	AdminToken string
 }
+
+const defaultMaxRequestBodyBytes = 10 << 20
 
 // NewEdgeServer creates a new edge gateway server with necessary managers
 func NewEdgeServer(configMgr *ConfigManager, tierMgr *TierManager, rateMgr *RateManager, analyticsSink AnalyticsSink, rdb *redis.Client) *EdgeServer {
@@ -103,6 +140,9 @@ func NewEdgeServerWithOptions(configMgr *ConfigManager, tierMgr *TierManager, ra
 	if options.UpstreamIdleConnTimeout <= 0 {
 		options.UpstreamIdleConnTimeout = types.DefaultRuntimePolicy().Edge.UpstreamIdleConnTimeout
 	}
+	if options.MaxRequestBodyBytes <= 0 {
+		options.MaxRequestBodyBytes = defaultMaxRequestBodyBytes
+	}
 	es := &EdgeServer{
 		configManager:             configMgr,
 		tierManager:               tierMgr,
@@ -111,38 +151,70 @@ func NewEdgeServerWithOptions(configMgr *ConfigManager, tierMgr *TierManager, ra
 		edgeID:                    strings.TrimSpace(options.EdgeID),
 		rdb:                       rdb,
 		maxCacheableResponseBytes: options.MaxCacheableResponseBytes,
+		maxRequestBodyBytes:       options.MaxRequestBodyBytes,
+		adminToken:                options.AdminToken,
 		client: &http.Client{
 			Timeout: options.UpstreamClientTimeout,
 			Transport: &http.Transport{
-				MaxIdleConns:       options.UpstreamMaxIdleConns,
-				IdleConnTimeout:    options.UpstreamIdleConnTimeout,
-				DisableKeepAlives:  false,
-				DisableCompression: false,
+				Proxy:               http.ProxyFromEnvironment,
+				MaxIdleConns:        options.UpstreamMaxIdleConns,
+				MaxIdleConnsPerHost: options.UpstreamMaxIdleConns,
+				IdleConnTimeout:     options.UpstreamIdleConnTimeout,
 			},
+			// The gateway relays redirects to the client instead of following them.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 	if es.edgeID == "" {
 		es.edgeID = "unknown-edge"
 	}
 	es.readyHealthy.Store(true)
+	es.localHealthy.Store(true)
 	es.pendingDependency.Store("hub_readyz")
 
+	// Pipeline: Analytics -> CORS -> Auth -> Cache -> RateLimit -> Proxy.
+	// Built once; per-request state travels in the context.
+	es.pipeline = es.analyticsMiddleware(
+		es.corsMiddleware(
+			es.authMiddleware(
+				es.cacheMiddleware(
+					es.rateLimitMiddleware(
+						http.HandlerFunc(es.proxyHandler),
+					),
+				),
+			),
+		),
+	)
 	return es
+}
+
+// StartReadinessProbe keeps /readyz tied to edge-local dependencies (Redis)
+// once startup is complete. Hub or analytics outages must not take the data
+// plane down: the failure policies handle them per request.
+func (s *EdgeServer) StartReadinessProbe(ctx context.Context) {
+	s.startReadinessProbe(ctx)
 }
 
 func (s *EdgeServer) startReadinessProbe(ctx context.Context) {
 	if s.rdb == nil {
-		s.readyHealthy.Store(false)
+		s.localHealthy.Store(false)
 		return
 	}
 	go func() {
 		ticker := time.NewTicker(edgeReadyProbeInterval)
 		defer ticker.Stop()
+		failures := 0
 		for {
 			probeCtx, cancel := context.WithTimeout(ctx, edgeReadyProbeTimeout)
 			err := s.rdb.Ping(probeCtx).Err()
 			cancel()
-			s.readyHealthy.Store(err == nil)
+			if err == nil {
+				failures = 0
+				s.localHealthy.Store(true)
+			} else if failures++; failures >= edgeReadyProbeFailures {
+				s.SetPendingDependency("edge_redis")
+				s.localHealthy.Store(false)
+			}
 
 			select {
 			case <-ctx.Done():
@@ -172,6 +244,10 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/analytics/metrics" {
+		if !s.authorizeAdmin(r) {
+			http.NotFound(w, r)
+			return
+		}
 		if m, ok := s.analyticsSink.(interface{ Stats() AnalyticsManagerStats }); ok {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -182,7 +258,7 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/readyz" {
-		if !s.readyHealthy.Load() {
+		if !s.readyHealthy.Load() || !s.localHealthy.Load() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "pending", "missing_dependency": s.pendingDependencyValue()})
@@ -211,20 +287,40 @@ func (s *EdgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		state.analytics = &types.AnalyticsEntry{Timestamp: time.Now(), Method: r.Method, EdgeID: s.edgeID}
 	}
 	ctx := context.WithValue(r.Context(), requestStateCtxKey, state)
+	s.pipeline(w, r.WithContext(ctx))
+}
 
-	// Pipeline: Analytics -> CORS -> Cache -> Auth -> RateLimit -> Proxy
-	pipeline := s.analyticsMiddleware(
-		s.corsMiddleware(
-			s.authMiddleware(
-				s.cacheMiddleware(
-					s.rateLimitMiddleware(
-						http.HandlerFunc(s.proxyHandler),
-					),
-				),
-			),
-		),
-	)
-	pipeline(w, r.WithContext(ctx))
+func (s *EdgeServer) authorizeAdmin(r *http.Request) bool {
+	if s.adminToken == "" {
+		return false
+	}
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return ok && subtle.ConstantTimeCompare([]byte(got), []byte(s.adminToken)) == 1
+}
+
+// validAPIKey applies the hub's runtime.hub.api_key_pattern at the edge so
+// keys that the hub would reject (or mis-route, e.g. "key/suffix") never
+// reach tier lookup, leasing, or Redis.
+func (s *EdgeServer) validAPIKey(apiKey string) bool {
+	src := ""
+	if s.configManager != nil {
+		if cfg := s.configManager.Get(); cfg != nil {
+			src = cfg.Runtime.Hub.APIKeyPattern
+		}
+	}
+	if src == "" {
+		src = types.DefaultRuntimePolicy().Hub.APIKeyPattern
+	}
+	m := s.keyMatcher.Load()
+	if m == nil || m.src != src {
+		re, err := regexp.Compile(src)
+		if err != nil {
+			re = regexp.MustCompile(types.DefaultRuntimePolicy().Hub.APIKeyPattern)
+		}
+		m = &apiKeyMatcher{src: src, re: re}
+		s.keyMatcher.Store(m)
+	}
+	return m.re.MatchString(apiKey)
 }
 
 func (s *EdgeServer) SetStartupReady(ready bool) {
@@ -279,8 +375,18 @@ func (s *EdgeServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "X-API-Key header required", http.StatusUnauthorized)
 			return
 		}
+		if !s.validAPIKey(apiKey) {
+			http.Error(w, "Invalid API key", http.StatusUnauthorized)
+			return
+		}
+		prefixCfg, _ := s.configManager.GetPrefix(prefixID)
 
 		tierID, err := s.tierManager.GetUserTier(r.Context(), prefixID, apiKey)
+		if err == nil && tierID == "" {
+			// The hub knows no tier for this key: it was never issued or was revoked.
+			http.Error(w, "Invalid API key", http.StatusUnauthorized)
+			return
+		}
 		if err != nil {
 			hubPolicy := cfg.Failure.EffectiveHubPolicy()
 			switch hubPolicy.TierLookupStrategy {
@@ -309,6 +415,7 @@ func (s *EdgeServer) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		state.svcCfg = cfg
+		state.prefixCfg = prefixCfg
 		state.tierPolicy = tierPolicy
 		state.prefixID = prefixID
 		state.serviceID = serviceID
@@ -517,37 +624,99 @@ func (s *EdgeServer) rateLimitMiddleware(next http.HandlerFunc) http.HandlerFunc
 			return
 		}
 
-		cost := s.getMethodCost(r.Method, tierPolicy)
-		usage, err := s.rateManager.IncrementWithService(r.Context(), state.prefixID, state.serviceID, apiKey, int64(tierPolicy.Quota), int64(cost))
+		req := RateRequest{
+			Prefix:  state.prefixID,
+			Service: state.serviceID,
+			APIKey:  apiKey,
+			Limit:   int64(tierPolicy.Quota),
+			Cost:    int64(s.getMethodCost(r.Method, tierPolicy)),
+		}
+		if p := state.prefixCfg; p != nil {
+			// Mirror the hub: a missing quota period means 1s windows.
+			req.Period = max(p.QuotaPeriod, time.Second)
+			req.LeaseSize = p.Leasing.Effective(s.configManager.EdgePolicy(), p.QuotaPeriod).LeaseQuantum
+		}
+		decision, err := s.rateManager.Allow(r.Context(), req)
 
+		if errors.Is(err, ErrLeaseRejected) {
+			http.Error(w, "API key not permitted for this service", http.StatusForbidden)
+			return
+		}
 		if err != nil {
-			log.Printf("edge rate increment failed prefix=%s service=%s apiKey=%s err=%v", state.prefixID, state.serviceID, apiKey, err)
+			if !errors.Is(err, ErrLeaseUnavailable) || rateErrLog.Allow() {
+				log.Printf("edge rate check failed prefix=%s service=%s key=%s err=%v", state.prefixID, state.serviceID, redactKey(apiKey), err)
+			}
 			if state.svcCfg != nil {
 				hubPolicy := state.svcCfg.Failure.EffectiveHubPolicy()
-				if hubPolicy.AllowOnRateServiceError && state.svcCfg.SafetyTier != nil {
-					safetyCost := s.getMethodCost(r.Method, state.svcCfg.SafetyTier)
-					safetyUsage, safetyErr := s.rateManager.IncrementSafety(r.Context(), state.prefixID, apiKey, int64(state.svcCfg.SafetyTier.Quota), int64(safetyCost))
-					if safetyErr == nil && safetyUsage <= int64(state.svcCfg.SafetyTier.Quota) {
+				if safety := state.svcCfg.SafetyTier; hubPolicy.AllowOnRateServiceError && safety != nil {
+					safetyReq := req
+					safetyReq.Limit = int64(safety.Quota)
+					safetyReq.Cost = int64(s.getMethodCost(r.Method, safety))
+					sd := s.rateManager.AllowSafety(safetyReq)
+					writeRateLimitHeaders(w, sd)
+					if sd.Allowed {
 						next(w, r)
 						return
 					}
+					http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+					return
 				}
 			}
 			http.Error(w, "Rate limit service unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
-		if usage > int64(tierPolicy.Quota) {
+		writeRateLimitHeaders(w, decision)
+		if !decision.Allowed {
 			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 
-		if state.analytics != nil {
-			state.analytics.LimitUsed = uint64(usage)
-			state.analytics.LimitUsedOfTotal = float64(usage) / float64(tierPolicy.Quota)
+		if state.analytics != nil && decision.Limit > 0 {
+			used := decision.Limit - decision.Remaining
+			state.analytics.LimitUsed = uint64(used)
+			state.analytics.LimitUsedOfTotal = float64(used) / float64(decision.Limit)
 		}
 
 		next(w, r)
+	}
+}
+
+// rateErrLog throttles lease-unavailable logging during hub outages.
+var rateErrLog = newLogThrottle(time.Second)
+
+type logThrottle struct {
+	every  int64
+	nextNs atomic.Int64
+}
+
+func newLogThrottle(every time.Duration) *logThrottle {
+	return &logThrottle{every: int64(every)}
+}
+
+func (l *logThrottle) Allow() bool {
+	now := time.Now().UnixNano()
+	next := l.nextNs.Load()
+	return now >= next && l.nextNs.CompareAndSwap(next, now+l.every)
+}
+
+// writeRateLimitHeaders emits the IETF RateLimit header fields
+// (draft-ietf-httpapi-ratelimit-headers) plus Retry-After on denial.
+func writeRateLimitHeaders(w http.ResponseWriter, d RateDecision) {
+	h := w.Header()
+	h.Set("RateLimit-Limit", strconv.FormatInt(d.Limit, 10))
+	h.Set("RateLimit-Remaining", strconv.FormatInt(d.Remaining, 10))
+	if !d.ResetAt.IsZero() {
+		reset := int64(math.Ceil(time.Until(d.ResetAt).Seconds()))
+		if reset < 0 {
+			reset = 0
+		}
+		h.Set("RateLimit-Reset", strconv.FormatInt(reset, 10))
+		if !d.Allowed {
+			h.Set("Retry-After", strconv.FormatInt(max(reset, 1), 10))
+		}
+	} else if !d.Allowed {
+		h.Set("Retry-After", "1")
 	}
 }
 
@@ -590,20 +759,36 @@ func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *t
 		return
 	}
 
-	// Build request path - handle prefix stripping if configured
-	requestPath := s.buildProxyPath(r.URL.Path, cfg)
-	targetURL.Path = requestPath
+	// Build request path - handle prefix stripping if configured, and keep
+	// any base path of the target URL (e.g. http://svc/api/v2).
+	targetURL.Path = joinURLPath(targetURL.Path, s.buildProxyPath(r.URL.Path, cfg))
+	targetURL.RawPath = ""
 	targetURL.RawQuery = r.URL.RawQuery
 
-	// Create proxy request
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), r.Body)
+	body := http.MaxBytesReader(w, r.Body, s.maxRequestBodyBytes)
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), body)
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusBadGateway)
 		return
 	}
+	proxyReq.ContentLength = r.ContentLength
+	// Retries need a rewindable body; buffer (bounded) only when a retry is possible.
+	if policy.MaxRetries > 0 && s.canRetryMethod(r.Method, policy) && r.Body != nil && r.Body != http.NoBody {
+		buf, readErr := io.ReadAll(body)
+		if readErr != nil {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		proxyReq.Body = io.NopCloser(bytes.NewReader(buf))
+		proxyReq.ContentLength = int64(len(buf))
+		proxyReq.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
+	}
 
-	// Copy headers from original request
 	proxyReq.Header = r.Header.Clone()
+	removeHopByHopHeaders(proxyReq.Header)
+	// The gateway credential is for the gateway; upstreams must not see it.
+	proxyReq.Header.Del("X-API-Key")
+	setForwardedHeaders(proxyReq, r)
 
 	// Apply request transforms (add headers, hide headers, etc.)
 	s.applyRequestTransforms(proxyReq, cfg.Transform)
@@ -623,6 +808,7 @@ func (s *EdgeServer) executeProxy(w http.ResponseWriter, r *http.Request, cfg *t
 	defer resp.Body.Close()
 
 	// Copy response headers from upstream
+	removeHopByHopHeaders(resp.Header)
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -694,26 +880,39 @@ func (s *EdgeServer) doProxyWithPolicy(ctx context.Context, req *http.Request, p
 	lastErr := error(nil)
 	for attempt := 0; attempt < attempts; attempt++ {
 		attemptReq := req.Clone(ctx)
-		attemptCtx := ctx
-		cancel := func() {}
+		if attempt > 0 && req.GetBody != nil {
+			b, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			attemptReq.Body = b
+		}
+		cancel := context.CancelFunc(func() {})
 		if policy.AttemptTimeout > 0 {
+			var attemptCtx context.Context
 			attemptCtx, cancel = context.WithTimeout(ctx, policy.AttemptTimeout)
 			attemptReq = attemptReq.WithContext(attemptCtx)
 		}
 		resp, err := s.client.Do(attemptReq)
-		cancel()
 		if err != nil {
+			cancel()
 			lastErr = err
 			if attempt < attempts-1 && s.canRetryMethod(req.Method, policy) {
-				time.Sleep(policy.RetryBackoff)
+				if !sleepCtx(ctx, policy.RetryBackoff) {
+					return nil, ctx.Err()
+				}
 				continue
 			}
 			return nil, err
 		}
+		// The attempt context must outlive Do: it also governs reading the body.
+		resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
 
 		if s.shouldRetryStatus(resp.StatusCode, policy) && attempt < attempts-1 && s.canRetryMethod(req.Method, policy) {
 			_ = resp.Body.Close()
-			time.Sleep(policy.RetryBackoff)
+			if !sleepCtx(ctx, policy.RetryBackoff) {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 
@@ -841,27 +1040,114 @@ func (s *EdgeServer) handleProxyError(w http.ResponseWriter, failure types.Failu
 	http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 }
 
-// responseWriterWrapper wraps http.ResponseWriter to capture status codes and response body
+// responseWriterWrapper wraps http.ResponseWriter to capture the status code.
+// It never buffers the body, so responses stream straight through.
 type responseWriterWrapper struct {
 	http.ResponseWriter
-	statusCode int
-	body       []byte
+	statusCode  int
+	wroteHeader bool
 }
 
 func (rw *responseWriterWrapper) reset(w http.ResponseWriter) {
 	rw.ResponseWriter = w
 	rw.statusCode = http.StatusOK
-	rw.body = rw.body[:0]
+	rw.wroteHeader = false
 }
 
 func (rw *responseWriterWrapper) WriteHeader(statusCode int) {
+	if rw.wroteHeader {
+		return
+	}
+	rw.wroteHeader = true
 	rw.statusCode = statusCode
 	rw.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (rw *responseWriterWrapper) Write(b []byte) (int, error) {
-	rw.body = append(rw.body, b...)
+	rw.wroteHeader = true
 	return rw.ResponseWriter.Write(b)
+}
+
+// Flush lets streaming responses (SSE, chunked) reach the client promptly.
+func (rw *responseWriterWrapper) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying writer to http.ResponseController.
+func (rw *responseWriterWrapper) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
+// cancelOnClose releases a per-attempt context once the body is consumed.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// hopByHopHeaders are connection-scoped (RFC 9110 §7.6.1) and must not be
+// forwarded by a proxy.
+var hopByHopHeaders = []string{
+	"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate",
+	"Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+}
+
+func removeHopByHopHeaders(h http.Header) {
+	for _, f := range h.Values("Connection") {
+		for _, name := range strings.Split(f, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				h.Del(name)
+			}
+		}
+	}
+	for _, name := range hopByHopHeaders {
+		h.Del(name)
+	}
+}
+
+func setForwardedHeaders(out, in *http.Request) {
+	if ip, _, err := net.SplitHostPort(in.RemoteAddr); err == nil {
+		if prior := in.Header.Values("X-Forwarded-For"); len(prior) > 0 {
+			ip = strings.Join(prior, ", ") + ", " + ip
+		}
+		out.Header.Set("X-Forwarded-For", ip)
+	}
+	proto := "http"
+	if in.TLS != nil {
+		proto = "https"
+	}
+	out.Header.Set("X-Forwarded-Proto", proto)
+	out.Header.Set("X-Forwarded-Host", in.Host)
+}
+
+// joinURLPath appends a request path to a target base path without
+// doubling or dropping the slash between them.
+func joinURLPath(base, p string) string {
+	if base == "" || base == "/" {
+		return p
+	}
+	return strings.TrimSuffix(base, "/") + "/" + strings.TrimPrefix(p, "/")
 }
 
 // Hijack support for websockets, etc.

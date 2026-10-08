@@ -17,7 +17,7 @@ func TestMultiEdgeSharedHubQuota(t *testing.T) {
 	}
 
 	const (
-		apiKey = "multi-edge-client"
+		apiKey = "multiedgeclient"
 	)
 	h.setTier("v1", apiKey, "free")
 

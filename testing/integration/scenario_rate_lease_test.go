@@ -16,11 +16,11 @@ func TestIntegration_RateLeaseRefillAndExhaustion(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k-rate", "free")
+	h.setTier("v1", "krate", "free")
 	allowed := 0
 
 	for i := 1; i <= 20; i++ {
-		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-rate")
+		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "krate")
 		if resp.StatusCode == http.StatusOK {
 			allowed++
 			continue
@@ -35,7 +35,7 @@ func TestIntegration_RateLeaseRefillAndExhaustion(t *testing.T) {
 		t.Fatalf("expected 15-20 successful requests before exhaustion, got %d", allowed)
 	}
 
-	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-rate")
+	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "krate")
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 after quota exhaustion got=%d", resp.StatusCode)
 	}
@@ -100,17 +100,19 @@ func (f *fakeWaitingLeaseClientIntegration) callCount() int {
 func TestIntegration_T1TemporalOverlapTopUp(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-t1", "free")
+	h.setTier("v1", "kt1", "free")
 	fake := &fakeLeaseClientIntegration{grants: []int64{100, 100}, ttlSeconds: 10}
 	h.setLeaseClient(fake)
 
-	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t1")
+	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt1")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("first request expected 200 got=%d", resp.StatusCode)
 	}
 
-	key := "edge:lease:tokens:v1:k-t1"
+	key := "edge:lease:tokens:v1:auth-api:kt1"
 	b1, err := h.rdb.Get(h.ctx, key).Int64()
 	if err != nil {
 		t.Fatalf("read local token balance: %v", err)
@@ -122,7 +124,7 @@ func TestIntegration_T1TemporalOverlapTopUp(t *testing.T) {
 	// Wait until we are inside the 2s temporal renewal buffer for a 10s lease.
 	time.Sleep(8300 * time.Millisecond)
 
-	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t1")
+	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt1")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("second request expected 200 got=%d", resp.StatusCode)
 	}
@@ -144,13 +146,15 @@ func TestIntegration_T1TemporalOverlapTopUp(t *testing.T) {
 func TestIntegration_T2LowWaterTopUpUnderPressure(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-t2", "free")
+	h.setTier("v1", "kt2", "free")
 	fake := &fakeLeaseClientIntegration{grants: []int64{10, 10}, ttlSeconds: 30}
 	h.setLeaseClient(fake)
 
 	for i := 0; i < 9; i++ {
-		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t2")
+		resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt2")
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("request %d expected 200 got=%d", i+1, resp.StatusCode)
 		}
@@ -158,7 +162,7 @@ func TestIntegration_T2LowWaterTopUpUnderPressure(t *testing.T) {
 
 	// Give the async LWM renewal a small window to complete.
 	time.Sleep(250 * time.Millisecond)
-	key := "edge:lease:tokens:v1:k-t2"
+	key := "edge:lease:tokens:v1:auth-api:kt2"
 	b, err := h.rdb.Get(h.ctx, key).Int64()
 	if err != nil {
 		t.Fatalf("read low-water merged balance: %v", err)
@@ -175,16 +179,16 @@ func TestIntegration_T3GlobalExhaustionBackoff(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	h.setTier("v1", "k-t3", "free")
+	h.setTier("v1", "kt3", "free")
 	fake := &fakeWaitingLeaseClientIntegration{retryAfterMs: 500}
 	h.setLeaseClient(fake)
 
-	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t3")
+	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt3")
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("first request expected 429 got=%d", resp.StatusCode)
 	}
 
-	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t3")
+	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt3")
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("second request expected 429 while waiting got=%d", resp.StatusCode)
 	}
@@ -193,7 +197,7 @@ func TestIntegration_T3GlobalExhaustionBackoff(t *testing.T) {
 	}
 
 	time.Sleep(600 * time.Millisecond)
-	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t3")
+	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt3")
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("post-retry request expected 429 got=%d", resp.StatusCode)
 	}
@@ -205,17 +209,19 @@ func TestIntegration_T3GlobalExhaustionBackoff(t *testing.T) {
 func TestIntegration_T4StaleLeaseHardExpiry(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
+	// Lease balances and TTLs are asserted across time; stay inside one quota window.
+	h.requireWindowHeadroom(15 * time.Second)
 
-	h.setTier("v1", "k-t4", "free")
+	h.setTier("v1", "kt4", "free")
 	fake := &fakeLeaseClientIntegration{grants: []int64{5}, ttlSeconds: 2}
 	h.setLeaseClient(fake)
 
-	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t4")
+	resp, _ := h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt4")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("first request expected 200 got=%d", resp.StatusCode)
 	}
 
-	key := "edge:lease:tokens:v1:k-t4"
+	key := "edge:lease:tokens:v1:auth-api:kt4"
 	if ttl, err := h.rdb.PTTL(h.ctx, key).Result(); err != nil || ttl <= 0 {
 		t.Fatalf("expected positive ttl on local key, ttl=%v err=%v", ttl, err)
 	}
@@ -229,7 +235,7 @@ func TestIntegration_T4StaleLeaseHardExpiry(t *testing.T) {
 		t.Fatalf("expected local lease key to hard-expire, still exists=%d", exists)
 	}
 
-	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "k-t4")
+	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt4")
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("request after hard expiry expected 429 got=%d", resp.StatusCode)
 	}

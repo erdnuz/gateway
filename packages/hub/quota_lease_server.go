@@ -3,11 +3,15 @@ package hub
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"sync/atomic"
 	"time"
 
 	"gateway/packages/common/types"
 
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var leaseGrantLua = redis.NewScript(`
@@ -55,6 +59,31 @@ type QuotaLeaseServer struct {
 	rdb       *redis.Client
 	cfgStore  ConfigRegistry
 	tierStore TierStore
+	keyRe     atomic.Pointer[keyPattern]
+}
+
+type keyPattern struct {
+	src string
+	re  *regexp.Regexp
+}
+
+// validAPIKey applies runtime.hub.api_key_pattern; keys are interpolated into
+// Redis keys, so the hub must not trust the edge to have checked.
+func (s *QuotaLeaseServer) validAPIKey(apiKey string) bool {
+	src := s.cfgStore.HubPolicy().APIKeyPattern
+	if src == "" {
+		src = types.DefaultRuntimePolicy().Hub.APIKeyPattern
+	}
+	kp := s.keyRe.Load()
+	if kp == nil || kp.src != src {
+		re, err := regexp.Compile(src)
+		if err != nil {
+			return false
+		}
+		kp = &keyPattern{src: src, re: re}
+		s.keyRe.Store(kp)
+	}
+	return kp.re.MatchString(apiKey)
 }
 
 func NewQuotaLeaseServer(rdb *redis.Client, cfgStore ConfigRegistry, tierStore TierStore) *QuotaLeaseServer {
@@ -63,12 +92,15 @@ func NewQuotaLeaseServer(rdb *redis.Client, cfgStore ConfigRegistry, tierStore T
 
 func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.QuotaLeaseRequest) (*types.QuotaLeaseResponse, error) {
 	if err := req.Validate(); err != nil {
-		return nil, err
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if !s.validAPIKey(req.ApiKey) {
+		return nil, status.Error(codes.InvalidArgument, "api_key does not match api_key_pattern")
 	}
 
 	prefixCfg, svcCfg, ok := s.cfgStore.FindService(req.Prefix, req.ServiceId)
 	if !ok {
-		return nil, fmt.Errorf("service %q not found in prefix %q", req.ServiceId, req.Prefix)
+		return nil, status.Errorf(codes.NotFound, "service %q not found in prefix %q", req.ServiceId, req.Prefix)
 	}
 
 	tierCtx, tierCancel := context.WithTimeout(ctx, leaseRedisOpTimeout)
@@ -79,7 +111,9 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 	}
 	tierCfg, ok := findTier(svcCfg, tierID)
 	if !ok {
-		return nil, fmt.Errorf("tier %q not found for service", tierID)
+		// Unknown key or unknown tier: a policy rejection, not an outage, so
+		// the edge must deny rather than fall back to its safety tier.
+		return nil, status.Errorf(codes.PermissionDenied, "no tier %q for key in service", tierID)
 	}
 
 	periodSeconds := int64(prefixCfg.QuotaPeriod / time.Second)
