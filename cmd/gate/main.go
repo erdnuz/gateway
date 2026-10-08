@@ -35,7 +35,7 @@ Usage:
 
 Commands:
   dev                 run hub, edge and analytics in one process (no external services)
-  hub                 run the control plane        (configured by HUB_*, REDIS_ADDR, NATS_* env)
+  hub                 run the control plane        (configured by CONFIG_FILE_PATH, HUB_*, REDIS_ADDR, NATS_* env)
   edge                run the gateway data plane   (configured by EDGE_*, HUB_*, REDIS_ADDR, NATS_* env)
   analytics           run analytics + dashboard    (configured by CLICKHOUSE_DSN, HUB_ADDR, NATS_* env)
   echo                run a demo upstream that echoes each request as JSON

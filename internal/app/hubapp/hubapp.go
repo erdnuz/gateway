@@ -25,6 +25,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 )
 
 // Config is everything the hub needs to start. FromEnv fills it from the
@@ -318,10 +319,20 @@ func newGRPCServer(cfg Config) (*grpc.Server, error) {
 	default:
 		return nil, fmt.Errorf("invalid HUB_GRPC_CLIENT_AUTH_MODE=%q (valid: require-and-verify, require-any, none)", cfg.GRPCClientAuthMode)
 	}
-	return grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   clientAuth,
-		ClientCAs:    pool,
-		MinVersion:   tls.VersionTLS13,
-	}))), nil
+	return grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ClientAuth:   clientAuth,
+			ClientCAs:    pool,
+			MinVersion:   tls.VersionTLS13,
+		})),
+		// Edges ping every 10s (packages/edge/grpc_client.go) to keep the lease
+		// connection warm. gRPC's default policy allows one ping per 5 minutes
+		// and answers faster pings with GOAWAY "too_many_pings", dropping the
+		// connection and failing in-flight lease calls.
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	), nil
 }
