@@ -151,6 +151,10 @@ func TestIntegration_THUB1WaiterServedFirstAfterReplenish(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
+	// Windows are 1s and epoch-aligned: start just after a boundary so each
+	// burst of requests below stays inside one window.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 20*time.Millisecond)))
+
 	// Drain current window fully.
 	resp, err := server.RequestQuotaLease(ctx, &types.QuotaLeaseRequest{Prefix: "v1", ServiceId: "auth-api", ApiKey: "seed", RequestedTokens: 10})
 	if err != nil {
