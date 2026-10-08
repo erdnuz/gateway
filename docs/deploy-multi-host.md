@@ -11,7 +11,7 @@ Runs `gate hub` with its Redis and a NATS server that edges and analytics can re
 
 | Variable | Example | Notes |
 | --- | --- | --- |
-| `CONFIG_FILE_PATH` | `/etc/gate/gateway.json` | required |
+| `CONFIG_FILE_PATH` | `/etc/gate/gateway.yaml` | required |
 | `HUB_AUTH_TOKEN` | strong random value | required; shared with edges and analytics |
 | `REDIS_ADDR` | `redis:6379` | must use `maxmemory-policy noeviction` |
 | `NATS_URL` | `nats://nats:4222` | |

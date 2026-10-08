@@ -66,7 +66,7 @@ services:
       HUB_TLS_KEY_FILE: /certs/hub/tls.key
       HUB_TLS_CA_FILE: /certs/ca/ca.crt
     volumes:
-      - ./gateway-config.loadtest.json:/config/gateway-config.json:ro
+      - ./gateway-config.loadtest.yaml:/config/gateway-config.json:ro
       - ${LT_CERT_DIR}/hub:/certs/hub:ro
       - ${LT_CERT_DIR}/ca:/certs/ca:ro
     healthcheck:

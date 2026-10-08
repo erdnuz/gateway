@@ -544,7 +544,7 @@ func (s *HubServer) resolveReloadTargetConfig(r *http.Request) (*types.GatewayCo
 	}
 	payloadBody := strings.TrimSpace(string(body))
 	if payloadBody != "" {
-		cfg, err := decodeAndValidateConfig(body)
+		cfg, err := decodeAndValidateConfig(body, "config-reload payload")
 		if err != nil {
 			return nil, "", err
 		}

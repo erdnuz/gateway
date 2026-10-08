@@ -1,0 +1,190 @@
+package config
+
+import (
+	"fmt"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+var (
+	nameRe        = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	segmentRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	tierRe        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+	cacheTokenRe  = regexp.MustCompile(`\{([a-z]+)\}`)
+	cacheTokens   = map[string]bool{"method": true, "path": true, "query": true, "key": true, "encoding": true}
+	costMethods   = map[string]bool{"GET": true, "POST": true, "PUT": true, "DELETE": true, "*": true}
+	upstreamModes = map[string]bool{"fail-closed": true, "fail-open": true}
+)
+
+// group returns the first path segment of a service's path prefix.
+func (s Service) group() string {
+	parts := strings.Split(strings.Trim(s.Match.PathPrefix, "/"), "/")
+	return parts[0]
+}
+
+func (p *parser) validate(f *File) {
+	if f.Version != Version {
+		p.at("version", "must be %d (got %d)", Version, f.Version)
+	}
+	if len(f.Services) == 0 {
+		p.at("services", "at least one service is required")
+	}
+
+	names := map[string]int{}
+	prefixes := map[string]int{}
+	type groupInfo struct {
+		first  int
+		window Duration
+		lease  int64
+	}
+	groups := map[string]groupInfo{}
+
+	for i, s := range f.Services {
+		path := fmt.Sprintf("services[%d]", i)
+		switch {
+		case s.Name == "":
+			p.at(path+".name", "is required")
+		case !nameRe.MatchString(s.Name):
+			p.at(path+".name", "%q must be lowercase letters, digits and dashes", s.Name)
+		default:
+			if j, dup := names[s.Name]; dup {
+				p.at(path+".name", "%q is already used by services[%d]", s.Name, j)
+			}
+			names[s.Name] = i
+		}
+
+		pp := s.Match.PathPrefix
+		segs := strings.Split(strings.Trim(pp, "/"), "/")
+		switch {
+		case pp == "":
+			p.at(path+".match.path_prefix", "is required, e.g. /v1/%s", orDefault(s.Name, "orders"))
+		case !strings.HasPrefix(pp, "/") || len(segs) != 2 || !segmentRe.MatchString(segs[0]) || !segmentRe.MatchString(segs[1]):
+			p.at(path+".match.path_prefix", "%q must be two path segments, /<group>/<service>", pp)
+		case s.Name != "" && segs[1] != s.Name:
+			p.at(path+".match.path_prefix", "%q must end with the service name (/%s/%s)", pp, segs[0], s.Name)
+		default:
+			if j, dup := prefixes[pp]; dup {
+				p.at(path+".match.path_prefix", "%q is already used by services[%d]", pp, j)
+			}
+			prefixes[pp] = i
+		}
+
+		if u, err := url.Parse(s.Upstream); s.Upstream == "" {
+			p.at(path+".upstream", "is required, e.g. http://%s:8080", orDefault(s.Name, "orders"))
+		} else if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			p.at(path+".upstream", "%q must be an http(s) URL with a host", s.Upstream)
+		}
+
+		p.validateLimits(path+".limits", s.Limits)
+		if pp != "" && len(segs) == 2 && s.Limits.Window > 0 {
+			g := s.group()
+			if info, seen := groups[g]; !seen {
+				groups[g] = groupInfo{first: i, window: s.Limits.Window, lease: s.Limits.LeaseSize}
+			} else {
+				// The runtime keeps one quota window and lease size per group.
+				if info.window != s.Limits.Window {
+					p.at(path+".limits.window", "%s differs from services[%d] (%s); services under /%s must share a window", s.Limits.Window, info.first, info.window, g)
+				}
+				if info.lease != s.Limits.LeaseSize {
+					p.at(path+".limits.lease_size", "%d differs from services[%d] (%d); services under /%s must share a lease size", s.Limits.LeaseSize, info.first, info.lease, g)
+				}
+			}
+		}
+
+		if c := s.Cache; c != nil {
+			if c.TTL <= 0 {
+				p.at(path+".cache.ttl", "is required, e.g. 30s")
+			}
+			for _, m := range cacheTokenRe.FindAllStringSubmatch(c.Key, -1) {
+				if !cacheTokens[m[1]] {
+					p.at(path+".cache.key", "unknown token {%s} (use {method} {path} {query} {key} {encoding})", m[1])
+				}
+			}
+		}
+		if r := s.Retries; r != nil {
+			if r.Attempts < 1 {
+				p.at(path+".retries.attempts", "must be at least 1 (1 = no retry)")
+			}
+			for j, code := range r.Statuses {
+				if code < 100 || code > 599 {
+					p.at(fmt.Sprintf("%s.retries.statuses[%d]", path, j), "%d is not an HTTP status code", code)
+				}
+			}
+		}
+		if c := s.CORS; c != nil && len(c.Origins) == 0 {
+			p.at(path+".cors.origins", "list at least one origin, or [\"*\"]")
+		}
+		if a := s.Analytics; a != nil && a.SampleRate != nil && (*a.SampleRate < 0 || *a.SampleRate > 1) {
+			p.at(path+".analytics.sample_rate", "must be between 0 and 1")
+		}
+		if e := s.OnUpstreamError; e != nil {
+			if !upstreamModes[e.Mode] {
+				p.at(path+".on_upstream_error.mode", "must be fail-closed or fail-open (got %q)", e.Mode)
+			}
+			if e.Status != 0 && (e.Status < 100 || e.Status > 599) {
+				p.at(path+".on_upstream_error.status", "%d is not an HTTP status code", e.Status)
+			}
+		}
+	}
+
+	if pat := f.Runtime.Hub.APIKeyPattern; pat != "" {
+		if _, err := regexp.Compile(pat); err != nil {
+			p.at("runtime.hub.api_key_pattern", "invalid regular expression: %v", err)
+		}
+	}
+	if v := f.Runtime.Edge.LeaseLowWaterPct; v < 0 || v > 100 {
+		p.at("runtime.edge.lease_low_water_pct", "must be between 0 and 100")
+	}
+}
+
+func (p *parser) validateLimits(path string, l Limits) {
+	if l.Window <= 0 {
+		p.at(path+".window", "is required, e.g. 1m")
+	}
+	if len(l.Tiers) == 0 {
+		p.at(path+".tiers", "define at least one tier, e.g. free: {requests: 100}")
+	}
+	names := make([]string, 0, len(l.Tiers))
+	for name := range l.Tiers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t := l.Tiers[name]
+		tp := path + ".tiers." + name
+		if !tierRe.MatchString(name) {
+			p.at(tp, "tier name %q must be letters, digits, dashes or underscores", name)
+		}
+		if t.Requests == 0 {
+			p.at(tp+".requests", "must be greater than 0")
+		}
+		for m, c := range t.Cost {
+			if !costMethods[m] {
+				p.at(tp+".cost."+m, "unknown method %q (use GET, POST, PUT, DELETE or *)", m)
+			}
+			if c == 0 {
+				p.at(tp+".cost."+m, "must be at least 1")
+			}
+		}
+	}
+	if l.DefaultTier != "" {
+		if _, ok := l.Tiers[l.DefaultTier]; !ok {
+			p.at(path+".default_tier", "%q is not one of the tiers (%s)", l.DefaultTier, strings.Join(names, ", "))
+		}
+	}
+	if fb := l.WhenHubUnavailable; fb != nil && fb.Allow == 0 {
+		p.at(path+".when_hub_unavailable.allow", "must be greater than 0 (omit when_hub_unavailable to reject with 503)")
+	}
+	if l.LeaseSize < 0 {
+		p.at(path+".lease_size", "must not be negative")
+	}
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}

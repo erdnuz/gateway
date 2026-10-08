@@ -1,0 +1,617 @@
+{
+  "$id": "https://raw.githubusercontent.com/erdnuz/gateway/master/schema/gate.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "runtime": {
+      "additionalProperties": false,
+      "description": "Process tuning. Every field is optional; defaults suit most deployments.",
+      "properties": {
+        "analytics": {
+          "additionalProperties": false,
+          "description": "Analytics tuning.",
+          "properties": {
+            "config_fetch_timeout": {
+              "description": "Default 5s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "default_events_limit": {
+              "description": "Default 100.",
+              "type": "integer"
+            },
+            "default_summary_limit": {
+              "description": "Default 1000.",
+              "type": "integer"
+            },
+            "idle_timeout": {
+              "description": "Default 30s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "max_events_limit": {
+              "description": "Default 5000.",
+              "type": "integer"
+            },
+            "max_events_offset": {
+              "description": "Default 1000000.",
+              "type": "integer"
+            },
+            "max_summary_limit": {
+              "description": "Default 10000.",
+              "type": "integer"
+            },
+            "nats_queue": {
+              "description": "Queue group shared by analytics replicas. Default analytics-subscribers.",
+              "type": "string"
+            },
+            "nats_subject": {
+              "description": "Subject edges publish events on. Default analytics.events.",
+              "type": "string"
+            },
+            "read_timeout": {
+              "description": "Default 10s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "shutdown_timeout": {
+              "description": "Default 5s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "write_timeout": {
+              "description": "Default 10s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "edge": {
+          "additionalProperties": false,
+          "description": "Edge tuning.",
+          "properties": {
+            "analytics_buffer_size": {
+              "description": "Events buffered before dropping. Default 1000.",
+              "type": "integer"
+            },
+            "analytics_publish_timeout": {
+              "description": "Default 2s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "cache_max_object_bytes": {
+              "description": "Largest cacheable response. Default 1048576.",
+              "type": "integer"
+            },
+            "hub_timeout": {
+              "description": "Timeout for hub API calls. Default 5s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "idle_timeout": {
+              "description": "Client keep-alive timeout. Default 60s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "lease_low_water_pct": {
+              "description": "Renew a lease when this percentage is left. Default 20.",
+              "type": "number"
+            },
+            "lease_size": {
+              "description": "Default tokens per lease. Default 100.",
+              "type": "integer"
+            },
+            "read_timeout": {
+              "description": "Client read timeout. Default 15s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "upstream_idle_conn_timeout": {
+              "description": "Default 90s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "upstream_max_idle_conns": {
+              "description": "Idle keep-alive connections per upstream. Default 100.",
+              "type": "integer"
+            },
+            "upstream_timeout": {
+              "description": "Overall upstream request timeout. Default 30s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "write_timeout": {
+              "description": "Client write timeout. Default 15s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "hub": {
+          "additionalProperties": false,
+          "description": "Hub tuning.",
+          "properties": {
+            "api_key_pattern": {
+              "description": "Regular expression every API key must match. Default ^[A-Za-z0-9]{3,128}$.",
+              "type": "string"
+            },
+            "cors_headers": {
+              "description": "Headers allowed on cross-origin hub API calls.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cors_max_age": {
+              "description": "Preflight cache time for the hub API. Default 5m.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "cors_methods": {
+              "description": "Methods allowed on cross-origin hub API calls.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "queue_retries": {
+              "description": "Publish retries per tier update. Default 1.",
+              "type": "integer"
+            },
+            "queue_retry_backoff": {
+              "description": "Pause between publish retries. Default 10ms.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "queue_submit_timeout": {
+              "description": "Wait for queue space before dropping an update. Default 25ms.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "queue_workers": {
+              "description": "Workers publishing tier updates. Default 2.",
+              "type": "integer"
+            },
+            "read_timeout": {
+              "description": "HTTP read timeout. Default 5s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "shutdown_timeout": {
+              "description": "Graceful shutdown limit. Default 15s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            },
+            "tier_updates_subject": {
+              "description": "NATS subject for tier changes. Default tier.updates.",
+              "type": "string"
+            },
+            "write_timeout": {
+              "description": "HTTP write timeout. Default 10s.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "services": {
+      "description": "Upstream services exposed through the gateway.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "analytics": {
+            "additionalProperties": false,
+            "description": "Request event capture. Default: every request.",
+            "properties": {
+              "enabled": {
+                "description": "Capture events for this service. Default true.",
+                "type": "boolean"
+              },
+              "sample_rate": {
+                "description": "Fraction of requests captured, 0 to 1. Default 1.",
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "cache": {
+            "additionalProperties": false,
+            "description": "Response caching for GET requests.",
+            "properties": {
+              "key": {
+                "description": "Cache key template from {method} {path} {query} {key} {encoding}. Default {method}:{path}:{query}:{key}.",
+                "type": "string"
+              },
+              "ttl": {
+                "description": "How long a response is served from cache.",
+                "examples": [
+                  "500ms",
+                  "30s",
+                  "5m",
+                  "1h"
+                ],
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "ttl"
+            ],
+            "type": "object"
+          },
+          "cors": {
+            "additionalProperties": false,
+            "description": "Cross-origin resource sharing.",
+            "properties": {
+              "headers": {
+                "description": "Allowed request headers. Default Authorization, Content-Type, X-API-Key.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "max_age": {
+                "description": "How long browsers may cache a preflight. Default 5m.",
+                "examples": [
+                  "500ms",
+                  "30s",
+                  "5m",
+                  "1h"
+                ],
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                "type": "string"
+              },
+              "methods": {
+                "description": "Allowed methods. Default GET, POST, PUT, DELETE, OPTIONS.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "origins": {
+                "description": "Allowed origins, or [\"*\"].",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "origins"
+            ],
+            "type": "object"
+          },
+          "headers": {
+            "additionalProperties": false,
+            "description": "Header changes on the way to the upstream and back.",
+            "properties": {
+              "add": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Headers set on requests to the upstream.",
+                "type": "object"
+              },
+              "hide": {
+                "description": "Headers removed from requests and responses.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "limits": {
+            "additionalProperties": false,
+            "description": "API keys, tiers and rate limits. Every request must carry a key with a tier.",
+            "properties": {
+              "default_tier": {
+                "description": "Tier used for a key whose tier cannot be looked up while the hub is unreachable (after any cached tier).",
+                "type": "string"
+              },
+              "lease_size": {
+                "description": "Tokens an edge takes from the hub per lease. Default runtime.edge.lease_size.",
+                "type": "integer"
+              },
+              "tiers": {
+                "additionalProperties": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cost": {
+                      "additionalProperties": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "description": "Cost per request by method (GET, POST, PUT, DELETE, or * for others). Default 1.",
+                      "type": "object"
+                    },
+                    "requests": {
+                      "description": "Request budget per window (in cost units).",
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "requests"
+                  ],
+                  "type": "object"
+                },
+                "description": "Tiers by name. Each API key is assigned one tier.",
+                "type": "object"
+              },
+              "when_hub_unavailable": {
+                "additionalProperties": false,
+                "description": "Local limit applied while the hub cannot grant quota. Omit to reject with 503 instead.",
+                "properties": {
+                  "allow": {
+                    "description": "Requests each edge admits per key and window while the hub is unreachable.",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "allow"
+                ],
+                "type": "object"
+              },
+              "window": {
+                "description": "Quota window, e.g. 1m or 1h. Quotas reset when the window rolls over.",
+                "examples": [
+                  "500ms",
+                  "30s",
+                  "5m",
+                  "1h"
+                ],
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "window",
+              "tiers"
+            ],
+            "type": "object"
+          },
+          "match": {
+            "additionalProperties": false,
+            "description": "Which requests this service handles.",
+            "properties": {
+              "path_prefix": {
+                "description": "Two path segments, /\u003cgroup\u003e/\u003cservice\u003e, e.g. /v1/orders. Services sharing the first segment share a quota window.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path_prefix"
+            ],
+            "type": "object"
+          },
+          "name": {
+            "description": "Unique service name, used in analytics and errors.",
+            "type": "string"
+          },
+          "on_upstream_error": {
+            "additionalProperties": false,
+            "description": "Response when the upstream fails after retries. Default: 503.",
+            "properties": {
+              "body": {
+                "description": "Fallback body.",
+                "type": "string"
+              },
+              "headers": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Fallback headers.",
+                "type": "object"
+              },
+              "mode": {
+                "description": "fail-closed (503) or fail-open (serve the fallback below).",
+                "enum": [
+                  "fail-closed",
+                  "fail-open"
+                ],
+                "type": "string"
+              },
+              "status": {
+                "description": "Fallback status code. Default 503.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          "retries": {
+            "additionalProperties": false,
+            "description": "Retry policy for failed upstream attempts.",
+            "properties": {
+              "attempts": {
+                "description": "Total attempts including the first (1 = no retry).",
+                "type": "integer"
+              },
+              "backoff": {
+                "description": "Pause between attempts. Default 50ms.",
+                "examples": [
+                  "500ms",
+                  "30s",
+                  "5m",
+                  "1h"
+                ],
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                "type": "string"
+              },
+              "non_idempotent": {
+                "description": "Also retry POST and PATCH. Default false.",
+                "type": "boolean"
+              },
+              "per_attempt_timeout": {
+                "description": "Timeout for each attempt. Default: the overall upstream timeout.",
+                "examples": [
+                  "500ms",
+                  "30s",
+                  "5m",
+                  "1h"
+                ],
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                "type": "string"
+              },
+              "statuses": {
+                "description": "Upstream status codes that trigger a retry, e.g. [502, 503]. Connection errors always do.",
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "attempts"
+            ],
+            "type": "object"
+          },
+          "strip_path_prefix": {
+            "description": "Remove match.path_prefix before forwarding. Default true.",
+            "type": "boolean"
+          },
+          "upstream": {
+            "description": "Base URL of the upstream, e.g. http://orders:8080. A path here is prepended to forwarded paths.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "match",
+          "upstream",
+          "limits"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "version": {
+      "description": "Config format version. Must be 2.",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version",
+    "services"
+  ],
+  "title": "Gate gateway configuration (version 2)",
+  "type": "object"
+}

@@ -15,7 +15,7 @@ Requires Docker only; dev certificates are generated on first run
 (`deploy/gen-dev-certs.sh`). Output lands in `results/<label>/`:
 `report.md` (human summary) and one JSON file per scenario.
 
-Config: [gateway-config.loadtest.json](gateway-config.loadtest.json) — prefix
+Config: [gateway-config.loadtest.yaml](gateway-config.loadtest.yaml) — prefix
 `lt`, 10 s quota window, `pro` tier Q=1000, `bulk` tier effectively unlimited,
 safety tier S=50, lease quantum 100.
 

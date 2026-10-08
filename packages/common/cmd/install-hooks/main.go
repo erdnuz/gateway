@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gateway/packages/common/types"
+	"gateway/packages/config"
 	"gateway/packages/hub"
 )
 
@@ -195,8 +194,8 @@ func resolveGatewayConfigPath(provided string) (string, error) {
 
 	candidates := []string{
 		"GatewayConfig.json",
-		"deploy/gateway.json",
-		"examples/full.json",
+		"deploy/gateway.yaml",
+		"examples/full.yaml",
 	}
 	for _, rel := range candidates {
 		p := filepath.Join(repoRoot, rel)
@@ -209,22 +208,11 @@ func resolveGatewayConfigPath(provided string) (string, error) {
 }
 
 func validateGatewayConfigFile(path string) error {
-	data, err := os.ReadFile(path)
+	cfg, err := config.Load(path)
 	if err != nil {
-		return fmt.Errorf("failed to read config file %s: %w", path, err)
+		return err
 	}
-
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var cfg types.GatewayConfig
-	if err := dec.Decode(&cfg); err != nil {
-		return fmt.Errorf("schema decode failed for %s: %w", path, err)
-	}
-
-	if err := hub.ValidateGatewayConfig(&cfg); err != nil {
-		return fmt.Errorf("schema validation failed for %s: %w", path, err)
-	}
-	return nil
+	return hub.ValidateGatewayConfig(cfg)
 }
 
 func exitErr(err error) {

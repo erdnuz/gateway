@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const validConfig = "../../../testing/loadtest/gateway-config.loadtest.json"
+const validConfig = "../../../testing/loadtest/gateway-config.loadtest.yaml"
 
 func TestValidate_ReportsEveryMissingSetting(t *testing.T) {
 	err := Config{GRPCAddr: ":9090"}.Validate()

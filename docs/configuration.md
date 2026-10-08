@@ -65,27 +65,72 @@ variables (`gate dev` needs none). Defaults are shown in parentheses.
 | `NATS_ANALYTICS_SUBJECT`, `NATS_ANALYTICS_QUEUE` | from runtime policy | |
 | `ANALYTICS_API_TOKEN` | none | protects the query API |
 
-## Gateway Policy JSON
+## Gateway config file
 
-Examples: [examples/minimal.json](../examples/minimal.json), [examples/full.json](../examples/full.json); the compose stack uses [deploy/gateway.json](../deploy/gateway.json). Check a file with `gate config validate <file>`.
+The gateway config is a YAML (or JSON) file, format version 2. The hub loads
+it from `CONFIG_FILE_PATH` and serves the compiled result to edges.
 
-Key per-service sections:
+```yaml
+version: 2
+services:
+  - name: orders
+    match: { path_prefix: /v1/orders }
+    upstream: http://orders:8080
+    limits:
+      window: 1m
+      tiers:
+        free: { requests: 60 }
+        pro:  { requests: 6000, cost: { POST: 2 } }
+      when_hub_unavailable: { allow: 10 }
+    cache: { ttl: 15s }
+```
 
-- tiers
-- analytics
-- cache
-- cors
-- failure
-- transform
+- **Examples:** [basic.yaml](../examples/basic.yaml), [multi-service.yaml](../examples/multi-service.yaml), and [full.yaml](../examples/full.yaml), which shows every option with its default.
+- **Durations** are strings with units: `500ms`, `30s`, `5m`, `1h`.
+- **Defaults:** every field under `runtime:` is optional, as is everything in a service beyond `name`, `match`, `upstream` and `limits`.
+- **Editor support:** [schema/gate.schema.json](../schema/gate.schema.json) is a JSON Schema generated from the Go types. Files that start with `# yaml-language-server: $schema=...` get completion and inline docs in VS Code (YAML extension) and JetBrains IDEs.
+- **Current routing constraint:** `match.path_prefix` is `/<group>/<name>`. Services in the same group share one quota window and lease size, and an API key's tier is assigned per group.
 
-Failure policy supports hub and upstream sub-policies, including fallback and retry behavior.
+### Commands
+
+```bash
+gate config validate gateway.yaml   # every problem, with line numbers
+gate config migrate old.json        # version 1 JSON -> version 2 YAML on stdout
+gate config schema                  # print the JSON Schema
+```
+
+`validate` reports all problems in one pass:
+
+```text
+gate: gateway.yaml: 3 problem(s)
+    line 5: services[0].upstrem: unknown field "upstrem" (did you mean "upstream"?)
+    line 7: duration 60 has no unit; write e.g. "60s" or "60ms"
+    line 8: services[0].limits.default_tier: "gold" is not one of the tiers (free)
+```
+
+### Migrating from version 1
+
+Version 1 files (JSON with `prefixes` and nanosecond durations) are rejected
+with a pointer to `gate config migrate`. Migration keeps only values that
+differ from defaults. Mapping notes:
+
+| Version 1 | Version 2 |
+| --- | --- |
+| `prefixes[].prefix` + `services[].service_id` | `match.path_prefix: /<prefix>/<service_id>`, `name` |
+| `quota_period`, `leasing.lease_quantum` | `limits.window`, `limits.lease_size` |
+| `tiers[]` with `quota`, `*_cost` | `limits.tiers.<id>.requests`, `cost` (only non-1 costs) |
+| `safety_tier` + `failure.hub.allow_on_rate_service_error` | `limits.when_hub_unavailable.allow` |
+| `failure.hub.default_tier` | `limits.default_tier` |
+| `transform` | `strip_path_prefix`, `headers` |
+| `failure.upstream` | `retries`, `on_upstream_error` |
+| cache key `$method:$path` | `{method}:{path}` |
 
 ## Runtime Config Reload
 
 Hub supports runtime reload in two forms:
 
 - File reload: `POST /config-reload` with empty body loads from `CONFIG_FILE_PATH`.
-- Payload reload: `POST /config-reload` with `GatewayConfig` JSON body.
+- Payload reload: `POST /config-reload` with a version 2 config document (YAML or JSON) as the body.
 
 Dry-run endpoint (no apply):
 
@@ -123,7 +168,7 @@ Current lease/rate behavior:
 
 ## Recommended Practices
 
-- Keep secrets in environment files or secret managers, not committed JSON.
+- Keep secrets in environment variables or a secret manager, not in the config file.
 - Keep config validation enabled and fail fast on invalid policy.
 - Use distinct EDGE_ID values for each edge instance.
 - Use `POST /config-reload/dry-run` before apply in production workflows.

@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=../schema/gate.schema.json
+# Every option, with its default where one exists. Most configs need only
+# name, match, upstream and limits (see basic.yaml).
+version: 2
+services:
+  - name: orders                         # lowercase letters, digits, dashes
+    match:
+      path_prefix: /v1/orders            # /<group>/<name>; groups share a quota window
+    upstream: https://orders.internal:8443/api   # a path here prefixes forwarded paths
+    strip_path_prefix: true              # forward /v1/orders/42 as /api/42
+    headers:
+      add: { X-Gateway: gate }           # sent to the upstream
+      hide: [X-Internal-Trace]           # removed from requests and responses
+
+    limits:
+      window: 1m                         # quotas reset every window
+      lease_size: 100                    # tokens an edge takes per lease (runtime.edge.lease_size)
+      default_tier: free                 # for keys whose tier is unknown while the hub is down
+      tiers:
+        free:
+          requests: 60                   # budget per window, in cost units
+          cost: { POST: 5, "*": 2 }      # per method; GET/PUT/DELETE/* default to 1
+        pro: { requests: 6000 }
+      when_hub_unavailable:
+        allow: 10                        # per edge, key and window; omit to answer 503
+
+    cache:
+      ttl: 15s
+      key: "{method}:{path}:{query}:{key}"   # tokens: {method} {path} {query} {key} {encoding}
+
+    retries:
+      attempts: 3                        # total attempts, including the first
+      statuses: [502, 503, 504]          # connection errors always retry
+      backoff: 100ms
+      per_attempt_timeout: 2s
+      non_idempotent: false              # also retry POST/PATCH
+
+    cors:
+      origins: [https://app.example.com] # or ["*"]
+      methods: [GET, POST, PUT, DELETE, OPTIONS]
+      headers: [Authorization, Content-Type, X-API-Key]
+      max_age: 5m
+
+    analytics:
+      enabled: true
+      sample_rate: 1                     # 0..1
+
+    on_upstream_error:
+      mode: fail-open                    # fail-closed (default): 503
+      status: 200
+      body: '{"orders": [], "degraded": true}'
+      headers: { Content-Type: application/json }
+
+runtime:                                 # all optional
+  hub:
+    api_key_pattern: "^[A-Za-z0-9]{3,128}$"
+  edge:
+    lease_size: 100
+    lease_low_water_pct: 20              # renew when 20% of a lease is left
+    upstream_timeout: 30s
+    cache_max_object_bytes: 1048576
+  analytics:
+    nats_subject: analytics.events

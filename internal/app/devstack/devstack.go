@@ -33,7 +33,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 )
 
-//go:embed default-config.json
+//go:embed default-config.yaml
 var defaultConfig []byte
 
 // Options configures a dev stack. Zero values pick the defaults shown by
@@ -204,7 +204,7 @@ func resolveConfig(path string) (string, func(), error) {
 	if err != nil {
 		return "", nil, err
 	}
-	p := filepath.Join(dir, "gateway.json")
+	p := filepath.Join(dir, "gateway.yaml")
 	if err := os.WriteFile(p, defaultConfig, 0o600); err != nil {
 		os.RemoveAll(dir)
 		return "", nil, err

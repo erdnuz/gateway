@@ -1,16 +1,15 @@
 package hub
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
-	"reflect"
 	"strings"
 	"sync/atomic"
 
 	"gateway/packages/common/types"
+	"gateway/packages/config"
 )
 
 type ConfigManager struct {
@@ -18,7 +17,7 @@ type ConfigManager struct {
 	active   atomic.Pointer[types.GatewayConfig]
 }
 
-// NewConfigManager initializes the L1 cache from a JSON file.
+// NewConfigManager loads a gateway config file (version 2, YAML or JSON).
 func NewConfigManager(filePath string) (*ConfigManager, error) {
 	cm := &ConfigManager{filePath: filePath}
 	if err := cm.ReloadFromFile(); err != nil {
@@ -49,42 +48,33 @@ func (cm *ConfigManager) LoadFromFile() (*types.GatewayConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file %s: %w", cm.filePath, err)
 	}
-	cfg, err := decodeAndValidateConfig(data)
-	if err != nil {
-		return nil, fmt.Errorf("invalid gateway config %s: %w", cm.filePath, err)
-	}
-	return cfg, nil
+	return decodeAndValidateConfig(data, cm.filePath)
 }
 
 func (cm *ConfigManager) ReloadFromPayload(cfg *types.GatewayConfig) error {
 	if cfg == nil {
 		return fmt.Errorf("config payload is nil")
 	}
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to encode config payload: %w", err)
-	}
-	parsed, err := decodeAndValidateConfig(b)
-	if err != nil {
+	next := *cfg
+	next.Runtime = next.Runtime.Effective()
+	if err := ValidateGatewayConfig(&next); err != nil {
 		return fmt.Errorf("invalid gateway config payload: %w", err)
 	}
-	cm.active.Store(parsed)
+	cm.active.Store(&next)
 	return nil
 }
 
-func decodeAndValidateConfig(data []byte) (*types.GatewayConfig, error) {
-	var cfg types.GatewayConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode config: %w", err)
-	}
-	if err := validateRuntimePolicyProvided(cfg.Runtime); err != nil {
+// decodeAndValidateConfig parses a version 2 config document (file or
+// /config-reload payload) and checks the compiled runtime model.
+func decodeAndValidateConfig(data []byte, name string) (*types.GatewayConfig, error) {
+	cfg, err := config.ParseAndCompile(data, name)
+	if err != nil {
 		return nil, err
 	}
-	cfg.Runtime = cfg.Runtime.Effective()
-	if err := ValidateGatewayConfig(&cfg); err != nil {
+	if err := ValidateGatewayConfig(cfg); err != nil {
 		return nil, err
 	}
-	return &cfg, nil
+	return cfg, nil
 }
 
 // ValidateGatewayConfig performs structural and semantic validation before the
@@ -95,9 +85,6 @@ func ValidateGatewayConfig(cfg *types.GatewayConfig) error {
 	}
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("config validation failed: %w", err)
-	}
-	if err := validateEffectiveRuntime(cfg); err != nil {
-		return err
 	}
 	if len(cfg.Prefixes) == 0 {
 		return fmt.Errorf("config must include at least one prefix")
@@ -203,83 +190,6 @@ func ValidateGatewayConfig(cfg *types.GatewayConfig) error {
 		}
 	}
 
-	return nil
-}
-
-func validateRuntimePolicyProvided(runtime types.RuntimePolicy) error {
-	return requireNonZeroStructFields("runtime", reflect.ValueOf(runtime))
-}
-
-func validateEffectiveRuntime(cfg *types.GatewayConfig) error {
-	if cfg == nil {
-		return fmt.Errorf("config is nil")
-	}
-	if err := requireNonZeroStructFields("runtime", reflect.ValueOf(cfg.Runtime)); err != nil {
-		return fmt.Errorf("config runtime validation failed: %w", err)
-	}
-	return nil
-}
-
-func requireNonZeroStructFields(path string, v reflect.Value) error {
-	if v.Kind() == reflect.Pointer {
-		if v.IsNil() {
-			return fmt.Errorf("%s is required", path)
-		}
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return nil
-	}
-	t := v.Type()
-	for i := 0; i < v.NumField(); i++ {
-		f := v.Field(i)
-		ft := t.Field(i)
-		if !ft.IsExported() {
-			continue
-		}
-		tag := ft.Tag.Get("json")
-		name := strings.Split(tag, ",")[0]
-		if name == "" || name == "-" {
-			name = strings.ToLower(ft.Name)
-		}
-		next := path + "." + name
-
-		if f.Kind() == reflect.Pointer {
-			if f.IsNil() {
-				return fmt.Errorf("%s is required", next)
-			}
-			f = f.Elem()
-		}
-
-		switch f.Kind() {
-		case reflect.Struct:
-			if err := requireNonZeroStructFields(next, f); err != nil {
-				return err
-			}
-		case reflect.String:
-			if strings.TrimSpace(f.String()) == "" {
-				return fmt.Errorf("%s is required", next)
-			}
-		case reflect.Slice, reflect.Array, reflect.Map:
-			if f.Len() == 0 {
-				return fmt.Errorf("%s is required", next)
-			}
-		case reflect.Bool:
-			// false can be a valid explicit value
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			if f.Int() == 0 {
-				return fmt.Errorf("%s is required", next)
-			}
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			if f.Uint() == 0 {
-				return fmt.Errorf("%s is required", next)
-			}
-		case reflect.Float32, reflect.Float64:
-			if f.Float() == 0 {
-				return fmt.Errorf("%s is required", next)
-			}
-		}
-	}
 	return nil
 }
 

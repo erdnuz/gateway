@@ -3,34 +3,25 @@
 package integration
 
 import (
-	"encoding/json"
 	"gateway/packages/common/types"
+	"gateway/packages/config"
 	"os"
 	"path/filepath"
 	"time"
 )
 
+// writeConfigFile stores cfg as a version 2 config file, so the hub and edges
+// load it through the same path as production configs.
 func writeConfigFile(path string, cfg *types.GatewayConfig) error {
-	f, err := os.Create(path)
+	out, err := config.Marshal(config.FromInternal(cfg))
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	return enc.Encode(cfg)
+	return os.WriteFile(path, out, 0o600)
 }
 
 func readConfigFile(path string) (*types.GatewayConfig, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var cfg types.GatewayConfig
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return config.Load(path)
 }
 
 func writeTestConfig(dir, upstreamURL string) (string, *types.GatewayConfig, error) {
@@ -73,7 +64,7 @@ func writeTestConfig(dir, upstreamURL string) (string, *types.GatewayConfig, err
 	if err := cfg.Validate(); err != nil {
 		return "", nil, err
 	}
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(dir, "gateway.yaml")
 	if err := writeConfigFile(path, cfg); err != nil {
 		return "", nil, err
 	}

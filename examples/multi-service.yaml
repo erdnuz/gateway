@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=../schema/gate.schema.json
+# Two services under /v1 sharing one quota window, plus an internal API under
+# /admin. Writes cost more than reads on the public API.
+version: 2
+services:
+  - name: catalog
+    match: { path_prefix: /v1/catalog }
+    upstream: http://catalog:8080
+    limits:
+      window: 1m
+      default_tier: free
+      tiers:
+        free: { requests: 100, cost: { POST: 5, PUT: 5, DELETE: 5 } }
+        pro:  { requests: 10000, cost: { POST: 2 } }
+      when_hub_unavailable: { allow: 20 }
+    cache: { ttl: 30s, key: "{method}:{path}:{query}" }   # shared across keys
+
+  - name: checkout
+    match: { path_prefix: /v1/checkout }
+    upstream: http://checkout:8080
+    limits:
+      window: 1m
+      tiers:
+        free: { requests: 10 }
+        pro:  { requests: 500 }
+    retries: { attempts: 3, statuses: [502, 503, 504], backoff: 200ms }
+
+  - name: reports
+    match: { path_prefix: /admin/reports }
+    upstream: http://reports:8080/internal
+    limits:
+      window: 1h
+      tiers:
+        staff: { requests: 1000 }

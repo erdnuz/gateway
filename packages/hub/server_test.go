@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"gateway/packages/common/types"
+	"gateway/packages/config"
 	"gateway/packages/common/workers"
 	"gateway/packages/edge"
 	testutils "gateway/testing"
@@ -354,7 +355,7 @@ func TestHandleConfigReloadDryRun_WithPayload(t *testing.T) {
 	next.Runtime = types.DefaultRuntimePolicy()
 	next.Prefixes[0].Services[0].Transform.StripPrefix = !next.Prefixes[0].Services[0].Transform.StripPrefix
 
-	payload, err := json.Marshal(next)
+	payload, err := config.Marshal(config.FromInternal(next)) // reload payloads are v2 documents
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
@@ -403,7 +404,7 @@ func TestHandleConfigReload_WithPayloadAppliesConfig(t *testing.T) {
 	next.Runtime = types.DefaultRuntimePolicy()
 	next.Prefixes[0].Services[0].TargetURL = "http://127.0.0.1:9999"
 
-	payload, err := json.Marshal(next)
+	payload, err := config.Marshal(config.FromInternal(next)) // reload payloads are v2 documents
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}

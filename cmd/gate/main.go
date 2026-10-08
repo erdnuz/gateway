@@ -3,7 +3,7 @@
 //	gate dev                 whole gateway in one process, no external services
 //	gate hub|edge|analytics  run one component (configured by environment)
 //	gate echo                demo upstream that echoes requests
-//	gate config validate F   check a gateway config file
+//	gate config ...          validate, migrate or describe config files
 package main
 
 import (
@@ -22,6 +22,7 @@ import (
 	"gateway/internal/app/devstack"
 	"gateway/internal/app/edgeapp"
 	"gateway/internal/app/hubapp"
+	"gateway/packages/config"
 	"gateway/packages/hub"
 )
 
@@ -39,7 +40,7 @@ Commands:
   edge                run the gateway data plane   (configured by EDGE_*, HUB_*, REDIS_ADDR, NATS_* env)
   analytics           run analytics + dashboard    (configured by CLICKHOUSE_DSN, HUB_ADDR, NATS_* env)
   echo                run a demo upstream that echoes each request as JSON
-  config validate F   validate gateway config file F
+  config ...          validate, migrate (v1 to v2) or print the schema of config files
   version             print the version
 
 Run "gate <command> -h" for command flags.
@@ -146,18 +147,55 @@ func runEcho(ctx context.Context, args []string) error {
 	return nil
 }
 
+const configUsage = `usage:
+  gate config validate <file>   check a config file and list every problem
+  gate config migrate <file>    convert a version 1 JSON config to version 2 YAML (stdout)
+  gate config schema            print the JSON Schema for config files`
+
 func runConfig(args []string) error {
-	if len(args) == 0 || args[0] != "validate" {
-		return errors.New(`usage: gate config validate <file>`)
+	if len(args) == 0 {
+		return errors.New(configUsage)
 	}
-	if len(args) != 2 {
-		return errors.New(`usage: gate config validate <file>`)
+	switch {
+	case args[0] == "validate" && len(args) == 2:
+		cfg, err := config.Load(args[1])
+		if err != nil {
+			return err
+		}
+		if err := hub.ValidateGatewayConfig(cfg); err != nil {
+			return fmt.Errorf("%s: %w", args[1], err)
+		}
+		n := 0
+		for _, p := range cfg.Prefixes {
+			n += len(p.Services)
+		}
+		fmt.Printf("%s is valid (%d services)\n", args[1], n)
+		return nil
+	case args[0] == "migrate" && len(args) == 2:
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			return err
+		}
+		f, migrateErr := config.MigrateV1(data)
+		if f == nil {
+			return migrateErr
+		}
+		out, err := config.Marshal(f)
+		if err != nil {
+			return err
+		}
+		os.Stdout.Write(out)
+		return migrateErr
+	case args[0] == "schema" && len(args) == 1:
+		out, err := config.JSONSchema()
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(out))
+		return nil
+	default:
+		return errors.New(configUsage)
 	}
-	if _, err := hub.NewConfigManager(args[1]); err != nil {
-		return fmt.Errorf("%s is invalid:\n%w", args[1], err)
-	}
-	fmt.Printf("%s is valid\n", args[1])
-	return nil
 }
 
 func ignoreHelp(err error) error {

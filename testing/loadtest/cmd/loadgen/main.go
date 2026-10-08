@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gateway/packages/config"
 )
 
 type options struct {
@@ -72,7 +74,7 @@ func main() {
 	flag.Int64Var(&o.quota, "quota", 1000, "pro tier quota per period")
 	flag.Int64Var(&o.safety, "safety", 50, "safety tier quota per period")
 	flag.Int64Var(&o.lease, "lease", 100, "lease quantum")
-	flag.StringVar(&o.configPath, "config", "/lt/gateway-config.loadtest.json", "gateway config used by the hub")
+	flag.StringVar(&o.configPath, "config", "/lt/gateway-config.loadtest.yaml", "gateway config used by the hub")
 	flag.StringVar(&o.outDir, "out", "/results/run", "output directory")
 	flag.DurationVar(&o.duration, "duration", 10*time.Second, "duration per throughput level")
 	flag.StringVar(&scenario, "scenario", "", "scenario to run")
@@ -151,12 +153,16 @@ func do(ctx context.Context, url, apiKey string) (int, time.Duration) {
 
 func (o options) hubCall(method, path string, body any) (int, error) {
 	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	switch b := body.(type) {
+	case nil:
+	case []byte: // already encoded (e.g. a YAML config document)
+		rdr = bytes.NewReader(b)
+	default:
+		enc, err := json.Marshal(b)
 		if err != nil {
 			return 0, err
 		}
-		rdr = bytes.NewReader(b)
+		rdr = bytes.NewReader(enc)
 	}
 	req, err := http.NewRequest(method, o.hub+path, rdr)
 	if err != nil {
@@ -489,19 +495,19 @@ func scenarioPropagation(o options) *report {
 	if err != nil {
 		log.Fatalf("read config: %v", err)
 	}
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	cfg, err := config.Parse(raw, o.configPath)
+	if err != nil {
 		log.Fatalf("parse config: %v", err)
 	}
-	pfx := cfg["prefixes"].([]any)[0].(map[string]any)
-	svcs := pfx["services"].([]any)
-	clone := map[string]any{}
-	for k, v := range svcs[0].(map[string]any) {
-		clone[k] = v
+	svc3 := cfg.Services[0]
+	svc3.Name = "svc3"
+	svc3.Match.PathPrefix = "/" + o.prefix + "/svc3"
+	cfg.Services = append(cfg.Services, svc3)
+	payload, err := config.Marshal(cfg)
+	if err != nil {
+		log.Fatalf("marshal config: %v", err)
 	}
-	clone["service_id"] = "svc3"
-	pfx["services"] = append(svcs, clone)
-	code, err := o.hubCall(http.MethodPost, "/config-reload", cfg)
+	code, err := o.hubCall(http.MethodPost, "/config-reload", payload)
 	r.Data["reload_status"] = code
 	if err != nil || code/100 != 2 {
 		log.Printf("config reload failed: code=%d err=%v", code, err)

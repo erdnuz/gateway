@@ -75,8 +75,30 @@ gate hub                 control plane          (configured by environment)
 gate edge                gateway data plane     (configured by environment)
 gate analytics           analytics + dashboard  (configured by environment)
 gate echo                demo upstream that echoes each request as JSON
-gate config validate F   check a gateway config file
+gate config validate F   check a config file and list every problem with its line
+gate config migrate F    convert a version 1 JSON config to version 2 YAML
+gate config schema       print the JSON Schema used for editor completion
 ```
+
+## Configuration
+
+A gateway config is a short YAML file. Durations are written like `1m`, and
+everything not shown here has a working default:
+
+```yaml
+version: 2
+services:
+  - name: orders
+    match: { path_prefix: /v1/orders }
+    upstream: http://orders:8080
+    limits:
+      window: 1m
+      tiers:
+        free: { requests: 60 }
+        pro:  { requests: 6000 }
+```
+
+See [examples/](examples) and [docs/configuration.md](docs/configuration.md).
 
 ## How rate limiting works
 
@@ -113,10 +135,11 @@ otherwise.
 | `cmd/gate` | the single binary |
 | `internal/app` | per-component wiring (`hubapp`, `edgeapp`, `analyticsapp`) and the in-process dev stack |
 | `packages/edge`, `packages/hub`, `packages/analytics` | component logic |
-| `packages/common` | shared types, config helpers, readiness |
+| `packages/config` | config file format: parsing, validation, migration, JSON Schema |
+| `packages/common` | shared runtime types, env helpers, readiness |
 | `api/proto` | hub ↔ edge lease protocol |
 | `deploy` | Dockerfile, compose stack, dev certificate generator |
-| `examples` | gateway config examples |
+| `examples`, `schema` | gateway config examples and their JSON Schema |
 | `testing` | integration scenarios and the load-test harness |
 
 ## Documentation

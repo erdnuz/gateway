@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=../../schema/gate.schema.json
+# Load-test config: two services under /lt with a 10s window, so several
+# windows fit in one scenario. Unknown keys are rejected (no default tier).
+version: 2
+services:
+  - &svc
+    name: svc
+    match: { path_prefix: /lt/svc }
+    upstream: http://upstream:9000
+    limits:
+      window: 10s
+      lease_size: 100
+      tiers:
+        pro:  { requests: 1000 }
+        bulk: { requests: 100000000 }
+      when_hub_unavailable: { allow: 50 }
+    analytics: { enabled: false }
+  - <<: *svc
+    name: svc2
+    match: { path_prefix: /lt/svc2 }
+runtime:
+  edge:
+    upstream_max_idle_conns: 512

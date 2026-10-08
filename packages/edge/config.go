@@ -4,16 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"gateway/packages/common/types"
+	"gateway/packages/config"
 
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
@@ -111,21 +110,9 @@ func NewConfigManagerWithFallback(hubAddr, authToken string, client *http.Client
 	return cm, nil
 }
 
+// loadConfigFromFile reads a bootstrap gateway config (version 2).
 func loadConfigFromFile(path string) (*types.GatewayConfig, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	bytes, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-	var cfg types.GatewayConfig
-	if err := json.Unmarshal(bytes, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return config.Load(path)
 }
 
 // Get returns the immutable GatewayConfig.

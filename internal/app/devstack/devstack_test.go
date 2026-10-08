@@ -19,7 +19,7 @@ import (
 func startStack(t *testing.T, upstream string, analytics bool) Endpoints {
 	t.Helper()
 	cfg := strings.Replace(string(defaultConfig), "http://127.0.0.1:9000", upstream, 1)
-	path := filepath.Join(t.TempDir(), "gateway.json")
+	path := filepath.Join(t.TempDir(), "gateway.yaml")
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=../schema/gate.schema.json
+# One upstream with two tiers. Requests go to /v1/orders/... with an X-API-Key.
+version: 2
+services:
+  - name: orders
+    match: { path_prefix: /v1/orders }
+    upstream: http://orders:8080
+    limits:
+      window: 1m
+      tiers:
+        free: { requests: 60 }
+        pro:  { requests: 6000 }

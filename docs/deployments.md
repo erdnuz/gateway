@@ -32,7 +32,7 @@ handled per request by the failure policy, and an analytics outage never
 blocks traffic.
 
 To run the stack with your own gateway config, set
-`GATE_CONFIG=/path/to/gateway.json` before `make up`. Change the hub token
+`GATE_CONFIG=/path/to/gateway.yaml` before `make up`. Change the hub token
 with `GATE_HUB_TOKEN`.
 
 ## Certificates

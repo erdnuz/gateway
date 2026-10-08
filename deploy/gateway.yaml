@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=../schema/gate.schema.json
+# Config for the compose stack (deploy/compose.yaml): one service in front of the echo upstream.
+version: 2
+services:
+  - name: echo
+    match: { path_prefix: /v1/echo }
+    upstream: http://echo:9000
+    limits:
+      window: 1m
+      default_tier: free          # used for keys whose tier is unknown while the hub is down
+      tiers:
+        free: { requests: 20 }
+        pro:  { requests: 1000 }
+      when_hub_unavailable: { allow: 10 }
+    cache: { ttl: 2s }

@@ -58,13 +58,13 @@ services:
       <<: *common-env
       PORT: "8080"
       HUB_GRPC_PORT: "9090"
-      CONFIG_FILE_PATH: /etc/gate/gateway.json
+      CONFIG_FILE_PATH: /etc/gate/gateway.yaml
       REDIS_ADDR: redis:6379
       HUB_TLS_CERT_FILE: /certs/hub/tls.crt
       HUB_TLS_KEY_FILE: /certs/hub/tls.key
       HUB_TLS_CA_FILE: /certs/ca/ca.crt
     volumes:
-      - ${GATE_CONFIG:-./gateway.json}:/etc/gate/gateway.json:ro
+      - ${GATE_CONFIG:-./gateway.yaml}:/etc/gate/gateway.yaml:ro
       - certs:/certs:ro
     ports: ["8081:8080"]
     depends_on:
