@@ -195,8 +195,8 @@ func resolveGatewayConfigPath(provided string) (string, error) {
 
 	candidates := []string{
 		"GatewayConfig.json",
-		"deployments/hub.gateway-config.json",
-		"cmd/config.json",
+		"deploy/gateway.json",
+		"examples/full.json",
 	}
 	for _, rel := range candidates {
 		p := filepath.Join(repoRoot, rel)

@@ -64,7 +64,7 @@ Configuration is split across environment variables and gateway policy JSON.
 
 ## Gateway Policy JSON
 
-Main file in this repo: cmd/config.json
+Examples: [examples/minimal.json](../examples/minimal.json), [examples/full.json](../examples/full.json); the compose stack uses [deploy/gateway.json](../deploy/gateway.json). Check a file with `gate config validate <file>`.
 
 Key per-service sections:
 

@@ -4,7 +4,7 @@ Analytics provides event ingestion, query APIs, and the embedded dashboard.
 
 ## Main Entry
 
-- cmd/analytics/main.go
+- internal/app/analyticsapp (wiring; run with `gate analytics`)
 
 ## Responsibilities
 

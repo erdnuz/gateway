@@ -4,7 +4,7 @@ Hub is the control-plane authority.
 
 ## Main Entry
 
-- cmd/hub/main.go
+- internal/app/hubapp (wiring; run with `gate hub`)
 
 ## Responsibilities
 

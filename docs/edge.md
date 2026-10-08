@@ -4,7 +4,7 @@ Edge is the request path gateway.
 
 ## Main Entry
 
-- cmd/edge/main.go
+- internal/app/edgeapp (wiring; run with `gate edge`)
 
 ## Responsibilities
 

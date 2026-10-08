@@ -3,7 +3,7 @@
 End-to-end correctness and performance checks for edge rate limiting, run
 against a production-shaped stack: hub + hub Redis, NATS, two edges that each
 own a private Redis, and a minimal upstream
-([docker-compose.loadtest.yaml](../../deployments/docker-compose.loadtest.yaml)).
+([compose.yaml](compose.yaml)).
 
 ```bash
 testing/loadtest/run.sh <label>          # e.g. baseline, after
@@ -12,7 +12,7 @@ LT_EDGE_LEASE_STORE=redis testing/loadtest/run.sh redis-store
 ```
 
 Requires Docker only; dev certificates are generated on first run
-(`deployments/gen-dev-certs.sh`). Output lands in `results/<label>/`:
+(`deploy/gen-dev-certs.sh`). Output lands in `results/<label>/`:
 `report.md` (human summary) and one JSON file per scenario.
 
 Config: [gateway-config.loadtest.json](gateway-config.loadtest.json) — prefix

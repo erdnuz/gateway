@@ -4,7 +4,7 @@
 #   testing/loadtest/run.sh [label]
 #
 # Brings up hub + 2 edges (each with its own Redis) + NATS + upstream via
-# deployments/docker-compose.loadtest.yaml, runs every loadgen scenario, and
+# testing/loadtest/compose.yaml, runs every loadgen scenario, and
 # writes testing/loadtest/results/<label>/{report.md,*.json}.
 # KEEP=1 leaves the stack running afterwards.
 # ONLY="throughput hotkey" runs a subset (setup always runs).
@@ -19,11 +19,11 @@ abs() { (cd "$1" && (pwd -W 2>/dev/null || pwd)); }
 
 CERT_DIR="${ROOT}/testing/loadtest/.certs"
 if [ ! -f "${CERT_DIR}/edge/tls.crt" ]; then
-  bash deployments/gen-dev-certs.sh "${CERT_DIR}" hub-server,localhost
+  bash deploy/gen-dev-certs.sh "${CERT_DIR}" hub-server,localhost
 fi
 export LT_CERT_DIR="$(abs "${CERT_DIR}")"
 
-COMPOSE=(docker compose -f deployments/docker-compose.loadtest.yaml)
+COMPOSE=(docker compose -f testing/loadtest/compose.yaml)
 RESULTS="${ROOT}/testing/loadtest/results/${LABEL}"
 rm -rf "${RESULTS}"
 mkdir -p "${RESULTS}"

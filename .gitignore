@@ -2,6 +2,7 @@
 *.key
 *.pem
 deployments/certs/
+deploy/certs/
 deployments/.env.*
 !deployments/.env.*.example
 

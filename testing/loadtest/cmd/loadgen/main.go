@@ -27,6 +27,7 @@ type options struct {
 	hub        string
 	hubToken   string
 	prefix     string
+	service    string // demo scenario only
 	period     time.Duration
 	quota      int64 // "pro" tier quota
 	safety     int64 // safety tier quota
@@ -66,6 +67,7 @@ func main() {
 	flag.StringVar(&o.hub, "hub", "http://hub-server:8080", "hub base URL")
 	flag.StringVar(&o.hubToken, "hub-token", os.Getenv("HUB_AUTH_TOKEN"), "hub bearer token")
 	flag.StringVar(&o.prefix, "prefix", "lt", "gateway prefix")
+	flag.StringVar(&o.service, "service", "svc", "service for the demo scenario")
 	flag.DurationVar(&o.period, "period", 10*time.Second, "quota period configured for the prefix")
 	flag.Int64Var(&o.quota, "quota", 1000, "pro tier quota per period")
 	flag.Int64Var(&o.safety, "safety", 50, "safety tier quota per period")
@@ -92,6 +94,7 @@ func main() {
 		"outage-warm":  scenarioOutageWarm,
 		"outage":       scenarioOutage,
 		"outage-check": scenarioOutageCheck,
+		"demo":         scenarioDemo,
 	}
 	fn, ok := run[scenario]
 	if !ok {
@@ -689,4 +692,74 @@ func writeReport(o options, r *report) {
 		f.Close()
 	}
 	fmt.Print(md.String())
+}
+
+// scenarioDemo seeds demo keys and then sends steady, realistic traffic until
+// killed: well-behaved pro and free keys, one free key that keeps exceeding
+// its quota, and the occasional unknown key.
+func scenarioDemo(o options) *report {
+	keys := map[string]string{
+		"demopro1": "pro", "demopro2": "pro",
+		"demofree1": "free", "demofree2": "free", "demonoisy": "free",
+	}
+	for k, t := range keys {
+		for attempt := 0; ; attempt++ {
+			err := o.setTier(k, t)
+			if err == nil {
+				break
+			}
+			if attempt%10 == 0 {
+				log.Printf("demo: waiting for hub to accept key %s: %v", k, err)
+			}
+			time.Sleep(time.Second)
+		}
+	}
+	log.Printf("demo: seeded %d keys; sending traffic to %s/%s/%s", len(keys), o.edges[0], o.prefix, o.service)
+
+	rates := map[string]time.Duration{ // interval between requests per key
+		"demopro1": 100 * time.Millisecond, "demopro2": 250 * time.Millisecond,
+		"demofree1": 4 * time.Second, "demofree2": 6 * time.Second,
+		"demonoisy":   500 * time.Millisecond, // 120/min against a 20/min quota
+		"unknownkey1": 15 * time.Second,
+	}
+	paths := []string{"orders", "users/42", "search?q=gate", "health", "items/7"}
+	var mu sync.Mutex
+	counts := map[string]map[int]int{}
+	for key, every := range rates {
+		go func(key string, every time.Duration) {
+			t := time.NewTicker(every)
+			defer t.Stop()
+			for i := 0; ; i++ {
+				<-t.C
+				url := fmt.Sprintf("%s/%s/%s/%s", o.edges[i%len(o.edges)], o.prefix, o.service, paths[i%len(paths)])
+				code, _ := do(context.Background(), url, key)
+				mu.Lock()
+				if counts[key] == nil {
+					counts[key] = map[int]int{}
+				}
+				counts[key][code]++
+				mu.Unlock()
+			}
+		}(key, every)
+	}
+	for range time.Tick(15 * time.Second) {
+		mu.Lock()
+		var b strings.Builder
+		for _, k := range sortedKeys(counts) {
+			fmt.Fprintf(&b, " %s=%v", k, counts[k])
+		}
+		counts = map[string]map[int]int{}
+		mu.Unlock()
+		log.Printf("demo: last 15s:%s", b.String())
+	}
+	return nil
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

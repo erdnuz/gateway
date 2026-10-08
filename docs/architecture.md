@@ -71,9 +71,9 @@ flowchart TD
 
 ## Code Map
 
-- cmd/edge/main.go
-- cmd/hub/main.go
-- cmd/analytics/main.go
+- cmd/gate/main.go (single binary: dev, hub, edge, analytics, echo, config)
+- internal/app/hubapp, internal/app/edgeapp, internal/app/analyticsapp (component wiring)
+- internal/app/devstack (all components in one process with embedded Redis and NATS)
 - packages/edge
 - packages/hub
 - packages/analytics

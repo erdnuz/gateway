@@ -70,8 +70,7 @@ type HubServer struct {
 	submitTimeout     time.Duration
 	retryMax          int
 	retryBackoff      time.Duration
-	tierUpdateConn    *nats.Conn
-	tierUpdateSubj    string
+	messaging         atomic.Pointer[natsMessaging] // set once NATS is reachable
 	configReloadChan  string
 	configReloadSubj  string
 	bootID            string
@@ -257,8 +256,9 @@ func (s *HubServer) SetTierUpdateMessaging(natsURL, subject string) error {
 	if err != nil {
 		return err
 	}
-	s.tierUpdateConn = nc
-	s.tierUpdateSubj = subject
+	if prev := s.messaging.Swap(&natsMessaging{conn: nc, tierSubject: subject}); prev != nil {
+		prev.conn.Close()
+	}
 	return nil
 }
 
@@ -569,8 +569,8 @@ func (s *HubServer) publishConfigReloadEvent(event types.ConfigReloadEvent) {
 		log.Printf("hub config reload event marshal failed: %v", err)
 		return
 	}
-	if s.tierUpdateConn != nil {
-		if err := s.tierUpdateConn.Publish(s.configReloadSubj, payload); err != nil {
+	if m := s.messaging.Load(); m != nil {
+		if err := m.conn.Publish(s.configReloadSubj, payload); err != nil {
 			log.Printf("hub config reload nats publish failed subject=%s err=%v", s.configReloadSubj, err)
 		}
 	} else {
@@ -688,7 +688,7 @@ func (s *HubServer) writeInternalError(w http.ResponseWriter, op string, err err
 }
 
 // authorize checks the bearer token in constant time. An empty authToken
-// disables auth; cmd/hub refuses to start without HUB_AUTH_TOKEN, so that
+// disables auth; `gate hub` refuses to start without HUB_AUTH_TOKEN, so that
 // only happens for embedded/test servers.
 func (s *HubServer) authorize(r *http.Request) bool {
 	if s.authToken == "" {
@@ -735,19 +735,30 @@ func (s *HubServer) publishTierUpdate(prefix, apiKey, tierID string) {
 	if s.asyncQueue == nil {
 		return
 	}
+	msg := s.messaging.Load()
+	if msg == nil {
+		msg = &natsMessaging{} // not connected yet: the task is a no-op
+	}
 	task := &tierUpdateTask{
 		prefix:   prefix,
 		apiKey:   apiKey,
 		tierID:   tierID,
 		retryMax: s.retryMax,
 		backoff:  s.retryBackoff,
-		conn:     s.tierUpdateConn,
-		subject:  s.tierUpdateSubj,
+		conn:     msg.conn,
+		subject:  msg.tierSubject,
 		errorCnt: &s.tierPublishErrors,
 	}
 	if err := s.asyncQueue.Submit(task, 0); err != nil {
 		log.Printf("hub tier update queue submit failed prefix=%s key=%s tier=%s err=%v", prefix, redactKey(apiKey), tierID, err)
 	}
+}
+
+// natsMessaging is replaced as a whole so request handlers never observe a
+// connection without its subject.
+type natsMessaging struct {
+	conn        *nats.Conn
+	tierSubject string
 }
 
 type tierUpdateTask struct {

@@ -1,0 +1,155 @@
+# Gate local stack. Start with `make up` (or `bash scripts/dev.sh up`).
+#
+#   default            hub + edge + echo upstream, with Redis and NATS
+#   --profile analytics  + ClickHouse and the analytics API/dashboard
+#   --profile demo       + a traffic generator that exercises every tier
+#
+# Ports: gateway :8080, hub API :8081, analytics :8091.
+name: gate
+
+x-gate: &gate
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    target: gate
+  image: gate:local
+  restart: unless-stopped
+
+x-ready: &ready
+  interval: 2s
+  timeout: 2s
+  retries: 30
+
+x-env: &common-env
+  HUB_AUTH_TOKEN: ${GATE_HUB_TOKEN:-gate-local-token}
+  NATS_URL: nats://nats:4222
+
+services:
+  # Generates a throwaway CA plus hub (server) and edge (client) certs on first
+  # start; later starts reuse the volume.
+  certs:
+    image: alpine:3.20
+    volumes:
+      - certs:/certs
+      - ./gen-dev-certs.sh:/scripts/gen-dev-certs.sh:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        [ -f /certs/edge/tls.crt ] ||
+        (apk add --no-cache -q bash openssl >/dev/null &&
+        GEN_CERTS_IN_CONTAINER=1 bash /scripts/gen-dev-certs.sh /certs hub,localhost &&
+        chmod -R a+rX /certs)
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+    volumes: [redis:/data]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], <<: *ready }
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-m", "8222"]
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"], <<: *ready }
+
+  hub:
+    <<: *gate
+    command: ["hub"]
+    environment:
+      <<: *common-env
+      PORT: "8080"
+      HUB_GRPC_PORT: "9090"
+      CONFIG_FILE_PATH: /etc/gate/gateway.json
+      REDIS_ADDR: redis:6379
+      HUB_TLS_CERT_FILE: /certs/hub/tls.crt
+      HUB_TLS_KEY_FILE: /certs/hub/tls.key
+      HUB_TLS_CA_FILE: /certs/ca/ca.crt
+    volumes:
+      - ${GATE_CONFIG:-./gateway.json}:/etc/gate/gateway.json:ro
+      - certs:/certs:ro
+    ports: ["8081:8080"]
+    depends_on:
+      certs: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"], <<: *ready }
+
+  # The edge's own Redis holds its tier and response caches.
+  edge-redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], <<: *ready }
+
+  edge:
+    <<: *gate
+    command: ["edge"]
+    environment:
+      <<: *common-env
+      PORT: "8080"
+      EDGE_ID: edge-1
+      REDIS_ADDR: edge-redis:6379
+      HUB_ADDR: http://hub:8080
+      HUB_GRPC_ADDR: hub:9090
+      HUB_GRPC_SERVER_NAME: hub
+      EDGE_TLS_CERT_FILE: /certs/edge/tls.crt
+      EDGE_TLS_KEY_FILE: /certs/edge/tls.key
+      EDGE_TLS_CA_FILE: /certs/ca/ca.crt
+    volumes: ["certs:/certs:ro"]
+    ports: ["8080:8080"]
+    depends_on:
+      hub: { condition: service_healthy }
+      edge-redis: { condition: service_healthy }
+      echo: { condition: service_started }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"], <<: *ready }
+
+  # Demo upstream: answers every request with a JSON description of it.
+  echo:
+    <<: *gate
+    command: ["echo", "-addr", ":9000", "-name", "echo"]
+
+  clickhouse:
+    profiles: ["analytics"]
+    image: clickhouse/clickhouse-server:25.3-alpine
+    environment:
+      CLICKHOUSE_DB: gate
+      CLICKHOUSE_USER: gate
+      CLICKHOUSE_PASSWORD: gate
+    volumes: [clickhouse:/var/lib/clickhouse]
+    # 127.0.0.1, not localhost: the image does not listen on ::1.
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"], start_period: 30s, <<: *ready }
+
+  analytics:
+    <<: *gate
+    profiles: ["analytics"]
+    command: ["analytics"]
+    environment:
+      <<: *common-env
+      PORT: "8091"
+      HUB_ADDR: http://hub:8080
+      CLICKHOUSE_DSN: clickhouse://gate:gate@clickhouse:9000/gate
+    ports: ["8091:8091"]
+    depends_on:
+      hub: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8091/readyz"], <<: *ready }
+
+  # Seeds demo keys, then sends steady traffic across tiers (some of it over
+  # quota, so 429s show up in analytics).
+  traffic:
+    profiles: ["demo"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: tools
+    image: gate-tools:local
+    restart: unless-stopped
+    entrypoint: ["loadgen"]
+    command: ["-scenario", "demo", "-edges", "http://edge:8080", "-hub", "http://hub:8080", "-prefix", "v1", "-service", "echo"]
+    environment:
+      HUB_AUTH_TOKEN: ${GATE_HUB_TOKEN:-gate-local-token}
+    depends_on:
+      edge: { condition: service_healthy }
+
+volumes:
+  certs:
+  redis:
+  clickhouse:
