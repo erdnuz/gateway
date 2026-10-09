@@ -36,7 +36,8 @@ func TestIntegration_ConfigReloadDisablesCacheAtRuntime(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		resp3, _ := h.edgeRequest(http.MethodGet, "/v1/auth-api/reload", "kreload")
-		if resp3.Header.Get("X-Cache") == "MISS" {
+		// Routes without caching send no X-Cache header at all.
+		if resp3.Header.Get("X-Cache") != "HIT" {
 			break
 		}
 		if time.Now().After(deadline) {

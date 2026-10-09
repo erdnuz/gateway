@@ -77,7 +77,10 @@ func TestIntegration_MTLSHandshakeFailsWithoutClientCert(t *testing.T) {
 		t.Fatal("expected handshake error for missing client cert, got nil")
 	}
 	errText := strings.ToLower(err.Error())
-	if !strings.Contains(errText, "tls") && !strings.Contains(errText, "certificate") && !strings.Contains(errText, "handshake") && !strings.Contains(errText, "broken pipe") {
+	if !strings.Contains(errText, "tls") && !strings.Contains(errText, "certificate") && !strings.Contains(errText, "handshake") &&
+		// TLS 1.3 rejects the missing cert after the client's handshake
+		// completes, so the client may see the closed connection instead.
+		!strings.Contains(errText, "broken pipe") && !strings.Contains(errText, "connection reset") {
 		t.Fatalf("expected tls-related error, got: %v", err)
 	}
 }

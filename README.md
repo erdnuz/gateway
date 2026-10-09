@@ -13,6 +13,11 @@ per request.
 - **Hub**: the control plane. Owns config, key tiers and the quota ledger, and grants leases over mTLS gRPC.
 - **Analytics**: ingests request events from the edges and serves a query API and dashboard.
 
+Edges share no state on the request path, so capacity grows linearly with
+edges, and the hub's load grows with leases, not requests. See
+[docs/architecture.md](docs/architecture.md) for where state lives, how each
+tier scales, and what happens when a component fails.
+
 ## Quick start
 
 ### 1. Everything in one process: no Docker, no infrastructure
@@ -134,9 +139,10 @@ otherwise.
 | --- | --- |
 | `cmd/gate` | the single binary |
 | `internal/app` | per-component wiring (`hubapp`, `edgeapp`, `analyticsapp`) and the in-process dev stack |
+| `packages/limiter` | the `Limiter` interface: `Lease` (global quota from hub leases) and `Local` (per-edge safety limit) |
 | `packages/edge`, `packages/hub`, `packages/analytics` | component logic |
 | `packages/config` | config file format: parsing, validation, migration, JSON Schema |
-| `packages/common` | shared runtime types, env helpers, readiness |
+| `packages/common` | shared runtime types, RFC 9457 problems and request IDs (`httpx`), env helpers, readiness |
 | `api/proto` | hub ↔ edge lease protocol |
 | `deploy` | Dockerfile, compose stack, dev certificate generator |
 | `examples`, `schema` | gateway config examples and their JSON Schema |

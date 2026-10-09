@@ -1,60 +1,75 @@
-# Edge Service
+# Edge
 
-Edge is the request path gateway.
+The edge is the data plane: every client request goes through it. Run it
+with `gate edge`; [internal/app/edgeapp](../internal/app/edgeapp/edgeapp.go)
+wires it. Edges share no state with each other, so you scale them by adding
+replicas behind a load balancer (see [architecture](architecture.md)).
 
-## Main Entry
+## Request chain
 
-- internal/app/edgeapp (wiring; run with `gate edge`)
+[`edge.NewServer`](../packages/edge/server.go) builds one middleware chain
+over a typed per-request state:
 
-## Responsibilities
+| Step | File | Behavior |
+| --- | --- | --- |
+| request ID | [`httpx`](../packages/common/httpx/httpx.go) | keeps a sane inbound `X-Request-Id` or mints one; echoes it and forwards it upstream |
+| analytics | [`analytics.go`](../packages/edge/analytics.go) | records status, bytes and latency; publishes to NATS from a bounded buffer |
+| route | [`route.go`](../packages/edge/route.go) | `/{group}/{service}/...` to a configured service, otherwise `404 no_route` |
+| CORS | [`route.go`](../packages/edge/route.go) | answers preflights before authentication |
+| auth | [`auth.go`](../packages/edge/auth.go) | `X-API-Key` must match `runtime.hub.api_key_pattern`; maps the key to a tier (Redis cache, then the hub) |
+| cache | [`cache.go`](../packages/edge/cache.go) | GET hits are served before rate limiting, so they cost no quota |
+| rate limit | [`ratelimit.go`](../packages/edge/ratelimit.go) | charges the key's quota through a [`limiter.Limiter`](../packages/limiter/limiter.go) |
+| proxy | [`proxy.go`](../packages/edge/proxy.go) | `httputil.ReverseProxy`: streaming, trailers and protocol upgrades; retries and the failure policy |
 
-- Authenticate requests using X-API-Key.
-- Resolve prefix/service routing.
-- Resolve user tier and enforce quotas.
-- Apply cache policy for GET requests.
-- Proxy upstream requests.
-- Capture and emit analytics events.
+## Rate limiting
 
-## Middleware Pipeline
+- Quotas apply per `(group, service, API key)` and per epoch-aligned window.
+- [`limiter.Lease`](../packages/limiter/lease.go) spends tokens leased from
+  the hub and renews them in the background (see [architecture](architecture.md#distributed-rate-limiting-by-leasing)).
+- Responses carry `RateLimit-Limit`, `RateLimit-Remaining` and
+  `RateLimit-Reset`. A `429 rate_limited` response also carries `Retry-After`.
+- When the hub is unreachable, a service with `when_hub_unavailable` applies
+  that limit locally on each edge ([`limiter.Local`](../packages/limiter/local.go)).
+  A service without it returns `503 rate_limit_unavailable`.
+- Malformed or unknown keys get `401`, and keys the hub refuses for a
+  service get `403 key_not_permitted`.
 
-Implemented in packages/edge/server.go:
+## Proxying
 
-1. analyticsMiddleware
-2. corsMiddleware
-3. authMiddleware
-4. cacheMiddleware
-5. rateLimitMiddleware
-6. proxyHandler
+- The upstream sees `X-Forwarded-For` (appended), `X-Forwarded-Host`,
+  `X-Forwarded-Proto` and `X-Request-Id`. The edge strips `X-API-Key` and any
+  inbound `X-Gate-*` headers, then applies the service's header rules.
+- Retries cover idempotent methods (and others with `non_idempotent: true`),
+  on connection errors and on the configured statuses. A retryable request
+  body is buffered up to the body limit (10 MiB by default).
+- Once retries are exhausted, `on_upstream_error` either returns a fallback
+  response (`fail-open`, marked `X-Upstream-Error: true`) or a problem:
+  `502 upstream_unavailable`, or `504 upstream_timeout` when a deadline expired.
 
-## Rate and Lease Behavior
+## Errors
 
-- Uses local counters and queued lease renewals.
-- Renews quotas through hub gRPC lease service.
-- Supports low-watermark lease renewal strategy.
+Every error the edge generates is an RFC 9457 `application/problem+json`
+body:
 
-## Analytics Emission
+```json
+{"title":"Too Many Requests","status":429,"detail":"quota exhausted for this window; see Retry-After","code":"rate_limited","request_id":"6f1c…"}
+```
 
-- Publishes analytics entries to NATS.
-- Includes edge_id on every entry (from EDGE_ID).
-- Captures latency, response code, cache hit, sizes, and upstream error signals.
+| Status | `code` |
+| --- | --- |
+| 401 | `missing_api_key`, `invalid_api_key` |
+| 403 | `tier_not_allowed`, `key_not_permitted` |
+| 404 | `no_route` |
+| 413 | `body_too_large` |
+| 429 | `rate_limited` |
+| 502 | `upstream_unavailable`, `bad_upstream` |
+| 503 | `starting`, `tier_lookup_failed`, `rate_limit_unavailable` |
+| 504 | `upstream_timeout` |
 
-## Operational Endpoints
+## Operational endpoints
 
-- /healthz
-- /readyz
-- /analytics/metrics (requires `Authorization: Bearer $EDGE_ADMIN_TOKEN`; 404 when unset)
-
-## Rate Limiting
-
-- Quotas are per `(prefix, service, api key)` per epoch-aligned window of the prefix `quota_period`; usage resets when the window rolls and leftover leased tokens are dropped.
-- Responses carry `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`; a `429` also carries `Retry-After`.
-- API keys must match `runtime.hub.api_key_pattern`; malformed or unknown keys get `401`, keys the hub refuses for a service get `403`.
-- When the hub is unreachable and `failure.hub.allow_on_rate_service_error` is set, the service's `safety_tier` quota is enforced locally per window.
-
-## Key Edge Packages
-
-- packages/edge/server.go
-- packages/edge/rates.go
-- packages/edge/lease_manager.go
-- packages/edge/cache.go
-- packages/edge/analytics.go
+- `/healthz`: the process is up.
+- `/readyz`: the edge has seen the hub ready once and its own Redis answers.
+  Hub outages deliberately do not fail it.
+- `/analytics/metrics`: analytics buffer counters. It needs
+  `Authorization: Bearer $EDGE_ADMIN_TOKEN` and returns 404 when the token is unset.

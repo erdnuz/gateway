@@ -46,7 +46,7 @@ services:
       sample_rate: 1                     # 0..1
 
     on_upstream_error:
-      mode: fail-open                    # fail-closed (default): 503
+      mode: fail-open                    # fail-closed (default): 502
       status: 200
       body: '{"orders": [], "degraded": true}'
       headers: { Content-Type: application/json }

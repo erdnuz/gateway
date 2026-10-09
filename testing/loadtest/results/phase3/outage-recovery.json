@@ -1,0 +1,24 @@
+{
+  "scenario": "outage-recovery",
+  "pass": true,
+  "checks": [
+    "PASS: recovered window admitted 1000 (want 800..1004)"
+  ],
+  "data": {
+    "windows": [
+      {
+        "window": 179150920,
+        "sent": 1900,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          500,
+          500
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 900
+        }
+      }
+    ]
+  }
+}

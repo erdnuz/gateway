@@ -31,7 +31,7 @@ type Service struct {
 	CORS      *CORS      `yaml:"cors,omitempty" desc:"Cross-origin resource sharing."`
 	Analytics *Analytics `yaml:"analytics,omitempty" desc:"Request event capture. Default: every request."`
 
-	OnUpstreamError *UpstreamError `yaml:"on_upstream_error,omitempty" desc:"Response when the upstream fails after retries. Default: 503."`
+	OnUpstreamError *UpstreamError `yaml:"on_upstream_error,omitempty" desc:"Response when the upstream fails after retries. Default: a 502 problem (504 on timeout)."`
 }
 
 // Match selects requests for a service.
@@ -96,7 +96,7 @@ type Analytics struct {
 
 // UpstreamError configures the response after upstream failure.
 type UpstreamError struct {
-	Mode    string            `yaml:"mode" desc:"fail-closed (503) or fail-open (serve the fallback below)." enum:"fail-closed,fail-open"`
+	Mode    string            `yaml:"mode" desc:"fail-closed (502, or 504 on timeout) or fail-open (serve the fallback below)." enum:"fail-closed,fail-open"`
 	Status  int               `yaml:"status,omitempty" desc:"Fallback status code. Default 503."`
 	Body    string            `yaml:"body,omitempty" desc:"Fallback body."`
 	Headers map[string]string `yaml:"headers,omitempty" desc:"Fallback headers."`
