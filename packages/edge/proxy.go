@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"gateway/packages/common/httpx"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 )
 
@@ -22,10 +23,10 @@ import (
 // handles hop-by-hop headers, streaming, trailers and protocol upgrades;
 // Gate adds routing (rewrite), retries (retryTransport) and the service's
 // failure policy (proxyError).
-func (s *Server) newProxy() *httputil.ReverseProxy {
+func (s *Server) newProxy(transport http.RoundTripper) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite:        rewrite,
-		Transport:      retryTransport{base: s.transport},
+		Transport:      retryTransport{base: transport},
 		ModifyResponse: modifyResponse,
 		ErrorHandler:   proxyError,
 		ErrorLog:       slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn),
@@ -180,6 +181,7 @@ func (t retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	start := time.Now()
 	defer func() {
+		telemetry.UpstreamSeconds.WithLabelValues(st.label()).Observe(telemetry.Since(start))
 		if st.entry != nil {
 			st.entry.UpstreamLatency = time.Since(start)
 		}

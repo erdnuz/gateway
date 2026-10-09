@@ -31,6 +31,9 @@ Gate is running:
   gateway     http://localhost:8080   try: curl -H "X-API-Key: demopro1" http://localhost:8080/v1/echo/hello
   hub API     http://localhost:8081   (Authorization: Bearer ${GATE_HUB_TOKEN:-gate-local-token})
   analytics   http://localhost:8091   (dashboard)
+  grafana     http://localhost:3000   (Gate overview: rps, 429s per tier, hub work per request)
+  prometheus  http://localhost:9090
+  jaeger      http://localhost:16686  (traces: start with GATE_OTLP=http://jaeger:4317)
 EOF
 }
 
@@ -50,25 +53,25 @@ task="${1:-help}"
 shift || true
 case "${task}" in
   up)
-    stack_up analytics
+    stack_up analytics observability
     urls
     echo "  keys: run 'make demo' to seed demo keys and traffic"
     ;;
   demo)
-    stack_up analytics demo
+    stack_up analytics observability demo
     urls
     echo
     echo "Demo traffic is running (keys demopro1, demopro2, demofree1, demofree2, demonoisy)."
     echo "Watch it:  ${STACK[*]} logs -f traffic"
     ;;
   down)
-    "${STACK[@]}" --profile analytics --profile demo down
+    "${STACK[@]}" --profile analytics --profile observability --profile demo down
     ;;
   clean)
-    "${STACK[@]}" --profile analytics --profile demo down -v --remove-orphans
+    "${STACK[@]}" --profile analytics --profile observability --profile demo down -v --remove-orphans
     ;;
   logs)
-    "${STACK[@]}" --profile analytics --profile demo logs -f "$@"
+    "${STACK[@]}" --profile analytics --profile observability --profile demo logs -f "$@"
     ;;
   dev)
     # Whole gateway in one container, no other services.

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"gateway/packages/common/config"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 
 	"github.com/nats-io/nats.go"
@@ -439,13 +440,16 @@ func (s *Server) StartNATSSubscriber(ctx context.Context, natsURL, subject, queu
 		s.ingestStats.received.Add(1)
 		var e types.AnalyticsEntry
 		if err := json.Unmarshal(msg.Data, &e); err != nil {
+			telemetry.EventsIngested.WithLabelValues("invalid").Inc()
 			return
 		}
 		select {
 		case s.ingestQueue <- e:
 			s.ingestStats.enqueued.Add(1)
+			telemetry.EventsIngested.WithLabelValues("queued").Inc()
 		default:
 			s.ingestStats.dropped.Add(1)
+			telemetry.EventsIngested.WithLabelValues("dropped").Inc()
 		}
 	})
 	if err != nil {

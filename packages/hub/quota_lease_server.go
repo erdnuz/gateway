@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 
 	"github.com/redis/go-redis/v9"
@@ -86,6 +87,7 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 	if !ok {
 		// Unknown key or unknown tier: a policy rejection, not an outage, so
 		// the edge must deny rather than fall back to its safety tier.
+		telemetry.LeaseGrants.WithLabelValues("rejected").Inc()
 		return nil, status.Errorf(codes.PermissionDenied, "no tier %q for key in service", tierID)
 	}
 
@@ -100,6 +102,7 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 	result, err := leaseGrantLua.Run(leaseCtx, s.rdb, []string{leaseKey}, int64(tierCfg.Quota), req.RequestedTokens, periodSeconds*2, bankerMassiveRequestCapPct).Int64Slice()
 	leaseCancel()
 	if err != nil {
+		telemetry.LeaseGrants.WithLabelValues("error").Inc()
 		return nil, err
 	}
 	if len(result) < 2 {
@@ -114,6 +117,7 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 		if retryAfterMs < 500 {
 			retryAfterMs = 500
 		}
+		telemetry.LeaseGrants.WithLabelValues("waiting").Inc()
 		return &types.QuotaLeaseResponse{
 			GrantedTokens:      0,
 			LeaseTtlSeconds:    periodSeconds,
@@ -123,6 +127,8 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 		}, nil
 	}
 
+	telemetry.LeaseGrants.WithLabelValues("granted").Inc()
+	telemetry.TokensGranted.Add(float64(result[0]))
 	return &types.QuotaLeaseResponse{
 		GrantedTokens:   result[0],
 		LeaseTtlSeconds: periodSeconds,

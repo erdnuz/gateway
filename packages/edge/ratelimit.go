@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gateway/packages/common/httpx"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 	"gateway/packages/limiter"
 )
@@ -32,7 +33,11 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 			req.LeaseSize = p.Leasing.Effective(s.Config.EdgePolicy(), p.QuotaPeriod).LeaseQuantum
 		}
 		d, err := s.Limiter.Allow(r.Context(), req)
+		decide := func(result string) {
+			telemetry.RateLimitDecisions.WithLabelValues(st.label(), st.tier.TierID, result).Inc()
+		}
 		if errors.Is(err, limiter.ErrRejected) {
+			decide("rejected")
 			httpx.WriteProblem(w, r, http.StatusForbidden, "key_not_permitted", "the hub does not permit this key on this service")
 			return
 		}
@@ -42,11 +47,15 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 			}
 			safety := st.svc.SafetyTier
 			if safety == nil || !st.svc.Failure.EffectiveHubPolicy().AllowOnRateServiceError {
+				decide("unavailable")
 				httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "rate_limit_unavailable", "the rate limit service is unreachable; retry shortly")
 				return
 			}
 			req.Limit, req.Cost = int64(safety.Quota), methodCost(r.Method, safety)
 			d, _ = s.safety.Allow(r.Context(), req)
+			decide(outcome("safety_", d.Allowed))
+		} else {
+			decide(outcome("", d.Allowed))
 		}
 		writeRateLimitHeaders(w, d)
 		if !d.Allowed {
@@ -60,6 +69,13 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func outcome(prefix string, allowed bool) string {
+	if allowed {
+		return prefix + "allowed"
+	}
+	return prefix + "denied"
 }
 
 func methodCost(method string, t *types.TierConfig) int64 {

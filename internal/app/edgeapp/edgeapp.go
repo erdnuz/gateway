@@ -15,6 +15,7 @@ import (
 
 	"gateway/internal/app/appkit"
 	"gateway/packages/common/config"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 	gateconfig "gateway/packages/config"
 	"gateway/packages/edge"
@@ -51,6 +52,7 @@ type Config struct {
 
 	BootstrapConfigFile string // serve this config until the hub sends one
 	AdminToken          string
+	MetricsAddr         string // Prometheus /metrics; empty disables it
 }
 
 const defaultCacheBytes = 64 << 20
@@ -74,6 +76,7 @@ func FromEnv() Config {
 		AnalyticsSubject:    config.String("NATS_ANALYTICS_SUBJECT", ""),
 		BootstrapConfigFile: config.String("EDGE_BOOTSTRAP_CONFIG_FILE", ""),
 		AdminToken:          config.String("EDGE_ADMIN_TOKEN", ""),
+		MetricsAddr:         config.String("METRICS_ADDR", ":9100"),
 	}
 }
 
@@ -178,12 +181,13 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 		server.SetPendingDependency("hub_config")
 	}
 	go server.FollowHub(ctx, hub)
+	telemetry.ServeMetrics(ctx, cfg.MetricsAddr)
 
 	if e.ln, err = net.Listen("tcp", cfg.HTTPAddr); err != nil {
 		return nil, fmt.Errorf("http listen %s: %w", cfg.HTTPAddr, err)
 	}
 	e.httpServer = &http.Server{
-		Handler:           server,
+		Handler:           telemetry.HTTPHandler(server, "edge"),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       defaults.HTTPReadTimeout,
 		WriteTimeout:      defaults.HTTPWriteTimeout,

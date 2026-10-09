@@ -6,32 +6,38 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 
 	"github.com/nats-io/nats.go"
 )
 
-// recordAnalytics captures one entry per sampled request after it completes.
-func (s *Server) recordAnalytics(next http.Handler) http.Handler {
+// observe records metrics for every request and, for sampled requests,
+// an analytics entry.
+func (s *Server) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		st := stateOf(r)
-		if st.entry == nil {
-			next.ServeHTTP(w, r)
-			return
-		}
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
-		if !sampled(st.svc) {
+
+		code := rec.status
+		if code == 0 {
+			code = 499 // the client went away before a response
+		}
+		service := st.label()
+		telemetry.Requests.WithLabelValues(service, strconv.Itoa(code)).Inc()
+		telemetry.RequestSeconds.WithLabelValues(service).Observe(telemetry.Since(start))
+
+		if st.entry == nil || !sampled(st.svc) {
 			return
 		}
 		st.entry.TotalLatency = time.Since(st.entry.Timestamp)
-		st.entry.ResponseCode = uint16(rec.status)
-		if rec.status == 0 {
-			st.entry.ResponseCode = 499 // the client went away before a response
-		}
+		st.entry.ResponseCode = uint16(code)
 		st.entry.ResponseSize = uint64(rec.bytes)
 		s.Analytics.Capture(st.entry)
 	})

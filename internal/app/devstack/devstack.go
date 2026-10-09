@@ -26,6 +26,7 @@ import (
 	"gateway/internal/app/analyticsapp"
 	"gateway/internal/app/edgeapp"
 	"gateway/internal/app/hubapp"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 	"gateway/packages/hub"
 
@@ -43,6 +44,7 @@ type Options struct {
 	EdgeAddr      string            // gateway
 	HubAddr       string            // hub HTTP API
 	AnalyticsAddr string            // analytics API + dashboard; empty disables analytics
+	MetricsAddr   string            // Prometheus /metrics for every component; empty disables it
 	EchoAddr      string            // built-in echo upstream; empty disables it
 	Keys          map[string]string // API key → tier; nil seeds one key per tier
 	Out           io.Writer         // banner output
@@ -106,6 +108,7 @@ func Run(ctx context.Context, opts Options) error {
 		shutdowns = append(shutdowns, srv.Shutdown)
 	}
 
+	telemetry.ServeMetrics(ctx, opts.MetricsAddr)
 	token := randomToken()
 	h, err := hubapp.Start(ctx, hubapp.Config{
 		HTTPAddr:   opts.HubAddr,

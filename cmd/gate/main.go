@@ -23,6 +23,7 @@ import (
 	"gateway/internal/app/devstack"
 	"gateway/internal/app/edgeapp"
 	"gateway/internal/app/hubapp"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/config"
 	"gateway/packages/hub"
 )
@@ -64,6 +65,15 @@ func run(args []string) error {
 
 	cmd, rest := args[0], args[1:]
 	setupLogging(cmd)
+	shutdownTracing, err := telemetry.SetupTracing(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(sctx)
+	}()
 	switch cmd {
 	case "dev":
 		return runDev(ctx, rest)
@@ -127,6 +137,7 @@ func runDev(ctx context.Context, args []string) error {
 	fs.StringVar(&opts.HubAddr, "hub-addr", "127.0.0.1:8081", "hub API listen address")
 	fs.StringVar(&opts.AnalyticsAddr, "analytics-addr", "127.0.0.1:8091", `analytics listen address ("" disables analytics)`)
 	fs.StringVar(&opts.EchoAddr, "echo-addr", "127.0.0.1:9000", `built-in echo upstream address ("" disables it)`)
+	fs.StringVar(&opts.MetricsAddr, "metrics-addr", "127.0.0.1:9100", `Prometheus /metrics address ("" disables it)`)
 	keys := fs.String("keys", "", `API keys to issue as key=tier,key=tier (default: one per tier, e.g. "freekey")`)
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), "Usage: gate dev [flags]\n\nRuns hub, edge and analytics in one process with embedded Redis and NATS.\n\n")

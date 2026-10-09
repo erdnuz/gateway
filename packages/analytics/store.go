@@ -41,8 +41,10 @@ func newRedisAnalyticsStore(rdb *redis.Client, key string) analyticsStore {
 	return &redisAnalyticsStore{rdb: rdb, key: key}
 }
 
-func NewClickHouseAnalyticsStore(dsn, table string) (analyticsStore, error) {
-	return newClickHouseAnalyticsStore(dsn, table)
+// NewClickHouseAnalyticsStore stores events in ClickHouse, keeping
+// retentionDays of history (<= 0 means 30).
+func NewClickHouseAnalyticsStore(dsn, table string, retentionDays int) (analyticsStore, error) {
+	return newClickHouseAnalyticsStore(dsn, table, retentionDays)
 }
 
 func (s *redisAnalyticsStore) Ping(ctx context.Context) error {
@@ -117,11 +119,12 @@ func (s *redisAnalyticsStore) Clear(ctx context.Context) error {
 func (s *redisAnalyticsStore) Close() error { return nil }
 
 type clickHouseAnalyticsStore struct {
-	db    *sql.DB
-	table string
+	db            *sql.DB
+	table         string
+	retentionDays int
 }
 
-func newClickHouseAnalyticsStore(dsn, table string) (*clickHouseAnalyticsStore, error) {
+func newClickHouseAnalyticsStore(dsn, table string, retentionDays int) (*clickHouseAnalyticsStore, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, fmt.Errorf("clickhouse dsn is required")
 	}
@@ -132,7 +135,10 @@ func newClickHouseAnalyticsStore(dsn, table string) (*clickHouseAnalyticsStore, 
 	if err != nil {
 		return nil, err
 	}
-	store := &clickHouseAnalyticsStore{db: db, table: table}
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	store := &clickHouseAnalyticsStore{db: db, table: table, retentionDays: retentionDays}
 	if err := store.ensureSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -242,12 +248,19 @@ func (s *clickHouseAnalyticsStore) ensureSchema(ctx context.Context) error {
 			response_code UInt16,
 			upstream_error UInt8
 		) ENGINE = MergeTree()
-		ORDER BY (timestamp, edge_id, prefix, service)
-	`, s.table)
+		PARTITION BY toDate(timestamp)
+		ORDER BY (prefix, service, timestamp)
+		TTL toDateTime(timestamp) + INTERVAL %d DAY
+	`, s.table, s.retentionDays)
 	if _, err := s.db.ExecContext(ctx, ddl); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS edge_id String AFTER service", s.table))
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS edge_id String AFTER service", s.table)); err != nil {
+		return err
+	}
+	// Tables created before retention existed get it too. Daily partitions
+	// let ClickHouse drop expired days whole instead of rewriting parts.
+	_, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s MODIFY TTL toDateTime(timestamp) + INTERVAL %d DAY", s.table, s.retentionDays))
 	return err
 }
 

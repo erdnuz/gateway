@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 
 	"github.com/redis/go-redis/v9"
@@ -132,8 +133,10 @@ func (c *ControlPlane) deliver(m controlMessage) {
 			return
 		}
 		ev = snap
+		telemetry.ControlPublished.WithLabelValues("config").Inc()
 	case m.Tier != nil:
 		ev = &types.ControlEvent{Event: &types.ControlEvent_Tier{Tier: m.Tier}}
+		telemetry.ControlPublished.WithLabelValues("tier").Inc()
 	default:
 		return
 	}
@@ -143,6 +146,7 @@ func (c *ControlPlane) deliver(m controlMessage) {
 		select {
 		case ch <- ev:
 		default: // too far behind: drop it; the edge reconnects and resyncs
+			telemetry.WatchersDropped.Inc()
 			delete(c.watchers, ch)
 			close(ch)
 		}

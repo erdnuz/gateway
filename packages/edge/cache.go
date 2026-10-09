@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 
 	"github.com/redis/go-redis/v9"
@@ -27,7 +28,9 @@ func (s *Server) serveFromCache(next http.Handler) http.Handler {
 			return
 		}
 		cm := NewCacheManager(s.Responses, *cfg)
-		if cached, ok, err := cm.CheckCache(r.Context(), r, st.key); err == nil && ok {
+		cached, ok, err := cm.CheckCache(r.Context(), r, st.key)
+		if err == nil && ok {
+			telemetry.CacheLookups.WithLabelValues(st.label(), "hit").Inc()
 			if st.entry != nil {
 				st.entry.CacheHit = true
 			}
@@ -39,6 +42,7 @@ func (s *Server) serveFromCache(next http.Handler) http.Handler {
 			_, _ = w.Write(cached.Body)
 			return
 		}
+		telemetry.CacheLookups.WithLabelValues(st.label(), "miss").Inc()
 		w.Header().Set("X-Cache", "MISS")
 		cw := &cacheWriter{ResponseWriter: w, limit: s.opts.MaxCacheableBytes}
 		next.ServeHTTP(cw, r)

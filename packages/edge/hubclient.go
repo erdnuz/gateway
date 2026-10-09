@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 
 	"google.golang.org/grpc"
@@ -35,14 +36,15 @@ func DialHub(addr string, tlsCfg *tls.Config) (*HubClient, error) {
 	if tlsCfg != nil {
 		creds = credentials.NewTLS(tlsCfg)
 	}
-	conn, err := grpc.NewClient(addr,
+	opts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
-	)
+	}, telemetry.GRPCDialOptions()...)
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -72,15 +74,27 @@ func ClientTLS(serverName, certFile, keyFile, caFile string) (*tls.Config, error
 func (h *HubClient) RequestQuotaLease(ctx context.Context, in *types.QuotaLeaseRequest) (*types.QuotaLeaseResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, leaseRPCTimeout)
 	defer cancel()
-	return h.leases.RequestQuotaLease(ctx, in)
+	start := time.Now()
+	resp, err := h.leases.RequestQuotaLease(ctx, in)
+	result := "granted"
+	switch {
+	case err != nil:
+		result = "error"
+	case resp.GetWaitingForCapacity():
+		result = "waiting"
+	}
+	telemetry.LeaseRPCSeconds.WithLabelValues(result).Observe(telemetry.Since(start))
+	return resp, err
 }
 
 // ResolveKey returns a key's tier ("" when the hub does not know the key).
 func (h *HubClient) ResolveKey(ctx context.Context, prefix, apiKey string) (string, error) {
 	resp, err := h.control.ResolveKey(ctx, &types.ResolveKeyRequest{Prefix: prefix, ApiKey: apiKey})
 	if err != nil {
+		telemetry.KeyResolutions.WithLabelValues("error").Inc()
 		return "", err
 	}
+	telemetry.KeyResolutions.WithLabelValues("ok").Inc()
 	return resp.GetTierId(), nil
 }
 

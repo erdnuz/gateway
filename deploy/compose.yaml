@@ -2,13 +2,17 @@
 #
 #   default            hub + Redis, edge, echo upstream
 #   --profile analytics  + NATS, ClickHouse and the analytics API/dashboard
+#   --profile observability  + Prometheus, Grafana (Gate overview dashboard)
+#                            and Jaeger; set GATE_OTLP=http://jaeger:4317 to trace
 #
 # Edges hold one mTLS gRPC connection to the hub and keep their caches in
 # memory, so scaling out is `docker compose up --scale edge=N` behind a
 # load balancer (drop the fixed port mapping first).
 #   --profile demo       + a traffic generator that exercises every tier
 #
-# Ports: gateway :8080, hub API :8081, analytics :8091.
+# Ports: gateway :8080, hub API :8081, analytics :8091, Grafana :3000,
+# Prometheus :9090, Jaeger :16686. Every Gate container serves /metrics on
+# :9100 inside the network.
 name: gate
 
 x-gate: &gate
@@ -26,6 +30,8 @@ x-ready: &ready
 
 x-env: &common-env
   NATS_URL: nats://nats:4222
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${GATE_OTLP:-}
+  OTEL_EXPORTER_OTLP_INSECURE: "true"
 
 services:
   # Generates a throwaway CA plus hub (server) and edge (client) certs on first
@@ -145,6 +151,33 @@ services:
       HUB_AUTH_TOKEN: ${GATE_HUB_TOKEN:-gate-local-token}
     depends_on:
       edge: { condition: service_healthy }
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    volumes: ["./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/gate-overview.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/all-in-one:1.72.0
+    environment: { COLLECTOR_OTLP_ENABLED: "true" }
+    ports: ["16686:16686"]
 
 volumes:
   certs:

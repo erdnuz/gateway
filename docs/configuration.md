@@ -10,6 +10,11 @@ Configuration is split across environment variables (process wiring) and the gat
 Every component runs from the `gate` binary and is configured by environment
 variables (`gate dev` needs none). Defaults are shown in parentheses.
 
+All components also read `METRICS_ADDR` (`:9100`, Prometheus `/metrics`;
+empty disables it), `LOG_FORMAT` (`json`; `text` for `gate dev`), `LOG_LEVEL`
+(`info`) and the standard `OTEL_EXPORTER_OTLP_*` variables. Tracing is on
+only when an OTLP endpoint is set. See [observability](observability.md).
+
 ## Hub (`gate hub`)
 
 | Variable | Default | Purpose |
@@ -55,6 +60,7 @@ hub relays to the edges connected to it.
 | `HUB_ADDR`, `HUB_AUTH_TOKEN` | required | runtime policy and readiness |
 | `CLICKHOUSE_DSN` | none | e.g. `clickhouse://user:pass@host:9000/db` |
 | `ANALYTICS_CLICKHOUSE_TABLE` | `analytics_events` | |
+| `ANALYTICS_RETENTION_DAYS` | `30` | ClickHouse TTL |
 | `REDIS_ADDR` | none | Redis-backed store when `CLICKHOUSE_DSN` is unset (development) |
 | `NATS_URL` (`NATS_ANALYTICS_URL`) | required | |
 | `NATS_ANALYTICS_SUBJECT`, `NATS_ANALYTICS_QUEUE` | from runtime policy | |

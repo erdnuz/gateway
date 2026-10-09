@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"gateway/packages/common/httpx"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 	"gateway/packages/limiter"
 )
@@ -101,7 +102,7 @@ func NewServer(d Deps, o Options) *Server {
 		IdleConnTimeout:       o.UpstreamIdleConnTimeout,
 		ResponseHeaderTimeout: o.UpstreamTimeout,
 	}
-	s.proxy = s.newProxy()
+	s.proxy = s.newProxy(telemetry.HTTPTransport(s.transport))
 	s.startupReady.Store(true)
 	s.localHealthy.Store(true)
 	s.SetPendingDependency("")
@@ -110,7 +111,7 @@ func NewServer(d Deps, o Options) *Server {
 	// the request's state.
 	gateway := chain(http.HandlerFunc(s.forward),
 		s.withState,
-		s.recordAnalytics,
+		s.observe,
 		s.route,
 		s.cors,
 		s.authenticate,

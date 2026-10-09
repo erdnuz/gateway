@@ -151,6 +151,7 @@ otherwise.
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Observability](docs/observability.md): metrics, the Grafana dashboard, tracing
 - [Configuration](docs/configuration.md)
 - [Deployments](docs/deployments.md) and [multi-host deployment](docs/deploy-multi-host.md)
 - [Edge](docs/edge.md), [Hub](docs/hub.md), [Analytics](docs/analytics.md)

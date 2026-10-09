@@ -28,6 +28,14 @@ type request struct {
 
 type requestKey struct{}
 
+// label names the routed service for metrics ("unrouted" before routing).
+func (st *request) label() string {
+	if st.svc == nil {
+		return "unrouted"
+	}
+	return st.scope + "/" + st.service
+}
+
 func stateOf(r *http.Request) *request {
 	st, _ := r.Context().Value(requestKey{}).(*request)
 	return st

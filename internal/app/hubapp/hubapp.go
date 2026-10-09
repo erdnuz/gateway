@@ -20,6 +20,7 @@ import (
 	"gateway/packages/common/config"
 	"gateway/packages/common/httpx"
 	"gateway/packages/common/ready"
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 	"gateway/packages/hub"
 
@@ -40,6 +41,7 @@ type Config struct {
 	RedisAddr         string
 	EnforceNoEviction bool
 	EdgeOrigins       []string
+	MetricsAddr       string // Prometheus /metrics; empty disables it
 
 	// TLS for the gRPC listener. Without it the hub only serves plaintext on
 	// a loopback address (gate dev).
@@ -59,6 +61,7 @@ func FromEnv() Config {
 		RedisAddr:          config.String("REDIS_ADDR", "localhost:6379"),
 		EnforceNoEviction:  config.Bool("HUB_ENFORCE_REDIS_NOEVICTION", true),
 		EdgeOrigins:        appkit.SplitCSV(config.String("HUB_EDGE_ALLOWED_ORIGINS", "")),
+		MetricsAddr:        config.String("METRICS_ADDR", ":9100"),
 		TLSCertFile:        strings.TrimSpace(config.String("HUB_TLS_CERT_FILE", "")),
 		TLSKeyFile:         strings.TrimSpace(config.String("HUB_TLS_KEY_FILE", "")),
 		TLSCAFile:          strings.TrimSpace(config.String("HUB_TLS_CA_FILE", "")),
@@ -140,6 +143,8 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	tierStore := hub.NewTierManager(h.rdb)
 	control := hub.NewControlPlane(cfgManager, tierStore, h.rdb)
 	go control.Run(ctx)
+	telemetry.RegisterWatchers(control.Watchers)
+	telemetry.ServeMetrics(ctx, cfg.MetricsAddr)
 
 	server := hub.NewHubServer(h.rdb, cfgManager, tierStore, control, cfg.AuthToken)
 	server.SetCORSAllowedOrigins(cfg.EdgeOrigins)
@@ -169,7 +174,7 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 		return nil, fmt.Errorf("http listen %s: %w", cfg.HTTPAddr, err)
 	}
 	h.httpServer = &http.Server{
-		Handler:           httpx.WithRequestID(server),
+		Handler:           telemetry.HTTPHandler(httpx.WithRequestID(server), "hub"),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       policy.HTTPReadTimeout,
 		WriteTimeout:      policy.HTTPWriteTimeout,
@@ -251,7 +256,7 @@ func checkNoEviction(ctx context.Context, rdb *redis.Client) error {
 }
 
 func newGRPCServer(cfg Config) (*grpc.Server, error) {
-	opts := []grpc.ServerOption{
+	opts := append(telemetry.GRPCServerOptions(),
 		// Edges ping every 10s to keep their connection warm. gRPC's default
 		// policy allows one ping per 5 minutes and answers faster pings with
 		// GOAWAY "too_many_pings", dropping in-flight calls and watch streams.
@@ -259,7 +264,7 @@ func newGRPCServer(cfg Config) (*grpc.Server, error) {
 			MinTime:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
-	}
+	)
 	if cfg.plaintext() {
 		slog.Warn("hub gRPC is plaintext; only acceptable on loopback (gate dev)", "addr", cfg.GRPCAddr)
 		return grpc.NewServer(opts...), nil

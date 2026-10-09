@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 
+	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 )
 
@@ -19,6 +20,7 @@ func (s *Server) FollowHub(ctx context.Context, hub *HubClient) {
 func (s *Server) Apply(ctx context.Context, ev *types.ControlEvent) {
 	switch e := ev.GetEvent().(type) {
 	case *types.ControlEvent_Config:
+		telemetry.ControlEvents.WithLabelValues("config").Inc()
 		var cfg types.GatewayConfig
 		if err := json.Unmarshal(e.Config.GetConfigJson(), &cfg); err != nil {
 			slog.Error("ignoring undecodable config snapshot", "err", err)
@@ -41,6 +43,7 @@ func (s *Server) Apply(ctx context.Context, ev *types.ControlEvent) {
 			slog.Info("edge ready: config received from hub", "services", countServices(&cfg))
 		}
 	case *types.ControlEvent_Tier:
+		telemetry.ControlEvents.WithLabelValues("tier").Inc()
 		if s.Tiers != nil {
 			s.Tiers.Set(e.Tier.GetPrefix(), e.Tier.GetApiKey(), e.Tier.GetTierId())
 		}

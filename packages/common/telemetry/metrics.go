@@ -1,0 +1,137 @@
+// Package telemetry holds Gate's Prometheus metrics and OpenTelemetry
+// tracing setup. Every metric lives here so the full set is visible in one
+// place; labels are bounded by config (service, tier), never by API key.
+package telemetry
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var latencyBuckets = []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5}
+
+// Edge (data plane).
+var (
+	Requests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_requests_total",
+		Help: "Requests handled by the edge, by service and status code.",
+	}, []string{"service", "code"})
+
+	RequestSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gate_request_duration_seconds",
+		Help:    "Time from request arrival to response completion at the edge.",
+		Buckets: latencyBuckets,
+	}, []string{"service"})
+
+	RateLimitDecisions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_ratelimit_decisions_total",
+		Help: "Rate-limit decisions: allowed, denied, safety_allowed, safety_denied, unavailable, rejected.",
+	}, []string{"service", "tier", "result"})
+
+	LeaseRPCSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gate_lease_rpc_seconds",
+		Help:    "Lease RPCs from this edge to the hub, by result (granted, waiting, error).",
+		Buckets: latencyBuckets,
+	}, []string{"result"})
+
+	KeyResolutions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_key_resolutions_total",
+		Help: "Tier-cache misses resolved through the hub, by result (ok, error).",
+	}, []string{"result"})
+
+	UpstreamSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gate_upstream_duration_seconds",
+		Help:    "Upstream round trips including retries, by service.",
+		Buckets: latencyBuckets,
+	}, []string{"service"})
+
+	CacheLookups = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_cache_lookups_total",
+		Help: "Response-cache lookups, by service and result (hit, miss).",
+	}, []string{"service", "result"})
+
+	ControlEvents = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_control_events_total",
+		Help: "Control-plane events applied by this edge (config, tier).",
+	}, []string{"kind"})
+)
+
+// Hub (control plane).
+var (
+	LeaseGrants = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_hub_lease_requests_total",
+		Help: "Lease requests served by the hub, by result (granted, waiting, rejected, error).",
+	}, []string{"result"})
+
+	TokensGranted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_tokens_granted_total",
+		Help: "Quota tokens granted to edges. Compare with gate_requests_total to see leasing amortise hub work.",
+	})
+
+	ControlPublished = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_hub_control_events_total",
+		Help: "Config and tier changes delivered to this hub's watchers, by kind.",
+	}, []string{"kind"})
+
+	WatchersDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_watchers_dropped_total",
+		Help: "Edge streams closed because the edge fell too far behind.",
+	})
+)
+
+// Analytics.
+var EventsIngested = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "gate_analytics_events_total",
+	Help: "Request events received by analytics, by result (stored, invalid, error).",
+}, []string{"result"})
+
+var (
+	watchersOnce  sync.Once
+	watchersCount atomic.Pointer[func() int]
+)
+
+// RegisterWatchers exports the number of edges watching this hub. Calling
+// it again (another hub in the same process, as in tests) replaces the
+// source.
+func RegisterWatchers(count func() int) {
+	watchersCount.Store(&count)
+	watchersOnce.Do(func() {
+		promauto.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "gate_hub_edges_connected",
+			Help: "Edges with an open control-plane stream to this hub.",
+		}, func() float64 { return float64((*watchersCount.Load())()) })
+	})
+}
+
+// Since reports the seconds elapsed since start.
+func Since(start time.Time) float64 { return time.Since(start).Seconds() }
+
+// ServeMetrics serves /metrics on addr until ctx ends. An empty addr does
+// nothing.
+func ServeMetrics(ctx context.Context, addr string) {
+	if addr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		slog.Info("metrics listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Warn("metrics server stopped", "err", err)
+		}
+	}()
+}

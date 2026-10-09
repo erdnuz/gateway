@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"gateway/packages/common/httpx"
+	"gateway/packages/common/telemetry"
 	"log"
 	"net"
 	"net/http"
@@ -35,11 +36,14 @@ type Config struct {
 	// (RedisAddr), which suits development and demos.
 	ClickHouseDSN   string
 	ClickHouseTable string
+	RetentionDays   int
 	RedisAddr       string
 
 	NATSURL     string
 	NATSSubject string // empty: runtime.analytics.nats_subject
 	NATSQueue   string // empty: runtime.analytics.nats_queue
+
+	MetricsAddr string // Prometheus /metrics; empty disables it
 }
 
 // FromEnv reads the analytics configuration from environment variables.
@@ -51,10 +55,12 @@ func FromEnv() Config {
 		APIToken:        config.String("ANALYTICS_API_TOKEN", ""),
 		ClickHouseDSN:   strings.TrimSpace(config.String("CLICKHOUSE_DSN", "")),
 		ClickHouseTable: strings.TrimSpace(config.String("ANALYTICS_CLICKHOUSE_TABLE", "analytics_events")),
+		RetentionDays:   config.Int("ANALYTICS_RETENTION_DAYS", 30),
 		RedisAddr:       strings.TrimSpace(config.String("REDIS_ADDR", "")),
 		NATSURL:         strings.TrimSpace(config.String("NATS_ANALYTICS_URL", config.String("NATS_URL", ""))),
 		NATSSubject:     strings.TrimSpace(config.String("NATS_ANALYTICS_SUBJECT", "")),
 		NATSQueue:       strings.TrimSpace(config.String("NATS_ANALYTICS_QUEUE", "")),
+		MetricsAddr:     config.String("METRICS_ADDR", ":9100"),
 	}
 }
 
@@ -107,7 +113,7 @@ func Start(ctx context.Context, cfg Config) (*Analytics, error) {
 	var server *analyticsapi.Server
 	var ping func(context.Context) error
 	if cfg.ClickHouseDSN != "" {
-		store, err := analyticsapi.NewClickHouseAnalyticsStore(cfg.ClickHouseDSN, cfg.ClickHouseTable)
+		store, err := analyticsapi.NewClickHouseAnalyticsStore(cfg.ClickHouseDSN, cfg.ClickHouseTable, cfg.RetentionDays)
 		if err != nil {
 			return nil, fmt.Errorf("clickhouse store: %w", err)
 		}
@@ -123,13 +129,14 @@ func Start(ctx context.Context, cfg Config) (*Analytics, error) {
 	server.SetHubReady(false)
 	server.SetPendingDependency("hub_readyz")
 
+	telemetry.ServeMetrics(ctx, cfg.MetricsAddr)
 	a.ln, err = net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		a.close()
 		return nil, fmt.Errorf("http listen %s: %w", cfg.HTTPAddr, err)
 	}
 	a.httpServer = &http.Server{
-		Handler:           httpx.WithRequestID(server),
+		Handler:           telemetry.HTTPHandler(httpx.WithRequestID(server), "analytics"),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       policy.ReadTimeout,
 		WriteTimeout:      policy.WriteTimeout,
