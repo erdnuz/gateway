@@ -171,7 +171,7 @@ services:
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    ports: ["3000:3000"]
+    ports: ["${GATE_GRAFANA_PORT:-3000}:3000"]
     depends_on: [prometheus]
 
   jaeger:

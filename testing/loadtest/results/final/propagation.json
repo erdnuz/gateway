@@ -1,0 +1,21 @@
+{
+  "scenario": "propagation",
+  "pass": true,
+  "checks": [
+    "PASS: edge 1 sees tier delete within 1s (1 ms)",
+    "PASS: edge 1 sees config reload within 2s (3 ms)",
+    "PASS: edge 2 sees tier delete within 1s (1 ms)",
+    "PASS: edge 2 sees config reload within 2s (56 ms)"
+  ],
+  "data": {
+    "config_reload_converge_ms": [
+      3,
+      56
+    ],
+    "reload_status": 204,
+    "tier_delete_converge_ms": [
+      1,
+      1
+    ]
+  }
+}

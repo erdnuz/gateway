@@ -89,6 +89,8 @@ exceeding its quota.
 | <http://localhost:3000> | Grafana: requests, 429s per tier, hub work per request |
 | <http://localhost:8091> | live dashboard: traffic, latency, 429s per tier, load per edge, hub work per request |
 
+![The analytics dashboard under demo traffic](docs/img/dashboard.png)
+
 ### 3. Issue, use and revoke a key
 
 `gate` is the binary from `make build` (`bin/gate`), or `go run ./cmd/gate`.

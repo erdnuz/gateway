@@ -31,7 +31,7 @@ Gate is running:
   gateway     http://localhost:8080   try: curl -H "X-API-Key: demopro1" http://localhost:8080/v1/echo/hello
   hub API     http://localhost:8081   (Authorization: Bearer ${GATE_HUB_TOKEN:-gate-local-token})
   analytics   http://localhost:8091   (dashboard)
-  grafana     http://localhost:3000   (Gate overview: rps, 429s per tier, hub work per request)
+  grafana     http://localhost:${GATE_GRAFANA_PORT:-3000}   (Gate overview: rps, 429s per tier, hub work per request)
   prometheus  http://localhost:9090
   jaeger      http://localhost:16686  (traces: start with GATE_OTLP=http://jaeger:4317)
 EOF

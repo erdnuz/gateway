@@ -91,11 +91,14 @@ function timeLabel(t, bucketSec) {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-function niceMax(v) {
-  if (!(v > 0)) return 1;
-  const p = 10 ** Math.floor(Math.log10(v));
-  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
-  return 10 * p;
+// niceScale picks a round tick step (1, 2, 2.5 or 5 × 10^n) for about four
+// ticks, and the axis maximum as a whole number of steps.
+function niceScale(v, ticks = 4) {
+  if (!(v > 0)) return { max: 1, step: 0.25 };
+  const raw = v / ticks;
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * p).find((x) => x >= raw);
+  return { max: step * Math.ceil(v / step - 1e-9), step };
 }
 
 // ---------------------------------------------------------------- data
@@ -307,11 +310,12 @@ function frame(container, height) {
   return { root, m, w: width - m.left - m.right, h: height - m.top - m.bottom, width, height };
 }
 
-function yAxis(f, max, format) {
+function yAxis(f, scale, format) {
+  const { max, step } = scale;
   const g = svg("g", { class: "grid" });
-  const ticks = 4;
+  const ticks = Math.round(max / step);
   for (let i = 0; i <= ticks; i++) {
-    const v = (max / ticks) * i;
+    const v = step * i;
     const y = f.m.top + f.h - (v / max) * f.h;
     if (i > 0) g.append(svg("line", { x1: f.m.left, x2: f.m.left + f.w, y1: y, y2: y }));
     const t = svg("text", { x: f.m.left - 8, y: y + 4, "text-anchor": "end", class: "tick" });
@@ -344,8 +348,9 @@ function renderTraffic(d) {
   const container = $("trafficChart");
   const f = frame(container, container.clientHeight || 260);
   const totals = series.map((p) => shown.reduce((s, o) => s + p[o.key], 0));
-  const max = niceMax(Math.max(...totals, 1));
-  yAxis(f, max, fmt.compact);
+  const scale = niceScale(Math.max(...totals, 1));
+  const max = scale.max;
+  yAxis(f, scale, fmt.compact);
   const band = f.w / Math.max(series.length, 1);
   const barW = Math.max(1, Math.min(24, band * 0.7));
   const xOf = (i) => f.m.left + band * i + band / 2;
@@ -423,8 +428,9 @@ function renderLatency(d) {
   const active = series.map((p) => p.ok + p.rate_limited + p.client_error + p.upstream_error > 0);
   const container = $("latencyChart");
   const f = frame(container, container.clientHeight || 200);
-  const max = niceMax(Math.max(...series.map((p) => p.p99_ms), 1));
-  yAxis(f, max, (v) => fmt.ms(v).replace(" ", ""));
+  const scale = niceScale(Math.max(...series.map((p) => p.p99_ms), 1));
+  const max = scale.max;
+  yAxis(f, scale, (v) => fmt.ms(v).replace(" ", ""));
   const n = series.length;
   const xOf = (i) => f.m.left + (n <= 1 ? f.w / 2 : (i / (n - 1)) * f.w);
   const yOf = (v) => f.m.top + f.h - (v / max) * f.h;
