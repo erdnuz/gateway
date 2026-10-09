@@ -94,11 +94,10 @@ case "${task}" in
     bash testing/loadtest/run.sh "${1:-run}"
     ;;
   lint)
-    unformatted="$(go_ run golang.org/x/tools/cmd/goimports@v0.31.0 -l . 2>/dev/null | grep -v '^testing/loadtest/results' || true)"
-    if [ -n "${unformatted}" ]; then
-      echo "not goimports-formatted:"; echo "${unformatted}"; exit 1
-    fi
-    go_ vet ./...
+    # golangci-lint (config: .golangci.yml) also checks gofmt.
+    docker run --rm -v "$(pwd -W 2>/dev/null || pwd)":/src -w /src \
+      -v gate-gomod:/go/pkg/mod -v gate-lintcache:/root/.cache \
+      golangci/golangci-lint:v2.4.0 golangci-lint run ./...
     ;;
   certs)
     bash deploy/gen-dev-certs.sh deploy/certs hub,localhost
@@ -124,7 +123,7 @@ Usage: make <task>   (or: bash scripts/dev.sh <task>)
   test              go vet + unit tests with the race detector
   test-integration  integration suite (testcontainers)
   loadtest [label]  end-to-end rate-limiter load test
-  lint              formatting and vet
+  lint              golangci-lint (formatting, vet and more)
   certs             generate dev mTLS certs into deploy/certs
   proto             regenerate gRPC code from api/proto
 EOF

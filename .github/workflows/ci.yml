@@ -26,8 +26,14 @@ jobs:
           if [ -n "$unformatted" ]; then echo "::error::not gofmt-formatted:"; echo "$unformatted"; exit 1; fi
       - run: go vet ./...
       - run: go vet -tags integration ./testing/integration/
+      - uses: golangci/golangci-lint-action@v8
+        with: { version: v2.4 }
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Generated code is current
+        run: |
+          go test ./packages/config -run Golden -args -update
+          git diff --exit-code schema/
 
   test:
     name: Unit tests (race)

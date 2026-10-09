@@ -9,14 +9,34 @@ Edges enforce per-key quotas locally from token leases granted by a central
 hub, so limits hold globally across many edges without a network round trip
 per request.
 
-- **Edge**: the gateway. Authenticates API keys, enforces quotas, caches, and proxies to upstreams.
-- **Hub**: the control plane. Owns config, key tiers and the quota ledger, and grants leases over mTLS gRPC.
-- **Analytics**: ingests request events from the edges and serves a query API and dashboard.
+```mermaid
+flowchart LR
+    C[Clients] --> LB[Load balancer]
+    LB --> E1[Edge] & E2[Edge] & E3[Edge]
+    E1 & E2 & E3 --> U[Upstream replicas]
+    E1 & E2 & E3 -. "one mTLS gRPC stream each:<br/>leases · key lookups · config & tier pushes" .-> H[Hubs]
+    H --- R[(Redis: quota ledger, keys,<br/>hub-to-hub changes)]
+    E1 & E2 & E3 -. "NATS: request events" .-> A[Analytics] --- CH[(ClickHouse)]
+```
 
-Edges share no state on the request path, so capacity grows linearly with
-edges, and the hub's load grows with leases, not requests. See
-[docs/architecture.md](docs/architecture.md) for where state lives, how each
-tier scales, and what happens when a component fails.
+- **Edges** (data plane) authenticate callers, enforce quotas, cache and
+  proxy. They share nothing on the request path, so capacity grows linearly
+  with edges.
+- **Hubs** (control plane) own config, keys and the quota ledger. They are
+  stateless over Redis, so they replicate too, and their work grows with
+  leases, not requests.
+- **Analytics** ingests request events and serves a query API and dashboard.
+
+See [docs/architecture.md](docs/architecture.md) for where state lives, how
+each tier scales, and what happens when a component fails.
+
+| | |
+| --- | --- |
+| Rate limiting | global per-key quotas by leasing; per-tier costs by method; epoch-aligned windows; a per-edge safety limit while the hub is down; per-caller concurrency caps |
+| Callers | hub-issued API keys (stored hashed; lifecycle API and CLI); JWT with JWKS and tier claims; anonymous, limited per client IP |
+| Upstreams | replica pools (round robin, least requests); per-replica circuit breaking; retries that move between replicas; timeouts and body limits; protocol upgrades and streaming (`httputil.ReverseProxy`) |
+| Control plane | one gRPC stream per edge; changes reach every edge within milliseconds, across replicated hubs; scoped admin tokens; an audit log |
+| Operations | Prometheus metrics with a provisioned Grafana dashboard; OpenTelemetry tracing; structured logs with request IDs; RFC 9457 errors; one binary; `gate dev` with no infrastructure |
 
 ## Quick start
 
@@ -131,7 +151,8 @@ in the background when the balance runs low, and drops leftover tokens when
 the window rolls over. The hub's ledger is the single source of truth, so the
 global limit holds however many edges serve a key. If the hub is unreachable,
 edges keep serving under a local per-window *safety* quota instead of failing
-closed.
+closed. The [design note](docs/design/distributed-rate-limiting.md) covers the
+trade-offs, sequence diagrams and failure modes.
 
 The [load test](testing/loadtest/README.md) checks these properties against a
 production-shaped stack: exact admission per window, no carry-over between
@@ -168,7 +189,9 @@ otherwise.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
+- [Architecture](docs/architecture.md) and [distributed rate limiting](docs/design/distributed-rate-limiting.md)
+- Decisions: [leases](docs/adr/0001-leases-over-central-counting.md), [one gRPC control plane](docs/adr/0002-one-grpc-control-plane.md), [edges share nothing](docs/adr/0003-edges-share-nothing.md), [config v2](docs/adr/0004-config-v2.md)
+- [Hub admin API (OpenAPI)](api/openapi/hub.yaml)
 - [Observability](docs/observability.md): metrics, the Grafana dashboard, tracing
 - [Configuration](docs/configuration.md)
 - [Deployments](docs/deployments.md) and [multi-host deployment](docs/deploy-multi-host.md)

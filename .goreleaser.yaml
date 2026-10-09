@@ -1,0 +1,25 @@
+# Release: push a tag (v2.x.y); .github/workflows/release.yml runs this.
+version: 2
+project_name: gate
+builds:
+  - main: ./cmd/gate
+    binary: gate
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [README.md, LICENSE*, examples/*, schema/*]
+checksum:
+  name_template: checksums.txt
+dockers_v2:
+  - images: ["ghcr.io/erdnuz/gate"]
+    tags: ["{{ .Version }}", latest]
+    dockerfile: deploy/Dockerfile.release
+    platforms: [linux/amd64, linux/arm64]
+changelog:
+  sort: asc

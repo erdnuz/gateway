@@ -1,0 +1,6 @@
+# Image for releases: goreleaser has already built the binary.
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/gate /usr/local/bin/gate
+EXPOSE 8080 9090 9100
+ENTRYPOINT ["/usr/local/bin/gate"]

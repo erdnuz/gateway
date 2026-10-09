@@ -1,0 +1,23 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - nilerr
+    - unconvert
+  settings:
+    errcheck:
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+        - io.WriteString
+  exclusions:
+    paths:
+      - packages/common/types/.*\.pb\.go
+    rules:
+      - path: _test\.go
+        linters: [errcheck, bodyclose]
+formatters:
+  enable: [gofmt]
