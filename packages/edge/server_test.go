@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -18,8 +19,6 @@ import (
 	"gateway/packages/common/types"
 	"gateway/packages/limiter"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -76,7 +75,7 @@ func (h *hubStub) RequestQuotaLease(_ context.Context, in *types.QuotaLeaseReque
 type fixture struct {
 	t        testing.TB
 	server   *Server
-	rdb      *redis.Client
+	keys     map[string]string // API key -> tier the stub hub resolves
 	hub      *hubStub
 	sink     *captureSink
 	upstream *httptest.Server
@@ -94,12 +93,11 @@ func testService(upstream string) types.ServiceConfig {
 	}
 }
 
-// newFixture serves one service at /v1/svc. The key "testkey" has tier free.
+// newFixture serves one service at /v1/svc. The key "testkey" has tier free;
+// resolving any key missing from f.keys fails as if the hub were down.
 func newFixture(t testing.TB, upstream http.HandlerFunc, configure func(*types.ServiceConfig), opts ...Options) *fixture {
 	t.Helper()
-	mr := miniredis.RunT(t)
-	f := &fixture{t: t, rdb: redis.NewClient(&redis.Options{Addr: mr.Addr()}), hub: &hubStub{quota: 1 << 40}, sink: &captureSink{}}
-	t.Cleanup(func() { f.rdb.Close() })
+	f := &fixture{t: t, keys: map[string]string{"testkey": "free"}, hub: &hubStub{quota: 1 << 40}, sink: &captureSink{}}
 	if upstream == nil {
 		upstream = func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }
 	}
@@ -110,17 +108,19 @@ func newFixture(t testing.TB, upstream http.HandlerFunc, configure func(*types.S
 	if configure != nil {
 		configure(&svc)
 	}
-	cm := &ConfigManager{}
-	cm.active.Store(&types.GatewayConfig{Prefixes: []types.PrefixConfig{{Prefix: "v1", QuotaPeriod: time.Hour, Services: []types.ServiceConfig{svc}}}})
-	tiers := NewTierManager("http://127.0.0.1:1", f.rdb, TierManagerOptions{})
-	if err := f.rdb.Set(context.Background(), "tier:v1:testkey", "free", time.Hour).Err(); err != nil {
-		t.Fatal(err)
-	}
+	cm := NewConfigManager(&types.GatewayConfig{Prefixes: []types.PrefixConfig{{Prefix: "v1", QuotaPeriod: time.Hour, Services: []types.ServiceConfig{svc}}}})
+	tiers := NewTierCache(func(_ context.Context, _, key string) (string, error) {
+		tier, ok := f.keys[key]
+		if !ok {
+			return "", errors.New("hub unreachable")
+		}
+		return tier, nil
+	})
 	var o Options
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	f.server = NewServer(Deps{Config: cm, Tiers: tiers, Limiter: limiter.NewLease(f.hub, limiter.LeaseOptions{LeaseSize: 10}), Analytics: f.sink, Redis: f.rdb}, o)
+	f.server = NewServer(Deps{Config: cm, Tiers: tiers, Limiter: limiter.NewLease(f.hub, limiter.LeaseOptions{LeaseSize: 10}), Analytics: f.sink, Responses: NewMemoryResponses(1 << 20)}, o)
 	return f
 }
 
@@ -236,7 +236,7 @@ func TestErrorsAreProblemDetails(t *testing.T) {
 
 func TestUnknownKeyIsUnauthorized(t *testing.T) {
 	f := newFixture(t, nil, nil)
-	_ = f.rdb.Set(context.Background(), "tier:v1:revoked", "", time.Hour).Err()
+	f.keys["revoked"] = ""
 	rec := f.send(httptest.NewRequest(http.MethodGet, "/v1/svc/x", nil))
 	expectStatus(t, rec, http.StatusOK)
 	req := httptest.NewRequest(http.MethodGet, "/v1/svc/x", nil)
@@ -591,8 +591,7 @@ func TestUpstreamTransportUsesPolicyDefaults(t *testing.T) {
 
 func TestConfigManager_Lookups(t *testing.T) {
 	cfg := &types.GatewayConfig{Prefixes: []types.PrefixConfig{{Prefix: "v1", Services: []types.ServiceConfig{{ServiceID: "svc"}}}}}
-	cm := &ConfigManager{}
-	cm.active.Store(cfg)
+	cm := NewConfigManager(cfg)
 	if p, ok := cm.GetPrefix("v1"); !ok || p.Prefix != "v1" {
 		t.Fatal("GetPrefix(v1)")
 	}

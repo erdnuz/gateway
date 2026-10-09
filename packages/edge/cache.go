@@ -22,11 +22,11 @@ func (s *Server) serveFromCache(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := stateOf(r)
 		cfg := st.svc.Cache
-		if r.Method != http.MethodGet || s.Redis == nil || cfg == nil || !cfg.Enabled {
+		if r.Method != http.MethodGet || s.Responses == nil || cfg == nil || !cfg.Enabled {
 			next.ServeHTTP(w, r)
 			return
 		}
-		cm := NewCacheManager(s.Redis, *cfg)
+		cm := NewCacheManager(s.Responses, *cfg)
 		if cached, ok, err := cm.CheckCache(r.Context(), r, st.key); err == nil && ok {
 			if st.entry != nil {
 				st.entry.CacheHit = true
@@ -90,8 +90,94 @@ func (w *cacheWriter) Write(b []byte) (int, error) {
 
 func (w *cacheWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// ResponseStore holds cached upstream responses. The default keeps them in
+// edge memory (NewMemoryResponses); Redis (NewRedisResponses) suits caches
+// larger than an edge's memory budget.
+type ResponseStore interface {
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	// Invalidate drops every entry under /prefix (and /service when set).
+	Invalidate(ctx context.Context, prefix, service string) error
+	Ping(ctx context.Context) error
+}
+
+// NewMemoryResponses keeps up to budget bytes of responses in process.
+func NewMemoryResponses(budget int64) ResponseStore {
+	return memoryResponses{newTTLCache[[]byte](budget)}
+}
+
+type memoryResponses struct{ c *ttlCache[[]byte] }
+
+func (m memoryResponses) Get(_ context.Context, key string) ([]byte, bool, error) {
+	v, _, fresh, ok := m.c.get(key)
+	return v, ok && fresh, nil
+}
+
+func (m memoryResponses) Set(_ context.Context, key string, v []byte, ttl time.Duration) error {
+	m.c.set(key, v, ttl, int64(len(v)+len(key)))
+	return nil
+}
+
+func (m memoryResponses) Invalidate(_ context.Context, prefix, service string) error {
+	scope := scopePattern(prefix, service)
+	m.c.deleteFunc(func(k string) bool { return strings.HasPrefix(k, scope) })
+	return nil
+}
+
+func (memoryResponses) Ping(context.Context) error { return nil }
+
+// NewRedisResponses keeps responses in the edge's own Redis.
+func NewRedisResponses(rdb *redis.Client) ResponseStore { return redisResponses{rdb} }
+
+type redisResponses struct{ rdb *redis.Client }
+
+func (r redisResponses) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, cacheRedisTimeout)
+	defer cancel()
+	v, err := r.rdb.Get(ctx, key).Bytes()
+	if err == redis.Nil {
+		return nil, false, nil
+	}
+	return v, err == nil, err
+}
+
+func (r redisResponses) Set(ctx context.Context, key string, v []byte, ttl time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, cacheRedisTimeout)
+	defer cancel()
+	return r.rdb.Set(ctx, key, v, ttl).Err()
+}
+
+func (r redisResponses) Invalidate(ctx context.Context, prefix, service string) error {
+	var cursor uint64
+	for {
+		keys, next, err := r.rdb.Scan(ctx, cursor, scopePattern(prefix, service)+"*", 256).Result()
+		if err != nil {
+			return err
+		}
+		if len(keys) > 0 {
+			if err := r.rdb.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		if cursor = next; cursor == 0 {
+			return nil
+		}
+	}
+}
+
+func (r redisResponses) Ping(ctx context.Context) error { return r.rdb.Ping(ctx).Err() }
+
+// scopePattern is the key prefix shared by a service's cached responses.
+func scopePattern(prefix, service string) string {
+	p := "c:/" + strings.TrimPrefix(prefix, "/")
+	if service != "" {
+		p += "/" + service
+	}
+	return p
+}
+
 type CacheManager struct {
-	rdb          *redis.Client
+	store        ResponseStore
 	cfg          types.CacheConfig
 	templatePlan []cacheTemplatePart
 }
@@ -120,19 +206,14 @@ type CachedResponse struct {
 	Body        []byte `json:"body"`
 }
 
-func NewCacheManager(rdb *redis.Client, cfg types.CacheConfig) *CacheManager {
-	return &CacheManager{rdb: rdb, cfg: cfg, templatePlan: compileCacheTemplate(cfg.CacheKey)}
+func NewCacheManager(store ResponseStore, cfg types.CacheConfig) *CacheManager {
+	return &CacheManager{store: store, cfg: cfg, templatePlan: compileCacheTemplate(cfg.CacheKey)}
 }
 
 // CheckCache looks up the cached response for a request.
 func (cm *CacheManager) CheckCache(ctx context.Context, r *http.Request, apiKey string) (*CachedResponse, bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, cacheRedisTimeout)
-	defer cancel()
-	val, err := cm.rdb.Get(ctx, cm.generateCacheKey(r, apiKey)).Bytes()
-	if err == redis.Nil {
-		return nil, false, nil
-	}
-	if err != nil {
+	val, ok, err := cm.store.Get(ctx, cm.generateCacheKey(r, apiKey))
+	if !ok || err != nil {
 		return nil, false, err
 	}
 	var cached CachedResponse
@@ -148,9 +229,7 @@ func (cm *CacheManager) SetCache(ctx context.Context, r *http.Request, apiKey st
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, cacheRedisTimeout)
-	defer cancel()
-	return cm.rdb.Set(ctx, cm.generateCacheKey(r, apiKey), b, cm.cfg.TTL).Err()
+	return cm.store.Set(ctx, cm.generateCacheKey(r, apiKey), b, cm.cfg.TTL)
 }
 
 func (cm *CacheManager) generateCacheKey(r *http.Request, apiKey string) string {
@@ -219,43 +298,4 @@ func matchCacheToken(s string) (cacheToken, int) {
 		}
 	}
 	return tokenLiteral, 0
-}
-
-// InvalidateResponseCacheScopes deletes cached responses for reloaded
-// services.
-func InvalidateResponseCacheScopes(ctx context.Context, rdb *redis.Client, scopes []types.ConfigInvalidationScope) error {
-	if rdb == nil {
-		return nil
-	}
-	for _, scope := range scopes {
-		if strings.TrimSpace(scope.Prefix) == "" {
-			continue
-		}
-		pattern := "c:/" + strings.TrimPrefix(scope.Prefix, "/")
-		if scope.ServiceID != "" {
-			pattern += "/" + scope.ServiceID
-		}
-		if err := deleteKeysByPattern(ctx, rdb, pattern+"*"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func deleteKeysByPattern(ctx context.Context, rdb *redis.Client, pattern string) error {
-	var cursor uint64
-	for {
-		keys, next, err := rdb.Scan(ctx, cursor, pattern, 256).Result()
-		if err != nil {
-			return err
-		}
-		if len(keys) > 0 {
-			if err := rdb.Del(ctx, keys...).Err(); err != nil {
-				return err
-			}
-		}
-		if cursor = next; cursor == 0 {
-			return nil
-		}
-	}
 }

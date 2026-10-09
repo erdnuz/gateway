@@ -118,20 +118,9 @@ func TestIntegration_TCON2MultiEdgeGlobalDrain(t *testing.T) {
 		expectedTotal   = int64(20) // tier free quota in integration config
 	)
 
-	clients := make([]edge.QuotaLeaseRequester, 0, concurrentEdges)
+	clients := make([]*edge.HubClient, 0, concurrentEdges)
 	for i := 0; i < concurrentEdges; i++ {
-		c, err := edge.NewGRPCQuotaLeaseClient(
-			h.hubGRPCListener.Addr().String(),
-			"hub-server",
-			h.mtlsFiles.EdgeCertPath,
-			h.mtlsFiles.EdgeKeyPath,
-			h.mtlsFiles.CAPath,
-		)
-		if err != nil {
-			t.Fatalf("new grpc lease client %d: %v", i, err)
-		}
-		clients = append(clients, c)
-		defer c.Close()
+		clients = append(clients, h.dialHub("hub-server", h.mtlsFiles.CAPath))
 	}
 
 	var wg sync.WaitGroup

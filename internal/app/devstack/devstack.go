@@ -108,12 +108,11 @@ func Run(ctx context.Context, opts Options) error {
 
 	token := randomToken()
 	h, err := hubapp.Start(ctx, hubapp.Config{
-		HTTPAddr:            opts.HubAddr,
-		ConfigPath:          cfgPath,
-		AuthToken:           token,
-		RedisAddr:           mr.Addr(),
-		NATSURL:             ns.ClientURL(),
-		ConfigReloadSubject: types.DefaultConfigReloadSubject,
+		HTTPAddr:   opts.HubAddr,
+		GRPCAddr:   "127.0.0.1:0", // loopback: plaintext is allowed
+		ConfigPath: cfgPath,
+		AuthToken:  token,
+		RedisAddr:  mr.Addr(),
 	})
 	if err != nil {
 		return fmt.Errorf("hub: %w", err)
@@ -126,16 +125,12 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	e, err := edgeapp.Start(ctx, edgeapp.Config{
-		HTTPAddr:            opts.EdgeAddr,
-		RedisAddr:           mr.Addr(),
-		EdgeID:              "dev-edge",
-		HubAddr:             hubURL,
-		HubToken:            token,
-		LeaseClient:         inProcessLeases{h.Leases},
-		NATSTierURL:         ns.ClientURL(),
-		NATSAnalyticsURL:    ns.ClientURL(),
-		AnalyticsEnabled:    opts.AnalyticsAddr != "",
-		ConfigReloadSubject: types.DefaultConfigReloadSubject,
+		HTTPAddr:         opts.EdgeAddr,
+		EdgeID:           "dev-edge",
+		HubGRPCAddr:      h.GRPCAddr(),
+		CacheBytes:       16 << 20,
+		NATSURL:          ns.ClientURL(),
+		AnalyticsEnabled: opts.AnalyticsAddr != "",
 	})
 	if err != nil {
 		return fmt.Errorf("edge: %w", err)
@@ -180,16 +175,6 @@ func Run(ctx context.Context, opts Options) error {
 	fmt.Fprintln(opts.Out, "\nstopping gate dev")
 	return nil
 }
-
-// inProcessLeases lets the edge lease quota straight from the hub's lease
-// service without gRPC or TLS.
-type inProcessLeases struct{ srv *hub.QuotaLeaseServer }
-
-func (l inProcessLeases) RequestQuotaLease(ctx context.Context, in *types.QuotaLeaseRequest) (*types.QuotaLeaseResponse, error) {
-	return l.srv.RequestQuotaLease(ctx, in)
-}
-
-func (inProcessLeases) Close() error { return nil }
 
 func resolveConfig(path string) (string, func(), error) {
 	if path != "" {

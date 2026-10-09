@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"gateway/packages/common/types"
-	"gateway/packages/edge"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -20,15 +19,11 @@ func TestIntegration_MTLSHandshakeFailsWithWrongServerName(t *testing.T) {
 	h := newIntegrationHarness(t)
 	defer h.close()
 
-	client, err := edge.NewGRPCQuotaLeaseClient(h.hubGRPCListener.Addr().String(), "wrong-name", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, h.mtlsFiles.CAPath)
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	defer client.Close()
+	client := h.dialHub("wrong-name", h.mtlsFiles.CAPath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	_, err = client.RequestQuotaLease(ctx, &types.QuotaLeaseRequest{Prefix: "v1", ServiceId: "auth-api", ApiKey: "key1", RequestedTokens: 1})
+	_, err := client.RequestQuotaLease(ctx, &types.QuotaLeaseRequest{Prefix: "v1", ServiceId: "auth-api", ApiKey: "key1", RequestedTokens: 1})
 	if err == nil {
 		t.Fatal("expected TLS server-name verification error, got nil")
 	}
@@ -42,11 +37,7 @@ func TestIntegration_MTLSHandshakeFailsWithWrongCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate bad ca files: %v", err)
 	}
-	client, err := edge.NewGRPCQuotaLeaseClient(h.hubGRPCListener.Addr().String(), "hub-server", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, bad.CAPath)
-	if err != nil {
-		t.Fatalf("new client: %v", err)
-	}
-	defer client.Close()
+	client := h.dialHub("hub-server", bad.CAPath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()

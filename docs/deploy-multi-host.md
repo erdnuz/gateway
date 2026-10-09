@@ -7,16 +7,17 @@ reference wiring; split its services across hosts as below.
 
 ## Hub host
 
-Runs `gate hub` with its Redis and a NATS server that edges and analytics can reach.
+Runs `gate hub` with its Redis. Run several hubs against the same Redis for
+availability: edges reach any of them through a gRPC load balancer (or DNS
+with several A records). Host NATS here too if you run analytics.
 
 | Variable | Example | Notes |
 | --- | --- | --- |
 | `CONFIG_FILE_PATH` | `/etc/gate/gateway.yaml` | required |
-| `HUB_AUTH_TOKEN` | strong random value | required; shared with edges and analytics |
+| `HUB_AUTH_TOKEN` | strong random value | required; admin API, shared with analytics |
 | `REDIS_ADDR` | `redis:6379` | must use `maxmemory-policy noeviction` |
-| `NATS_URL` | `nats://nats:4222` | |
-| `HUB_TLS_CERT_FILE`, `HUB_TLS_KEY_FILE`, `HUB_TLS_CA_FILE` | `/certs/hub/tls.crt` … | gRPC lease service, mTLS |
-| `PORT`, `HUB_GRPC_PORT` | `8080`, `9090` | expose both to edges |
+| `HUB_TLS_CERT_FILE`, `HUB_TLS_KEY_FILE`, `HUB_TLS_CA_FILE` | `/certs/hub/tls.crt` … | gRPC for edges, mTLS |
+| `PORT`, `HUB_GRPC_PORT` | `8080`, `9090` | edges need only the gRPC port |
 
 Generate certificates with the hub's public DNS name as a SAN:
 
@@ -29,18 +30,17 @@ for anything beyond a lab.
 
 ## Edge hosts (one or more)
 
-Run `gate edge` with a private Redis per edge.
+Run `gate edge`. Edges need nothing but the hub's gRPC port (and NATS for
+analytics); they keep caches in memory, so add as many as traffic needs.
 
 | Variable | Example |
 | --- | --- |
-| `HUB_ADDR` | `http://hub.internal.example.com:8080` |
-| `HUB_AUTH_TOKEN` | same as hub |
 | `HUB_GRPC_ADDR` | `hub.internal.example.com:9090` |
 | `HUB_GRPC_SERVER_NAME` | `hub.internal.example.com` (must match a hub cert SAN) |
 | `EDGE_TLS_CERT_FILE`, `EDGE_TLS_KEY_FILE`, `EDGE_TLS_CA_FILE` | `/certs/edge/tls.crt` … |
-| `REDIS_ADDR` | `localhost:6379` |
-| `NATS_URL` | `nats://hub.internal.example.com:4222` |
+| `NATS_URL` | `nats://hub.internal.example.com:4222` (analytics only) |
 | `EDGE_ID` | unique per edge (`edge-eu-1`) |
+| `REDIS_ADDR` | optional: a Redis for responses larger than `EDGE_CACHE_BYTES` |
 
 Put edges behind your load balancer and use `/readyz` for its health checks.
 
@@ -50,7 +50,7 @@ Run `gate analytics` next to ClickHouse.
 
 | Variable | Example |
 | --- | --- |
-| `HUB_ADDR`, `HUB_AUTH_TOKEN` | as for edges |
+| `HUB_ADDR`, `HUB_AUTH_TOKEN` | `http://hub.internal.example.com:8080`, the hub token |
 | `CLICKHOUSE_DSN` | `clickhouse://gate:secret@localhost:9000/gate` |
 | `NATS_URL` | `nats://hub.internal.example.com:4222` |
 | `ANALYTICS_API_TOKEN` | protects the query API |

@@ -3,8 +3,6 @@ package hub
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"sync/atomic"
 	"time"
 
 	"gateway/packages/common/types"
@@ -59,31 +57,6 @@ type QuotaLeaseServer struct {
 	rdb       *redis.Client
 	cfgStore  ConfigRegistry
 	tierStore TierStore
-	keyRe     atomic.Pointer[keyPattern]
-}
-
-type keyPattern struct {
-	src string
-	re  *regexp.Regexp
-}
-
-// validAPIKey applies runtime.hub.api_key_pattern; keys are interpolated into
-// Redis keys, so the hub must not trust the edge to have checked.
-func (s *QuotaLeaseServer) validAPIKey(apiKey string) bool {
-	src := s.cfgStore.HubPolicy().APIKeyPattern
-	if src == "" {
-		src = types.DefaultRuntimePolicy().Hub.APIKeyPattern
-	}
-	kp := s.keyRe.Load()
-	if kp == nil || kp.src != src {
-		re, err := regexp.Compile(src)
-		if err != nil {
-			return false
-		}
-		kp = &keyPattern{src: src, re: re}
-		s.keyRe.Store(kp)
-	}
-	return kp.re.MatchString(apiKey)
 }
 
 func NewQuotaLeaseServer(rdb *redis.Client, cfgStore ConfigRegistry, tierStore TierStore) *QuotaLeaseServer {
@@ -94,7 +67,7 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 	if err := req.Validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if !s.validAPIKey(req.ApiKey) {
+	if !validKey(s.cfgStore, req.ApiKey) {
 		return nil, status.Error(codes.InvalidArgument, "api_key does not match api_key_pattern")
 	}
 

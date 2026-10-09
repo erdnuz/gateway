@@ -1,8 +1,8 @@
 # Rate-limiter load test
 
 End-to-end correctness and performance checks for edge rate limiting, run
-against a production-shaped stack: hub + hub Redis, NATS, two edges that each
-own a private Redis, and a minimal upstream
+against a production-shaped stack: hub + hub Redis, two edges that each
+keep their caches in memory, and a minimal upstream
 ([compose.yaml](compose.yaml)).
 
 ```bash
@@ -25,7 +25,7 @@ safety tier S=50, lease quantum 100.
 | `carryover` | tokens leased but unused in window N must not inflate window N+1 |
 | `isolation` | exhausting a key on one service leaves its quota on another service intact |
 | `bypass` | `X-API-Key: <key>/<suffix>` and never-issued keys are never admitted |
-| `propagation` | tier deletion and config reload reach every edge (each has its own Redis) |
+| `propagation` | tier deletion and config reload reach every edge over its watch stream |
 | `throughput` | 1000 keys, closed loop at concurrency 16/64/256; rps and latency percentiles |
 | `hotkey` | one key at concurrency 256; no spurious denials or errors |
 | `outage` | hub stopped: edges keep serving under the safety tier, ≤ S per edge per window |

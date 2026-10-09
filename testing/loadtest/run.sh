@@ -3,7 +3,7 @@
 #
 #   testing/loadtest/run.sh [label]
 #
-# Brings up hub + 2 edges (each with its own Redis) + NATS + upstream via
+# Brings up hub (+ Redis) + 2 edges + upstream via
 # testing/loadtest/compose.yaml, runs every loadgen scenario, and
 # writes testing/loadtest/results/<label>/{report.md,*.json}.
 # KEEP=1 leaves the stack running afterwards.
@@ -40,7 +40,7 @@ log "build + start stack"
   echo
   echo "- commit: $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (dirty)')"
   echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "- topology: hub(2 cpu) + 2 edges(2 cpu each, private Redis) + NATS + upstream; loadgen 4 cpu"
+  echo "- topology: hub(2 cpu) + hub Redis + 2 edges(2 cpu each, in-memory caches) + upstream; loadgen 4 cpu"
   echo "- host: $(docker info --format '{{.NCPU}} cpu, {{.MemTotal}} bytes mem, {{.OperatingSystem}}')"
 } >"${RESULTS}/report.md"
 
@@ -62,14 +62,11 @@ lg() {
   esac
 }
 
-redis_calls() {
-  local total=0 n
-  for e in 1 2; do
-    n="$("${COMPOSE[@]}" exec -T "edge-${e}-redis" redis-cli INFO commandstats \
-      | tr -d '\r' | sed -n 's/^cmdstat_[^:]*:calls=\([0-9]*\).*/\1/p' | awk '{s+=$1} END {print s+0}')"
-    total=$((total + n))
-  done
-  echo "${total}"
+# hub_calls counts commands on the hub's Redis: the control plane's whole
+# share of the work, which should grow with leases, not requests.
+hub_calls() {
+  "${COMPOSE[@]}" exec -T hub-redis redis-cli INFO commandstats \
+    | tr -d '\r' | sed -n 's/^cmdstat_[^:]*:calls=\([0-9]*\).*/\1/p' | awk '{s+=$1} END {print s+0}'
 }
 
 lg setup
@@ -80,21 +77,21 @@ lg bypass
 lg propagation
 
 if want throughput; then
-before="$(redis_calls)"
+before="$(hub_calls)"
 ( for _ in $(seq 1 12); do
     docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}' 2>/dev/null
     sleep 2
   done ) >"${RESULTS}/docker-stats.txt" &
 STATS_PID=$!
 lg throughput
-after="$(redis_calls)"
+after="$(hub_calls)"
 wait "${STATS_PID}" 2>/dev/null
 reqs="$(sed -n 's/.*"total_requests": \([0-9]*\).*/\1/p' "${RESULTS}/throughput.json" | head -1)"
 {
   echo
-  echo "### edge Redis cost (throughput scenario)"
+  echo "### control-plane cost (throughput scenario)"
   echo
-  echo "- edge Redis commands: $((after - before)) for ${reqs:-0} requests = **$(awk -v a=$((after - before)) -v r="${reqs:-1}" 'BEGIN{printf "%.2f", a/(r>0?r:1)}') per request**"
+  echo "- hub Redis commands: $((after - before)) for ${reqs:-0} requests = **$(awk -v a=$((after - before)) -v r="${reqs:-1}" 'BEGIN{printf "%.2f", a/(r>0?r:1)}') per request**"
   echo "- peak CPU per container (docker stats samples):"
   echo
   awk '{gsub("%","",$2); if ($2+0 > max[$1]) max[$1]=$2+0} END {for (k in max) printf "  - %s: %.0f%%\n", k, max[k]}' "${RESULTS}/docker-stats.txt" | sort

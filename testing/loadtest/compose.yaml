@@ -1,16 +1,13 @@
 # End-to-end rate-limiter load test topology. Mirrors production: one hub with
-# its own Redis, NATS shared bus, and two edges that each own a private Redis.
+# its Redis, and two edges that each hold one mTLS gRPC connection to the hub
+# and keep their caches in memory. (Analytics, and so NATS, are off.)
 # Driven by testing/loadtest/run.sh; certs come from deploy/gen-dev-certs.sh.
 name: gate-lt
 
 x-edge-env: &edge-env
   PORT: ":8080"
-  HUB_ADDR: http://hub-server:8080
   HUB_GRPC_ADDR: hub-server:9090
   HUB_GRPC_SERVER_NAME: hub-server
-  HUB_AUTH_TOKEN: ${LT_HUB_TOKEN:-loadtest-token}
-  NATS_URL: nats://nats:4222
-  NATS_TIER_URL: nats://nats:4222
   GATE_ANALYTICS_ENABLED: "false"
   EDGE_TLS_CERT_FILE: /certs/edge/tls.crt
   EDGE_TLS_KEY_FILE: /certs/edge/tls.key
@@ -40,9 +37,6 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--maxmemory-policy", "noeviction", "--save", ""]
 
-  nats:
-    image: nats:2.10-alpine
-
   hub-server:
     build:
       context: ../..
@@ -51,13 +45,11 @@ services:
     image: gate-lt
     command: ["hub"]
     cpus: 2.0
-    depends_on: [hub-redis, nats]
+    depends_on: [hub-redis]
     environment:
       PORT: "8080"
       HUB_GRPC_PORT: "9090"
       REDIS_ADDR: hub-redis:6379
-      NATS_URL: nats://nats:4222
-      NATS_TIER_URL: nats://nats:4222
       HUB_AUTH_TOKEN: ${LT_HUB_TOKEN:-loadtest-token}
       HUB_GRPC_CLIENT_AUTH_MODE: require-and-verify
       CONFIG_FILE_PATH: /config/gateway-config.json
@@ -74,24 +66,15 @@ services:
       timeout: 2s
       retries: 30
 
-  edge-1-redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--save", ""]
-  edge-2-redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--save", ""]
-
   edge-1:
     <<: *edge
     environment:
       <<: *edge-env
-      REDIS_ADDR: edge-1-redis:6379
       EDGE_ID: edge-1
   edge-2:
     <<: *edge
     environment:
       <<: *edge-env
-      REDIS_ADDR: edge-2-redis:6379
       EDGE_ID: edge-2
 
   # Minimal origin ("ok") so measurements reflect gateway overhead only.

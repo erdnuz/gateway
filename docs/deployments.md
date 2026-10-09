@@ -11,11 +11,11 @@ Every component ships in one image built from [deploy/Dockerfile](../deploy/Dock
 | Service | Role | Profile |
 | --- | --- | --- |
 | `certs` | generates a throwaway CA and hub/edge certificates on first start | default |
-| `redis`, `nats` | hub ledger and tier store; control-plane and analytics bus | default |
-| `hub` | control plane; HTTP API on :8081, lease gRPC (mTLS) inside the network | default |
-| `edge-redis`, `edge` | gateway on :8080 with its own cache | default |
+| `redis` | hub ledger, tier store and hub-to-hub change channel | default |
+| `hub` | control plane; HTTP API on :8081, gRPC (mTLS) for edges inside the network | default |
+| `edge` | gateway on :8080; caches in memory | default |
 | `echo` | demo upstream | default |
-| `clickhouse`, `analytics` | event store, API and dashboard on :8091 | `analytics` |
+| `nats`, `clickhouse`, `analytics` | event bus, event store, API and dashboard on :8091 | `analytics` |
 | `traffic` | seeds demo keys and sends steady traffic | `demo` |
 
 ```bash
@@ -25,11 +25,10 @@ make logs    # follow logs (make logs ARGS=edge for one service)
 make down    # stop; make clean also deletes volumes
 ```
 
-Startup order is enforced by health checks: certs → Redis/NATS → hub `/readyz`
-→ edge. The edge holds proxy traffic (503) until the hub is ready once. After
-that, edge `/readyz` tracks only edge-local dependencies: a hub outage is
-handled per request by the failure policy, and an analytics outage never
-blocks traffic.
+Startup order is enforced by health checks: certs → Redis → hub `/readyz`
+→ edge. The edge holds proxy traffic (503) until the hub has streamed it a
+config. After that a hub outage is handled per request by the failure
+policy, and an analytics outage never blocks traffic.
 
 To run the stack with your own gateway config, set
 `GATE_CONFIG=/path/to/gateway.yaml` before `make up`. Change the hub token
@@ -45,8 +44,8 @@ writes to `deploy/certs/`.
 
 ## Load testing
 
-`make loadtest` brings up a production-shaped stack (hub, two edges with
-private Redis, NATS, a minimal upstream) from
+`make loadtest` brings up a production-shaped stack (hub and its Redis, two
+edges, a minimal upstream) from
 [testing/loadtest/compose.yaml](../testing/loadtest/compose.yaml) and runs the
 rate-limiter scenarios. See [testing/loadtest/README.md](../testing/loadtest/README.md).
 
@@ -54,8 +53,8 @@ rate-limiter scenarios. See [testing/loadtest/README.md](../testing/loadtest/REA
 
 | Component | Liveness | Readiness |
 | --- | --- | --- |
-| Edge | `/healthz` | `/readyz`: hub seen ready once, edge Redis reachable |
-| Hub | `/healthz` | `/readyz`: Redis (with `noeviction`) and NATS reachable |
+| Edge | `/healthz` | `/readyz`: config received from the hub (and a Redis response store reachable, if used) |
+| Hub | `/healthz` | `/readyz`: Redis reachable, with `noeviction` |
 | Analytics | `/healthz` | `/readyz`: hub, store and NATS reachable |
 
 Running components on separate machines: [deploy-multi-host.md](deploy-multi-host.md).

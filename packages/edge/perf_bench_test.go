@@ -49,8 +49,7 @@ func BenchmarkConfigManagerGetServiceConfig(b *testing.B) {
 			p.Services = append(p.Services, types.ServiceConfig{ServiceID: "svc-" + strconv.Itoa(j)})
 		}
 	}
-	cm := &ConfigManager{}
-	cm.active.Store(cfg)
+	cm := NewConfigManager(cfg)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

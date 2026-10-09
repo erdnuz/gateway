@@ -2,238 +2,94 @@ package edge
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	neturl "net/url"
-	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
 
 const (
-	tierCacheTTL          = 1 * time.Hour
-	tierNegativeCacheTTL  = 30 * time.Second
-	defaultTierRedisOpTTL = 150 * time.Millisecond
-	defaultTierHubOpTTL   = 500 * time.Millisecond
+	tierTTL        = time.Hour        // pushed changes keep known tiers current
+	unknownKeyTTL  = 30 * time.Second // bounds what a flood of bogus keys costs
+	resolveTimeout = 500 * time.Millisecond
+	tierCacheKeys  = 1 << 20
 )
 
-type TierManager struct {
-	rdb         *redis.Client
-	hubAddr     string
-	authTok     string
-	client      *http.Client
-	stale       sync.Map
-	group       singleflight.Group
-	natsConn    *nats.Conn
-	natsSubject string
+// KeyResolver asks the hub for a key's tier ("" when the key is unknown).
+type KeyResolver func(ctx context.Context, prefix, apiKey string) (string, error)
+
+// TierCache maps API keys to tiers in process memory. Misses ask the hub once
+// per key however many requests miss together, and the hub pushes changes
+// (Set) so revocations apply without waiting for expiry. When the hub is
+// unreachable, Stale serves the last known tier.
+type TierCache struct {
+	resolve KeyResolver
+	cache   *ttlCache[tierEntry]
+	gen     atomic.Uint64 // bumped by Reset; older entries need revalidating
+	flights singleflight.Group
 }
 
-type TierManagerOptions struct {
-	AuthToken string       // hub bearer token
-	Client    *http.Client // nil: a default hub client
-	NATSURL   string       // tier update stream; empty: nats.DefaultURL
-	NATSSubj  string       // empty: tier.updates
+type tierEntry struct {
+	tier string
+	gen  uint64
 }
 
-type tierSnapshot struct {
-	tier      string
-	updatedAt time.Time
+func NewTierCache(resolve KeyResolver) *TierCache {
+	return &TierCache{resolve: resolve, cache: newTTLCache[tierEntry](tierCacheKeys)}
 }
 
-// NewTierManager resolves API keys to tiers through the edge's Redis cache,
-// falling back to the hub, and applies tier updates streamed over NATS.
-func NewTierManager(hubAddr string, rdb *redis.Client, options TierManagerOptions) *TierManager {
-	client := options.Client
-	if client == nil {
-		client = newHubHTTPClient(0)
-	}
-	natsURL := strings.TrimSpace(options.NATSURL)
-	if natsURL == "" {
-		natsURL = nats.DefaultURL
-	}
-	subject := strings.TrimSpace(options.NATSSubj)
-	if subject == "" {
-		subject = "tier.updates"
-	}
-	nc, err := nats.Connect(natsURL)
-	if err != nil {
-		log.Printf("edge tier nats connect failed url=%s err=%v", natsURL, err)
-	}
-	return &TierManager{
-		hubAddr:     hubAddr,
-		rdb:         rdb,
-		authTok:     options.AuthToken,
-		client:      client,
-		natsConn:    nc,
-		natsSubject: subject,
-	}
-}
+func tierKey(prefix, apiKey string) string { return prefix + "\x00" + apiKey }
 
-// GetUserTier retrieves the tier for an API key.
-// It checks Redis first, then falls back to the Hub via singleflight.
-func (tm *TierManager) GetUserTier(ctx context.Context, prefix, apiKey string) (string, error) {
-	cacheKey := tm.getCacheKey(prefix, apiKey)
-
-	// 1. L1: Fast-path (Redis)
-	redisCtx, redisCancel := context.WithTimeout(ctx, defaultTierRedisOpTTL)
-	val, err := tm.rdb.Get(redisCtx, cacheKey).Result()
-	redisCancel()
-	if err == nil {
-		if val != "" {
-			tm.stale.Store(cacheKey, tierSnapshot{tier: val, updatedAt: time.Now()})
-		}
-		return val, nil
+// Get returns the key's tier, asking the hub on a miss.
+func (t *TierCache) Get(ctx context.Context, prefix, apiKey string) (string, error) {
+	key := tierKey(prefix, apiKey)
+	if e, _, fresh, ok := t.cache.get(key); ok && fresh && e.gen == t.gen.Load() {
+		return e.tier, nil
 	}
-
-	// 2. L2: Slow-path (Hub) with thundering herd protection
-	result, err, _ := tm.group.Do(cacheKey, func() (interface{}, error) {
-		hubCtx, hubCancel := context.WithTimeout(ctx, defaultTierHubOpTTL)
-		defer hubCancel()
-		tier, err := tm.fetchFromHub(hubCtx, prefix, apiKey)
+	ch := t.flights.DoChan(key, func() (any, error) {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveTimeout)
+		defer cancel()
+		gen := t.gen.Load()
+		tier, err := t.resolve(rctx, prefix, apiKey)
 		if err != nil {
 			return "", err
 		}
-
-		// 3. Backfill Redis so the next request is O(1). Unknown keys are
-		// cached briefly so a flood of bogus keys cannot pin cache memory,
-		// and newly issued keys still arrive via the NATS tier update.
-		ttl := tierCacheTTL
-		if tier == "" {
-			ttl = tierNegativeCacheTTL
-		}
-		backfillCtx, backfillCancel := context.WithTimeout(context.Background(), defaultTierRedisOpTTL)
-		defer backfillCancel()
-		if err := tm.rdb.Set(backfillCtx, cacheKey, tier, ttl).Err(); err != nil {
-			log.Printf("edge tier cache set failed prefix=%s err=%v", prefix, err)
-		}
-		if tier != "" {
-			tm.stale.Store(cacheKey, tierSnapshot{tier: tier, updatedAt: time.Now()})
-		}
-
+		t.store(key, tier, gen)
 		return tier, nil
 	})
-
-	if err != nil {
-		return "", fmt.Errorf("tier lookup failed: %w", err)
-	}
-
-	return result.(string), nil
-}
-
-func (tm *TierManager) fetchFromHub(ctx context.Context, prefix, apiKey string) (string, error) {
-	url := fmt.Sprintf("%s/tiers/%s/%s", tm.hubAddr, neturl.PathEscape(prefix), neturl.PathEscape(apiKey))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	if tm.authTok != "" {
-		req.Header.Set("Authorization", "Bearer "+tm.authTok)
-	}
-
-	resp, err := tm.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("hub returned status %d", resp.StatusCode)
-	}
-
-	var body struct {
-		Tier string `json:"tier"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", err
-	}
-
-	return body.Tier, nil
-}
-
-func (tm *TierManager) getCacheKey(prefix, apiKey string) string {
-	return fmt.Sprintf("tier:%s:%s", prefix, apiKey)
-}
-
-func (tm *TierManager) GetStaleTier(prefix, apiKey string, maxAge time.Duration) (string, bool) {
-	cacheKey := tm.getCacheKey(prefix, apiKey)
-	v, ok := tm.stale.Load(cacheKey)
-	if !ok {
-		return "", false
-	}
-	snapshot, ok := v.(tierSnapshot)
-	if !ok {
-		return "", false
-	}
-	if maxAge > 0 && time.Since(snapshot.updatedAt) > maxAge {
-		return "", false
-	}
-	if snapshot.tier == "" {
-		return "", false
-	}
-	return snapshot.tier, true
-}
-
-// StartHubUpdateListener subscribes to NATS tier updates and applies
-// the tier snapshot directly to local Redis cache.
-// The listener spawns a goroutine; cancel the provided context to stop it.
-func (tm *TierManager) StartHubUpdateListener(ctx context.Context) error {
-	if tm.natsConn == nil {
-		return nil
-	}
-	// Plain Subscribe, not a queue group: every edge owns its tier cache, so
-	// every edge must see every update.
-	sub, err := tm.natsConn.Subscribe(tm.natsSubject, func(msg *nats.Msg) {
-		tm.applyTierUpdatePayload(ctx, string(msg.Data))
-	})
-	if err != nil {
-		return err
-	}
-	if err := tm.natsConn.Flush(); err != nil {
-		_ = sub.Unsubscribe()
-		return err
-	}
-	go func() {
-		<-ctx.Done()
-		_ = sub.Unsubscribe()
-		tm.natsConn.Close()
-	}()
-	return nil
-}
-
-func (tm *TierManager) applyTierUpdatePayload(ctx context.Context, payload string) {
-	if !strings.HasPrefix(payload, "TIER_UPDATE:") {
-		return
-	}
-	parts := strings.SplitN(payload, ":", 4)
-	if len(parts) != 4 {
-		return
-	}
-	prefix := parts[1]
-	apiKey := parts[2]
-	tierID := parts[3]
-	cacheKey := tm.getCacheKey(prefix, apiKey)
-	if tierID == "" {
-		redisCtx, redisCancel := context.WithTimeout(ctx, defaultTierRedisOpTTL)
-		if err := tm.rdb.Del(redisCtx, cacheKey).Err(); err != nil {
-			log.Printf("edge tier cache delete failed key=%s err=%v", cacheKey, err)
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return "", res.Err
 		}
-		redisCancel()
-		tm.stale.Delete(cacheKey)
-		return
+		return res.Val.(string), nil
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
-	redisCtx, redisCancel := context.WithTimeout(ctx, defaultTierRedisOpTTL)
-	if err := tm.rdb.Set(redisCtx, cacheKey, tierID, tierCacheTTL).Err(); err != nil {
-		log.Printf("edge tier cache update failed key=%s tier=%s err=%v", cacheKey, tierID, err)
-		redisCancel()
-		return
-	}
-	redisCancel()
-	tm.stale.Store(cacheKey, tierSnapshot{tier: tierID, updatedAt: time.Now()})
 }
+
+func (t *TierCache) store(key, tier string, gen uint64) {
+	ttl := tierTTL
+	if tier == "" {
+		ttl = unknownKeyTTL
+	}
+	t.cache.set(key, tierEntry{tier: tier, gen: gen}, ttl, 1)
+}
+
+// Stale returns the last tier seen for a key if it is no older than maxAge.
+func (t *TierCache) Stale(prefix, apiKey string, maxAge time.Duration) (string, bool) {
+	e, storedAt, _, ok := t.cache.get(tierKey(prefix, apiKey))
+	if !ok || e.tier == "" || (maxAge > 0 && time.Since(storedAt) > maxAge) {
+		return "", false
+	}
+	return e.tier, true
+}
+
+// Set applies a tier change pushed by the hub ("" revokes the key).
+func (t *TierCache) Set(prefix, apiKey, tier string) {
+	t.store(tierKey(prefix, apiKey), tier, t.gen.Load())
+}
+
+// Reset marks every cached tier for revalidation (after a reconnect, when
+// changes may have been missed). Entries stay usable as stale fallbacks.
+func (t *TierCache) Reset() { t.gen.Add(1) }

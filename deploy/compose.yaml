@@ -1,7 +1,11 @@
 # Gate local stack. Start with `make up` (or `bash scripts/dev.sh up`).
 #
-#   default            hub + edge + echo upstream, with Redis and NATS
-#   --profile analytics  + ClickHouse and the analytics API/dashboard
+#   default            hub + Redis, edge, echo upstream
+#   --profile analytics  + NATS, ClickHouse and the analytics API/dashboard
+#
+# Edges hold one mTLS gRPC connection to the hub and keep their caches in
+# memory, so scaling out is `docker compose up --scale edge=N` behind a
+# load balancer (drop the fixed port mapping first).
 #   --profile demo       + a traffic generator that exercises every tier
 #
 # Ports: gateway :8080, hub API :8081, analytics :8091.
@@ -21,7 +25,6 @@ x-ready: &ready
   retries: 30
 
 x-env: &common-env
-  HUB_AUTH_TOKEN: ${GATE_HUB_TOKEN:-gate-local-token}
   NATS_URL: nats://nats:4222
 
 services:
@@ -47,6 +50,7 @@ services:
     healthcheck: { test: ["CMD", "redis-cli", "ping"], <<: *ready }
 
   nats:
+    profiles: ["analytics"]
     image: nats:2.10-alpine
     command: ["-m", "8222"]
     healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"], <<: *ready }
@@ -58,6 +62,7 @@ services:
       <<: *common-env
       PORT: "8080"
       HUB_GRPC_PORT: "9090"
+      HUB_AUTH_TOKEN: ${GATE_HUB_TOKEN:-gate-local-token}
       CONFIG_FILE_PATH: /etc/gate/gateway.yaml
       REDIS_ADDR: redis:6379
       HUB_TLS_CERT_FILE: /certs/hub/tls.crt
@@ -70,14 +75,7 @@ services:
     depends_on:
       certs: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
-      nats: { condition: service_healthy }
     healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"], <<: *ready }
-
-  # The edge's own Redis holds its tier and response caches.
-  edge-redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
-    healthcheck: { test: ["CMD", "redis-cli", "ping"], <<: *ready }
 
   edge:
     <<: *gate
@@ -86,8 +84,6 @@ services:
       <<: *common-env
       PORT: "8080"
       EDGE_ID: edge-1
-      REDIS_ADDR: edge-redis:6379
-      HUB_ADDR: http://hub:8080
       HUB_GRPC_ADDR: hub:9090
       HUB_GRPC_SERVER_NAME: hub
       EDGE_TLS_CERT_FILE: /certs/edge/tls.crt
@@ -97,7 +93,6 @@ services:
     ports: ["8080:8080"]
     depends_on:
       hub: { condition: service_healthy }
-      edge-redis: { condition: service_healthy }
       echo: { condition: service_started }
     healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"], <<: *ready }
 
@@ -125,10 +120,12 @@ services:
       <<: *common-env
       PORT: "8091"
       HUB_ADDR: http://hub:8080
+      HUB_AUTH_TOKEN: ${GATE_HUB_TOKEN:-gate-local-token}
       CLICKHOUSE_DSN: clickhouse://gate:gate@clickhouse:9000/gate
     ports: ["8091:8091"]
     depends_on:
       hub: { condition: service_healthy }
+      nats: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
     healthcheck: { test: ["CMD", "wget", "-qO-", "http://localhost:8091/readyz"], <<: *ready }
 

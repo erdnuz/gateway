@@ -3,112 +3,117 @@
 package integration
 
 import (
-	"encoding/json"
-	"gateway/packages/common/types"
-	"gateway/packages/edge"
-	"gateway/packages/hub"
+	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"gateway/packages/common/types"
+	"gateway/packages/config"
+	"gateway/packages/edge"
+	"gateway/packages/hub"
+
+	"google.golang.org/grpc"
 )
 
-func TestIntegration_StartupSafety_EdgeFailsWhenHubIsUnavailableWithoutBootstrap(t *testing.T) {
-	cm, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, "")
-	if err != nil {
-		t.Fatalf("expected edge startup to remain pending without bootstrap, got error: %v", err)
-	}
-	if cm.Get() == nil {
-		t.Fatal("expected non-nil config manager state when hub is unavailable")
-	}
-	if len(cm.Prefixes()) != 0 {
-		t.Fatalf("expected empty config while hub is unavailable, got %d prefixes", len(cm.Prefixes()))
-	}
-}
-
-func TestIntegration_StartupSafety_EdgeRecoversWhenHubStartsLate(t *testing.T) {
-	workDir := t.TempDir()
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
+// An edge started before its hub holds traffic, then serves once the hub
+// comes up and streams the config, with no restart.
+func TestIntegration_StartupSafety_EdgeWaitsForLateHub(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) }))
 	defer upstream.Close()
-
-	_, cfg, err := writeTestConfig(workDir, upstream.URL)
+	cfgPath, _, err := writeTestConfig(t.TempDir(), upstream.URL)
 	if err != nil {
-		t.Fatalf("write test config: %v", err)
+		t.Fatal(err)
 	}
 
-	cmPending, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, "")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("expected startup to remain pending before hub is available, got: %v", err)
+		t.Fatal(err)
 	}
-	if len(cmPending.Prefixes()) != 0 {
-		t.Fatalf("expected empty pending config before hub availability, got %d prefixes", len(cmPending.Prefixes()))
+	hubAddr := ln.Addr().String()
+	ln.Close() // the hub is not up yet
+
+	hubClient, err := edge.DialHub(hubAddr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hubClient.Close()
+	es := edge.NewServer(edge.Deps{Config: edge.NewConfigManager(nil), Tiers: edge.NewTierCache(hubClient.ResolveKey)}, edge.Options{})
+	es.SetStartupReady(false)
+	go es.FollowHub(ctx, hubClient)
+	edgeSrv := httptest.NewServer(es)
+	defer edgeSrv.Close()
+
+	if code := status(t, edgeSrv.URL+"/readyz"); code != http.StatusServiceUnavailable {
+		t.Fatalf("edge without a hub reported readyz %d", code)
 	}
 
-	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/config" {
-			http.NotFound(w, r)
-			return
+	cfgMgr, err := hub.NewConfigManager(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := hub.NewControlPlane(cfgMgr, hub.NewInMemoryTierStore(), nil)
+	grpcSrv := grpc.NewServer()
+	types.RegisterControlPlaneServer(grpcSrv, control)
+	ln, err = net.Listen("tcp", hubAddr)
+	if err != nil {
+		t.Fatalf("relisten %s: %v", hubAddr, err)
+	}
+	go func() { _ = grpcSrv.Serve(ln) }()
+	defer grpcSrv.Stop()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for status(t, edgeSrv.URL+"/readyz") != http.StatusOK {
+		if time.Now().After(deadline) {
+			t.Fatal("edge never became ready after the hub started")
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(cfg)
-	}))
-	defer hub.Close()
-
-	cm, err := edge.NewConfigManager(hub.URL, "", nil, "")
-	if err != nil {
-		t.Fatalf("expected edge startup to recover after hub becomes available, got: %v", err)
+		time.Sleep(100 * time.Millisecond)
 	}
-	if cm.Get() == nil || len(cm.Prefixes()) == 0 {
-		t.Fatal("expected hydrated config after hub startup")
+	if _, ok := es.Config.GetPrefix("v1"); !ok {
+		t.Fatal("edge is ready without the hub's config")
 	}
 }
 
-func TestIntegration_StartupSafety_EdgeBootstrapMisconfigThenValidFallback(t *testing.T) {
+func status(t *testing.T, url string) int {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestIntegration_StartupSafety_BootstrapConfigIsValidated(t *testing.T) {
 	workDir := t.TempDir()
 	badPath := filepath.Join(workDir, "bad-config.json")
 	if err := os.WriteFile(badPath, []byte(`{"prefixes":[{"prefix":"v1"}`), 0o600); err != nil {
 		t.Fatalf("write bad config: %v", err)
 	}
-
-	_, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, badPath)
-	if err == nil {
-		t.Fatal("expected startup failure with invalid bootstrap config")
+	if _, err := config.Load(badPath); err == nil {
+		t.Fatal("invalid bootstrap config accepted")
 	}
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer upstream.Close()
-
-	goodPath, cfg, err := writeTestConfig(workDir, upstream.URL)
+	goodPath, _, err := writeTestConfig(workDir, "http://upstream.invalid")
 	if err != nil {
-		t.Fatalf("write good config: %v", err)
+		t.Fatal(err)
 	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected generated config to be valid, got: %v", err)
-	}
-
-	cm, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, goodPath)
+	cfg, err := config.Load(goodPath)
 	if err != nil {
-		t.Fatalf("expected startup success with valid bootstrap fallback, got: %v", err)
+		t.Fatalf("valid bootstrap config rejected: %v", err)
 	}
-	if cm.Get() == nil {
-		t.Fatal("expected non-nil config after valid bootstrap fallback")
-	}
-
-	if _, ok := cm.GetPrefix("v1"); !ok {
-		t.Fatal("expected prefix v1 in hydrated fallback config")
+	if _, ok := edge.NewConfigManager(cfg).GetPrefix("v1"); !ok {
+		t.Fatal("bootstrap config is missing prefix v1")
 	}
 }
 
 func TestIntegration_StartupSafety_HubConfigValidationRejectsInvalidConfig(t *testing.T) {
-	cfg := &types.GatewayConfig{}
-	if err := hub.ValidateGatewayConfig(cfg); err == nil {
+	if err := hub.ValidateGatewayConfig(&types.GatewayConfig{}); err == nil {
 		t.Fatal("expected invalid empty gateway config to fail validation")
 	}
 }

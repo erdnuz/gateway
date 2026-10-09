@@ -1,93 +1,55 @@
-# Hub Service
+# Hub
 
-Hub is the control-plane authority.
+The hub is the control plane. Run it with `gate hub`;
+[internal/app/hubapp](../internal/app/hubapp/hubapp.go) wires it. It keeps
+no state of its own (everything lives in Redis), so hubs can run as replicas
+behind a gRPC load balancer. See [architecture](architecture.md#one-control-plane-channel).
 
-## Main Entry
+## Edge-facing gRPC (`HUB_GRPC_PORT`, mTLS)
 
-- internal/app/hubapp (wiring; run with `gate hub`)
+Defined in [api/proto/quota_lease.proto](../api/proto/quota_lease.proto):
 
-## Responsibilities
+| Service | Call | Purpose |
+| --- | --- | --- |
+| `QuotaLeaseService` | `RequestQuotaLease` | grant tokens from a key's quota for the current window, or answer WAITING |
+| `ControlPlane` | `Watch` | stream a config snapshot, then config and tier changes |
+| `ControlPlane` | `ResolveKey` | a key's tier, for an edge's tier-cache miss |
 
-- Load, validate, and serve gateway config.
-- Manage tier assignments per prefix and API key.
-- Provide authoritative quota/lease coordination.
-- Publish tier update events to edge instances.
+A change made through any hub is published on the Redis channel
+`gate:control`, and every hub relays it to its own watchers
+([controlplane.go](../packages/hub/controlplane.go)). Config changes from
+another hub are validated and adopted, so all hubs serve the same config.
 
-## APIs
+## Admin HTTP API (`PORT`)
 
-Common endpoints include:
+Every endpoint except `/healthz` and `/readyz` needs
+`Authorization: Bearer $HUB_AUTH_TOKEN`. Errors are RFC 9457 problem
+responses.
 
-- `GET /healthz`
-- `GET /readyz`
-- `GET /config`
-- `POST|PUT /config-reload`
-- `POST|PUT /config-reload/dry-run`
-- `GET|POST /rate/{prefix}/{api_key}`
-- `GET|POST|PUT|DELETE /tiers/{prefix}/{api_key}`
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /healthz`, `GET /readyz` | liveness, and readiness (Redis reachable, `noeviction`) |
+| `GET /status` | edges connected to this hub |
+| `GET /config` | the compiled config (analytics reads it) |
+| `POST /config-reload` | reload from `CONFIG_FILE_PATH` (empty body) or apply a v2 document (body) |
+| `POST /config-reload/dry-run` | validate and analyse a reload without applying it |
+| `GET\|POST\|DELETE /tiers/{group}/{api_key}` | read, assign (`{"tier_id": "pro"}`) or revoke a key's tier |
 
-Most endpoints require Authorization: Bearer <HUB_AUTH_TOKEN>.
+A reload or tier change takes effect on every edge within one Redis
+publish and one stream send. The load test's `propagation` scenario
+measures it.
 
-`/healthz` and `/readyz` do not require auth.
+Dry-run responses report `mode` (`file` or `payload`), `valid`,
+`analysis.changed_sections`, `analysis.invalidations.response_cache` (the
+response-cache scopes edges will drop) and `analysis.warnings`.
 
-## Runtime Config Updates
+## State
 
-Hub supports runtime config updates in two modes:
+| Key | Holds |
+| --- | --- |
+| `lease-used:{group}:{service}:{key}:{window}` | tokens granted in a window; one Lua script grants atomically, and the key expires after two windows |
+| `hub:tier:{group}:{key}` | a key's tier |
+| channel `gate:control` | config and tier changes, shared between hubs |
 
-- File mode: send an empty body to `POST /config-reload` (or `/config-reload/dry-run`) and Hub loads from `CONFIG_FILE_PATH`.
-- Payload mode: send a JSON `GatewayConfig` body to `POST /config-reload` (or `/config-reload/dry-run`).
-
-Dry-run validates and analyzes the update without applying it.
-
-Example dry-run response fields:
-
-- `mode`: `file` or `payload`
-- `valid`: validation result
-- `analysis.changed_sections`
-- `analysis.invalidations.response_cache`
-- `analysis.warnings`
-- `next_epoch`
-
-Apply endpoint behavior:
-
-- Validates config before apply.
-- Applies atomically in Hub.
-- Publishes a structured reload event to the config reload channel.
-- Returns `204 No Content` on success.
-
-## Config Reload Event
-
-Hub publishes a `ConfigReloadEvent` on NATS subject `HUB_CONFIG_RELOAD_SUBJECT` (default: `gate.config.reload`), which every edge and analytics instance receives.
-
-Event includes:
-
-- `version`
-- `boot_id` (identifies the hub process)
-- `epoch` (monotonic within one `boot_id`)
-- `reloaded_at_utc`
-- `invalidations.response_cache` scopes
-
-Edge subscribers use this event to refresh config and execute scoped response-cache invalidation.
-
-## Config Validation
-
-Hub validates policy at startup, including:
-
-- prefix/service/tier structure
-- duplicate detection
-- target URL validity
-- policy and retry range checks
-
-## Messaging and State
-
-- Stores authoritative state in Redis.
-- Publishes tier update invalidation events via NATS.
-- Publishes config reload events via Redis Pub/Sub.
-- Coordinates with edge lease clients over mTLS gRPC where configured.
-
-## Key Hub Packages
-
-- packages/hub/server.go
-- packages/hub/config.go
-- packages/hub/tiers.go
-- packages/hub/rates.go
-- packages/hub/quota_lease_server.go
+Redis must use `maxmemory-policy noeviction`: an evicted ledger key would
+re-grant a window's quota.

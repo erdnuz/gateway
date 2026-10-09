@@ -48,7 +48,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 // resolveTier asks the tier cache (backed by the hub) and, when the hub is
 // unreachable, falls back as the service's policy allows.
 func (s *Server) resolveTier(ctx context.Context, st *request, key string) (string, error) {
-	tier, err := s.Tiers.GetUserTier(ctx, st.scope, key)
+	tier, err := s.Tiers.Get(ctx, st.scope, key)
 	if err == nil {
 		return tier, nil
 	}
@@ -57,7 +57,7 @@ func (s *Server) resolveTier(ctx context.Context, st *request, key string) (stri
 	case "default-tier":
 		tier = p.DefaultTier
 	case "stale-or-default":
-		if stale, ok := s.Tiers.GetStaleTier(st.scope, key, p.StaleTierMaxAge); ok {
+		if stale, ok := s.Tiers.Stale(st.scope, key, p.StaleTierMaxAge); ok {
 			return stale, nil
 		}
 		tier = p.DefaultTier

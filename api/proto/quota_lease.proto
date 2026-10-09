@@ -1,5 +1,8 @@
 syntax = "proto3";
 
+// The hub <-> edge protocol. Each edge holds one mTLS connection to a hub and
+// uses it for everything: leasing quota, resolving API keys, and watching for
+// config and tier changes.
 package gate.quota.v1;
 
 option go_package = "gateway/packages/common/types;types";
@@ -25,4 +28,55 @@ message QuotaLeaseResponse {
 
 service QuotaLeaseService {
   rpc RequestQuotaLease(QuotaLeaseRequest) returns (QuotaLeaseResponse);
+}
+
+message WatchRequest {
+  string edge_id = 1;
+}
+
+// ControlEvent is one change pushed to a watching edge. Every stream starts
+// with a ConfigSnapshot; a new stream after a reconnect starts with one too,
+// so an edge that missed events simply resynchronises.
+message ControlEvent {
+  oneof event {
+    ConfigSnapshot config = 1;
+    TierChange tier = 2;
+  }
+}
+
+message ConfigSnapshot {
+  // The compiled gateway config as JSON (types.GatewayConfig).
+  bytes config_json = 1;
+  // Response-cache scopes made stale by this config (empty on the first
+  // snapshot of a stream).
+  repeated CacheScope invalidate = 2;
+  // reset_tiers tells the edge to revalidate every cached key tier: the
+  // stream is new, so tier changes may have been missed.
+  bool reset_tiers = 3;
+}
+
+message CacheScope {
+  string prefix = 1;
+  string service_id = 2; // empty: the whole prefix
+}
+
+// TierChange reports a key's new tier; an empty tier_id means revoked.
+message TierChange {
+  string prefix = 1;
+  string api_key = 2;
+  string tier_id = 3;
+}
+
+message ResolveKeyRequest {
+  string prefix = 1;
+  string api_key = 2;
+}
+
+message ResolveKeyResponse {
+  string tier_id = 1; // empty: the key is unknown
+}
+
+service ControlPlane {
+  rpc Watch(WatchRequest) returns (stream ControlEvent);
+  rpc ResolveKey(ResolveKeyRequest) returns (ResolveKeyResponse);
 }

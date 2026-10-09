@@ -40,11 +40,6 @@ type HubRuntimePolicy struct {
 	CORSAllowedMethods  []string      `bson:"cors_allowed_methods" json:"cors_allowed_methods,omitempty"`
 	CORSPreflightMaxAge time.Duration `bson:"cors_preflight_max_age" json:"cors_preflight_max_age,omitempty"`
 	APIKeyPattern       string        `bson:"api_key_pattern" json:"api_key_pattern,omitempty"`
-	QueueWorkers        int           `bson:"queue_workers" json:"queue_workers,omitempty"`
-	QueueSubmitTimeout  time.Duration `bson:"queue_submit_timeout" json:"queue_submit_timeout,omitempty"`
-	QueueRetryMax       int           `bson:"queue_retry_max" json:"queue_retry_max,omitempty"`
-	QueueRetryBackoff   time.Duration `bson:"queue_retry_backoff" json:"queue_retry_backoff,omitempty"`
-	TierUpdatesSubject  string        `bson:"tier_updates_subject" json:"tier_updates_subject,omitempty"`
 	HTTPReadTimeout     time.Duration `bson:"http_read_timeout" json:"http_read_timeout,omitempty"`
 	HTTPWriteTimeout    time.Duration `bson:"http_write_timeout" json:"http_write_timeout,omitempty"`
 	HTTPShutdownTimeout time.Duration `bson:"http_shutdown_timeout" json:"http_shutdown_timeout,omitempty"`
@@ -59,7 +54,6 @@ type EdgeRuntimePolicy struct {
 	UpstreamClientTimeout   time.Duration `bson:"upstream_client_timeout" json:"upstream_client_timeout,omitempty"`
 	UpstreamMaxIdleConns    int           `bson:"upstream_max_idle_conns" json:"upstream_max_idle_conns,omitempty"`
 	UpstreamIdleConnTimeout time.Duration `bson:"upstream_idle_conn_timeout" json:"upstream_idle_conn_timeout,omitempty"`
-	HubHTTPTimeout          time.Duration `bson:"hub_http_timeout" json:"hub_http_timeout,omitempty"`
 	HTTPReadTimeout         time.Duration `bson:"http_read_timeout" json:"http_read_timeout,omitempty"`
 	HTTPWriteTimeout        time.Duration `bson:"http_write_timeout" json:"http_write_timeout,omitempty"`
 	HTTPIdleTimeout         time.Duration `bson:"http_idle_timeout" json:"http_idle_timeout,omitempty"`
@@ -87,11 +81,6 @@ func DefaultRuntimePolicy() RuntimePolicy {
 			CORSAllowedMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 			CORSPreflightMaxAge: 5 * time.Minute,
 			APIKeyPattern:       "^[A-Za-z0-9]{3,128}$",
-			QueueWorkers:        2,
-			QueueSubmitTimeout:  25 * time.Millisecond,
-			QueueRetryMax:       1,
-			QueueRetryBackoff:   10 * time.Millisecond,
-			TierUpdatesSubject:  "tier.updates",
 			HTTPReadTimeout:     5 * time.Second,
 			HTTPWriteTimeout:    10 * time.Second,
 			HTTPShutdownTimeout: 15 * time.Second,
@@ -105,7 +94,6 @@ func DefaultRuntimePolicy() RuntimePolicy {
 			UpstreamClientTimeout:   30 * time.Second,
 			UpstreamMaxIdleConns:    100,
 			UpstreamIdleConnTimeout: 90 * time.Second,
-			HubHTTPTimeout:          5 * time.Second,
 			HTTPReadTimeout:         15 * time.Second,
 			HTTPWriteTimeout:        15 * time.Second,
 			HTTPIdleTimeout:         60 * time.Second,
@@ -141,21 +129,6 @@ func (rp RuntimePolicy) Effective() RuntimePolicy {
 	if strings.TrimSpace(rp.Hub.APIKeyPattern) == "" {
 		rp.Hub.APIKeyPattern = defaults.Hub.APIKeyPattern
 	}
-	if rp.Hub.QueueWorkers <= 0 {
-		rp.Hub.QueueWorkers = defaults.Hub.QueueWorkers
-	}
-	if rp.Hub.QueueSubmitTimeout <= 0 {
-		rp.Hub.QueueSubmitTimeout = defaults.Hub.QueueSubmitTimeout
-	}
-	if rp.Hub.QueueRetryMax <= 0 {
-		rp.Hub.QueueRetryMax = defaults.Hub.QueueRetryMax
-	}
-	if rp.Hub.QueueRetryBackoff <= 0 {
-		rp.Hub.QueueRetryBackoff = defaults.Hub.QueueRetryBackoff
-	}
-	if strings.TrimSpace(rp.Hub.TierUpdatesSubject) == "" {
-		rp.Hub.TierUpdatesSubject = defaults.Hub.TierUpdatesSubject
-	}
 	if rp.Hub.HTTPReadTimeout <= 0 {
 		rp.Hub.HTTPReadTimeout = defaults.Hub.HTTPReadTimeout
 	}
@@ -189,9 +162,6 @@ func (rp RuntimePolicy) Effective() RuntimePolicy {
 	}
 	if rp.Edge.UpstreamIdleConnTimeout <= 0 {
 		rp.Edge.UpstreamIdleConnTimeout = defaults.Edge.UpstreamIdleConnTimeout
-	}
-	if rp.Edge.HubHTTPTimeout <= 0 {
-		rp.Edge.HubHTTPTimeout = defaults.Edge.HubHTTPTimeout
 	}
 	if rp.Edge.HTTPReadTimeout <= 0 {
 		rp.Edge.HTTPReadTimeout = defaults.Edge.HTTPReadTimeout
@@ -260,14 +230,8 @@ func (p HubRuntimePolicy) Validate() error {
 	if p.CORSPreflightMaxAge < 0 {
 		return errConfig("cors_preflight_max_age must be >= 0")
 	}
-	if p.QueueWorkers < 0 {
-		return errConfig("queue_workers must be >= 0")
-	}
-	if p.QueueSubmitTimeout < 0 || p.QueueRetryBackoff < 0 || p.HTTPReadTimeout < 0 || p.HTTPWriteTimeout < 0 || p.HTTPShutdownTimeout < 0 {
+	if p.HTTPReadTimeout < 0 || p.HTTPWriteTimeout < 0 || p.HTTPShutdownTimeout < 0 {
 		return errConfig("timeouts must be >= 0")
-	}
-	if p.QueueRetryMax < 0 {
-		return errConfig("queue_retry_max must be >= 0")
 	}
 	return nil
 }
@@ -288,7 +252,7 @@ func (p EdgeRuntimePolicy) Validate() error {
 	if p.CacheMaxObjectBytes < 0 {
 		return errConfig("cache_max_object_bytes must be >= 0")
 	}
-	if p.UpstreamClientTimeout < 0 || p.UpstreamIdleConnTimeout < 0 || p.HubHTTPTimeout < 0 || p.HTTPReadTimeout < 0 || p.HTTPWriteTimeout < 0 || p.HTTPIdleTimeout < 0 {
+	if p.UpstreamClientTimeout < 0 || p.UpstreamIdleConnTimeout < 0 || p.HTTPReadTimeout < 0 || p.HTTPWriteTimeout < 0 || p.HTTPIdleTimeout < 0 {
 		return errConfig("edge timeouts must be >= 0")
 	}
 	if p.UpstreamMaxIdleConns < 0 {

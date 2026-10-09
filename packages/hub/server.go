@@ -3,16 +3,13 @@ package hub
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"gateway/packages/common/httpx"
 	"gateway/packages/common/types"
-	"gateway/packages/common/workers"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -20,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9" // Updated to v9
 )
 
@@ -63,21 +59,12 @@ type HubServer struct {
 	cfgManager        ConfigRegistry
 	tierManager       TierStore
 	authToken         string
-	asyncQueue        *workers.BoundedQueue
-	queueWorkers      int
-	submitTimeout     time.Duration
-	retryMax          int
-	retryBackoff      time.Duration
-	messaging         atomic.Pointer[natsMessaging] // set once NATS is reachable
-	configReloadSubj  string
-	bootID            string
+	control           *ControlPlane // nil: changes are not pushed to edges
 	corsPolicy        atomic.Pointer[corsPolicy]
 	apiKeyPattern     atomic.Pointer[regexp.Regexp]
 	readyHealthy      atomic.Bool
 	pendingDependency atomic.Value
 	readyProbeStarted atomic.Bool
-	tierPublishErrors atomic.Uint64
-	configEpoch       atomic.Uint64
 }
 
 type configFileLoader interface {
@@ -89,31 +76,20 @@ type configPayloadReloader interface {
 }
 
 type configUpdateReport struct {
-	Mode      string               `json:"mode"`
-	Valid     bool                 `json:"valid"`
-	Analysis  configUpdateAnalysis `json:"analysis"`
-	NextEpoch uint64               `json:"next_epoch"`
+	Mode     string               `json:"mode"`
+	Valid    bool                 `json:"valid"`
+	Analysis configUpdateAnalysis `json:"analysis"`
 }
 
-func NewHubServerWithManagers(
-	rdb *redis.Client,
-	cfg ConfigRegistry,
-	tierStore TierStore,
-	authToken string,
-) *HubServer {
-	queue := workers.NewBoundedQueue(512)
+// NewHubServer builds the hub's admin HTTP API. Config and tier changes made
+// through it are pushed to edges by control.
+func NewHubServer(rdb *redis.Client, cfg ConfigRegistry, tierStore TierStore, control *ControlPlane, authToken string) *HubServer {
 	server := &HubServer{
-		rdb:              rdb,
-		cfgManager:       cfg,
-		tierManager:      tierStore,
-		authToken:        authToken,
-		asyncQueue:       queue,
-		queueWorkers:     2,
-		submitTimeout:    25 * time.Millisecond,
-		retryMax:         1,
-		retryBackoff:     10 * time.Millisecond,
-		configReloadSubj: types.DefaultConfigReloadSubject,
-		bootID:           newBootID(),
+		rdb:         rdb,
+		cfgManager:  cfg,
+		tierManager: tierStore,
+		authToken:   authToken,
+		control:     control,
 	}
 	server.readyHealthy.Store(false)
 	server.corsPolicy.Store(newCORSPolicy(
@@ -123,7 +99,7 @@ func NewHubServerWithManagers(
 		5*time.Minute,
 	))
 	server.apiKeyPattern.Store(regexp.MustCompile(types.DefaultRuntimePolicy().Hub.APIKeyPattern))
-	server.pendingDependency.Store("redis,nats")
+	server.pendingDependency.Store("redis")
 	return server
 }
 
@@ -176,14 +152,6 @@ func (s *HubServer) SetCORSAllowedOrigins(origins []string) {
 	s.corsPolicy.Store(newCORSPolicy(allowed, current.allowHeaders, current.allowMethods, current.maxAge))
 }
 
-// SetConfigReloadSubject sets the NATS subject for config reload events.
-func (s *HubServer) SetConfigReloadSubject(subject string) {
-	if strings.TrimSpace(subject) == "" {
-		return
-	}
-	s.configReloadSubj = subject
-}
-
 func newBootID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -220,44 +188,6 @@ func (s *HubServer) SetAPIKeyPattern(pattern string) error {
 	}
 	s.apiKeyPattern.Store(re)
 	return nil
-}
-
-func (s *HubServer) SetTierUpdateMessaging(natsURL, subject string) error {
-	if strings.TrimSpace(natsURL) == "" {
-		natsURL = nats.DefaultURL
-	}
-	if strings.TrimSpace(subject) == "" {
-		subject = "tier.updates"
-	}
-	nc, err := nats.Connect(natsURL)
-	if err != nil {
-		return err
-	}
-	if prev := s.messaging.Swap(&natsMessaging{conn: nc, tierSubject: subject}); prev != nil {
-		prev.conn.Close()
-	}
-	return nil
-}
-
-func (s *HubServer) SetAsyncQueueConfig(workersCount int, submitTimeout time.Duration, retryMax int, retryBackoff time.Duration) {
-	if workersCount > 0 {
-		s.queueWorkers = workersCount
-	}
-	if submitTimeout > 0 {
-		s.submitTimeout = submitTimeout
-	}
-	if retryMax >= 0 {
-		s.retryMax = retryMax
-	}
-	if retryBackoff > 0 {
-		s.retryBackoff = retryBackoff
-	}
-}
-
-func (s *HubServer) StartBackgroundWorkers(ctx context.Context) {
-	if s.asyncQueue != nil {
-		s.asyncQueue.Start(ctx, s.queueWorkers)
-	}
 }
 
 func (s *HubServer) startReadinessProbe(ctx context.Context) {
@@ -325,8 +255,8 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleConfigReload(w, r)
-	case "queue-metrics":
-		s.handleQueueMetrics(w, r)
+	case "status":
+		s.handleStatus(w, r)
 	case "tiers":
 		s.handleTiers(w, r, ctx, parts[1:])
 	default:
@@ -427,14 +357,9 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	event := types.ConfigReloadEvent{
-		Version:       types.ConfigReloadEventVersion,
-		BootID:        s.bootID,
-		Epoch:         s.configEpoch.Add(1),
-		ReloadedAtUTC: time.Now().UTC().Format(time.RFC3339Nano),
-		Invalidations: analysis.Invalidations,
+	if s.control != nil {
+		s.control.PublishConfig(s.cfgManager.Snapshot(), analysis.Invalidations.ResponseCache)
 	}
-	s.publishConfigReloadEvent(event)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -451,10 +376,9 @@ func (s *HubServer) handleConfigReloadDryRun(w http.ResponseWriter, r *http.Requ
 	analysis := analyzeConfigUpdate(s.cfgManager.Snapshot(), nextCfg)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(configUpdateReport{
-		Mode:      mode,
-		Valid:     true,
-		Analysis:  analysis,
-		NextEpoch: s.configEpoch.Load() + 1,
+		Mode:     mode,
+		Valid:    true,
+		Analysis: analysis,
 	})
 }
 
@@ -482,23 +406,6 @@ func (s *HubServer) resolveReloadTargetConfig(r *http.Request) (*types.GatewayCo
 	return cfg, "file", nil
 }
 
-// publishConfigReloadEvent fans the event out on NATS to every edge and
-// analytics instance.
-func (s *HubServer) publishConfigReloadEvent(event types.ConfigReloadEvent) {
-	payload, err := json.Marshal(event)
-	if err != nil {
-		log.Printf("hub config reload event marshal failed: %v", err)
-		return
-	}
-	if m := s.messaging.Load(); m != nil {
-		if err := m.conn.Publish(s.configReloadSubj, payload); err != nil {
-			log.Printf("hub config reload nats publish failed subject=%s err=%v", s.configReloadSubj, err)
-		}
-	} else {
-		log.Printf("hub config reload: nats not connected; edges will not see epoch %d", event.Epoch)
-	}
-}
-
 func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
@@ -514,22 +421,17 @@ func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
 
-func (s *HubServer) handleQueueMetrics(w http.ResponseWriter, r *http.Request) {
+// handleStatus reports how many edges are watching this hub.
+func (s *HubServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	snapshot := workers.QueueSnapshot{}
-	if s.asyncQueue != nil {
-		snapshot = s.asyncQueue.Snapshot()
+	edges := 0
+	if s.control != nil {
+		edges = s.control.Watchers()
 	}
-	write := map[string]interface{}{
-		"tier_update_queue":                    snapshot,
-		"tier_update_publish_failures":         s.tierPublishErrors.Load(),
-		"tier_update_submit_non_blocking_mode": true,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(write)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"edges_connected": edges, "ready": s.readyHealthy.Load()})
 }
 
 func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx context.Context, params []string) {
@@ -576,8 +478,7 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 			return
 		}
 
-		// Broadcast tier update so Edges can update cache directly.
-		s.publishTierUpdate(prefix, apiKey, req.TierID)
+		s.publishTier(prefix, apiKey, req.TierID)
 		w.WriteHeader(http.StatusOK)
 
 	case http.MethodDelete:
@@ -586,8 +487,7 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 			return
 		}
 
-		// Empty tier indicates deletion/eviction on edge caches.
-		s.publishTierUpdate(prefix, apiKey, "")
+		s.publishTier(prefix, apiKey, "") // revoked
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -644,69 +544,10 @@ func (s *HubServer) matchesAPIKey(apiKey string) bool {
 	return pattern.MatchString(apiKey)
 }
 
-func (s *HubServer) publishTierUpdate(prefix, apiKey, tierID string) {
-	if s.asyncQueue == nil {
-		return
+// publishTier pushes a key's new tier to every edge, so revocations take
+// effect without waiting for cached tiers to expire.
+func (s *HubServer) publishTier(prefix, apiKey, tierID string) {
+	if s.control != nil {
+		s.control.PublishTier(prefix, apiKey, tierID)
 	}
-	msg := s.messaging.Load()
-	if msg == nil {
-		msg = &natsMessaging{} // not connected yet: the task is a no-op
-	}
-	task := &tierUpdateTask{
-		prefix:   prefix,
-		apiKey:   apiKey,
-		tierID:   tierID,
-		retryMax: s.retryMax,
-		backoff:  s.retryBackoff,
-		conn:     msg.conn,
-		subject:  msg.tierSubject,
-		errorCnt: &s.tierPublishErrors,
-	}
-	if err := s.asyncQueue.Submit(task, 0); err != nil {
-		log.Printf("hub tier update queue submit failed prefix=%s key=%s tier=%s err=%v", prefix, redactKey(apiKey), tierID, err)
-	}
-}
-
-// natsMessaging is replaced as a whole so request handlers never observe a
-// connection without its subject.
-type natsMessaging struct {
-	conn        *nats.Conn
-	tierSubject string
-}
-
-type tierUpdateTask struct {
-	prefix   string
-	apiKey   string
-	tierID   string
-	retryMax int
-	backoff  time.Duration
-	conn     *nats.Conn
-	subject  string
-	errorCnt *atomic.Uint64
-}
-
-func (t *tierUpdateTask) Execute(ctx context.Context) error {
-	_ = ctx
-	payload := "TIER_UPDATE:" + t.prefix + ":" + t.apiKey + ":" + t.tierID
-	if t.conn == nil {
-		return nil
-	}
-	if err := t.conn.Publish(t.subject, []byte(payload)); err != nil {
-		if t.errorCnt != nil {
-			t.errorCnt.Add(1)
-		}
-		log.Printf("hub tier update nats publish failed prefix=%s key=%s tier=%s subject=%s err=%v", t.prefix, redactKey(t.apiKey), t.tierID, t.subject, err)
-		return err
-	}
-	return nil
-}
-
-func (t *tierUpdateTask) RetryPolicy() *workers.RetryPolicy {
-	return &workers.RetryPolicy{MaxRetries: t.retryMax, Backoff: t.backoff}
-}
-
-// redactKey returns a log-safe fingerprint of an API key.
-func redactKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
-	return "sha256:" + hex.EncodeToString(sum[:6])
 }

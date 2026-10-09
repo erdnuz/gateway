@@ -6,13 +6,11 @@ import (
 	"time"
 
 	"gateway/packages/common/types"
-
-	"github.com/redis/go-redis/v9"
 )
 
 func TestGenerateCacheKeySupportsLowercasePlaceholders(t *testing.T) {
 	cm := NewCacheManager(
-		redis.NewClient(&redis.Options{Addr: "localhost:0"}),
+		NewMemoryResponses(1<<20),
 		types.CacheConfig{Enabled: true, TTL: time.Minute, CacheKey: "$method:$path:$query:$key:$enc"},
 	)
 

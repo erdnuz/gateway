@@ -16,7 +16,7 @@ over a typed per-request state:
 | analytics | [`analytics.go`](../packages/edge/analytics.go) | records status, bytes and latency; publishes to NATS from a bounded buffer |
 | route | [`route.go`](../packages/edge/route.go) | `/{group}/{service}/...` to a configured service, otherwise `404 no_route` |
 | CORS | [`route.go`](../packages/edge/route.go) | answers preflights before authentication |
-| auth | [`auth.go`](../packages/edge/auth.go) | `X-API-Key` must match `runtime.hub.api_key_pattern`; maps the key to a tier (Redis cache, then the hub) |
+| auth | [`auth.go`](../packages/edge/auth.go) | `X-API-Key` must match `runtime.hub.api_key_pattern`; maps the key to a tier ([in-memory cache](../packages/edge/tiers.go), then the hub) |
 | cache | [`cache.go`](../packages/edge/cache.go) | GET hits are served before rate limiting, so they cost no quota |
 | rate limit | [`ratelimit.go`](../packages/edge/ratelimit.go) | charges the key's quota through a [`limiter.Limiter`](../packages/limiter/limiter.go) |
 | proxy | [`proxy.go`](../packages/edge/proxy.go) | `httputil.ReverseProxy`: streaming, trailers and protocol upgrades; retries and the failure policy |
@@ -69,7 +69,8 @@ body:
 ## Operational endpoints
 
 - `/healthz`: the process is up.
-- `/readyz`: the edge has seen the hub ready once and its own Redis answers.
-  Hub outages deliberately do not fail it.
+- `/readyz`: the edge has received a config from the hub (or was started with
+  a bootstrap config), and its Redis response store answers if it uses one.
+  Later hub outages deliberately do not fail it.
 - `/analytics/metrics`: analytics buffer counters. It needs
   `Authorization: Bearer $EDGE_ADMIN_TOKEN` and returns 404 when the token is unset.

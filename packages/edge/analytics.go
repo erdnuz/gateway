@@ -117,7 +117,9 @@ func NewAnalyticsManagerWithNATSOptions(bufferSize int, natsURL, subject string,
 	if options.PublishTimeout <= 0 {
 		options.PublishTimeout = def.Edge.AnalyticsPublishTimeout
 	}
-	nc, err := nats.Connect(orDefault(natsURL, nats.DefaultURL))
+	// Keep retrying: analytics may start after the edge, and requests never
+	// wait on it either way.
+	nc, err := nats.Connect(orDefault(natsURL, nats.DefaultURL), nats.RetryOnFailedConnect(true), nats.MaxReconnects(-1))
 	if err != nil {
 		slog.Warn("analytics NATS connect failed; entries will be dropped", "url", natsURL, "err", err)
 	}

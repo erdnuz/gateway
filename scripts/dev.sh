@@ -100,6 +100,14 @@ case "${task}" in
   certs)
     bash deploy/gen-dev-certs.sh deploy/certs hub,localhost
     ;;
+  proto)
+    # Regenerates packages/common/types from api/proto in a pinned toolchain.
+    docker run --rm -v "$(pwd -W 2>/dev/null || pwd)":/src -w /src "${GO_IMAGE}" sh -c '
+      apt-get update -qq >/dev/null && apt-get install -y -qq protobuf-compiler >/dev/null &&
+      GOBIN=/usr/local/bin go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.10 &&
+      GOBIN=/usr/local/bin go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1 &&
+      protoc --go_out=. --go_opt=module=gateway --go-grpc_out=. --go-grpc_opt=module=gateway api/proto/*.proto'
+    ;;
   help|*)
     cat <<'EOF'
 Usage: make <task>   (or: bash scripts/dev.sh <task>)
@@ -115,6 +123,7 @@ Usage: make <task>   (or: bash scripts/dev.sh <task>)
   loadtest [label]  end-to-end rate-limiter load test
   lint              formatting and vet
   certs             generate dev mTLS certs into deploy/certs
+  proto             regenerate gRPC code from api/proto
 EOF
     ;;
 esac

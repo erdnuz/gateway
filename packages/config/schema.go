@@ -112,14 +112,9 @@ type Runtime struct {
 // HubRuntime tunes the hub.
 type HubRuntime struct {
 	APIKeyPattern      string   `yaml:"api_key_pattern,omitempty" desc:"Regular expression every API key must match. Default ^[A-Za-z0-9]{3,128}$."`
-	TierUpdatesSubject string   `yaml:"tier_updates_subject,omitempty" desc:"NATS subject for tier changes. Default tier.updates."`
 	CORSHeaders        []string `yaml:"cors_headers,omitempty" desc:"Headers allowed on cross-origin hub API calls."`
 	CORSMethods        []string `yaml:"cors_methods,omitempty" desc:"Methods allowed on cross-origin hub API calls."`
 	CORSMaxAge         Duration `yaml:"cors_max_age,omitempty" desc:"Preflight cache time for the hub API. Default 5m."`
-	QueueWorkers       int      `yaml:"queue_workers,omitempty" desc:"Workers publishing tier updates. Default 2."`
-	QueueSubmitTimeout Duration `yaml:"queue_submit_timeout,omitempty" desc:"Wait for queue space before dropping an update. Default 25ms."`
-	QueueRetries       int      `yaml:"queue_retries,omitempty" desc:"Publish retries per tier update. Default 1."`
-	QueueRetryBackoff  Duration `yaml:"queue_retry_backoff,omitempty" desc:"Pause between publish retries. Default 10ms."`
 	ReadTimeout        Duration `yaml:"read_timeout,omitempty" desc:"HTTP read timeout. Default 5s."`
 	WriteTimeout       Duration `yaml:"write_timeout,omitempty" desc:"HTTP write timeout. Default 10s."`
 	ShutdownTimeout    Duration `yaml:"shutdown_timeout,omitempty" desc:"Graceful shutdown limit. Default 15s."`
@@ -135,7 +130,6 @@ type EdgeRuntime struct {
 	UpstreamTimeout         Duration `yaml:"upstream_timeout,omitempty" desc:"Overall upstream request timeout. Default 30s."`
 	UpstreamMaxIdleConns    int      `yaml:"upstream_max_idle_conns,omitempty" desc:"Idle keep-alive connections per upstream. Default 100."`
 	UpstreamIdleConnTimeout Duration `yaml:"upstream_idle_conn_timeout,omitempty" desc:"Default 90s."`
-	HubTimeout              Duration `yaml:"hub_timeout,omitempty" desc:"Timeout for hub API calls. Default 5s."`
 	ReadTimeout             Duration `yaml:"read_timeout,omitempty" desc:"Client read timeout. Default 15s."`
 	WriteTimeout            Duration `yaml:"write_timeout,omitempty" desc:"Client write timeout. Default 15s."`
 	IdleTimeout             Duration `yaml:"idle_timeout,omitempty" desc:"Client keep-alive timeout. Default 60s."`

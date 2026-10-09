@@ -5,7 +5,7 @@ Configuration is split across environment variables (process wiring) and the gat
 ## Layers
 
 - Environment variables: service runtime wiring and infra connections.
-- Gateway config JSON: routing, tiers, failure policies, caching, analytics settings.
+- Gateway config file (YAML or JSON): routing, tiers, failure policies, caching, analytics settings.
 
 Every component runs from the `gate` binary and is configured by environment
 variables (`gate dev` needs none). Defaults are shown in parentheses.
@@ -15,38 +15,36 @@ variables (`gate dev` needs none). Defaults are shown in parentheses.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CONFIG_FILE_PATH` | required | gateway config file |
-| `HUB_AUTH_TOKEN` | required | bearer token for the hub HTTP API |
-| `PORT` | `8080` | HTTP API |
-| `HUB_GRPC_PORT` | `9090` | quota-lease gRPC service (mTLS) |
-| `HUB_TLS_CERT_FILE`, `HUB_TLS_KEY_FILE`, `HUB_TLS_CA_FILE` | required | gRPC server cert and client CA |
+| `HUB_AUTH_TOKEN` | required | bearer token for the admin HTTP API |
+| `PORT` | `8080` | admin HTTP API |
+| `HUB_GRPC_PORT` | `9090` | edge-facing gRPC: quota leases and the control-plane stream |
+| `HUB_TLS_CERT_FILE`, `HUB_TLS_KEY_FILE`, `HUB_TLS_CA_FILE` | required unless gRPC listens on loopback | gRPC server cert and client CA (mTLS) |
 | `HUB_GRPC_CLIENT_AUTH_MODE` | `require-and-verify` | `require-any` / `none` for development only |
-| `REDIS_ADDR` | `localhost:6379` | ledger and tier store |
+| `REDIS_ADDR` | `localhost:6379` | quota ledger, tier store, and the channel hubs share changes on |
 | `HUB_ENFORCE_REDIS_NOEVICTION` | `true` | refuse readiness unless Redis uses `noeviction` |
-| `NATS_URL` (`NATS_TIER_URL`) | `nats://127.0.0.1:4222` | tier updates and config reload events |
-| `NATS_TIER_UPDATES_SUBJECT` | `runtime.hub.tier_updates_subject` | |
-| `HUB_CONFIG_RELOAD_SUBJECT` | `gate.config.reload` | NATS subject for reload events |
 | `HUB_EDGE_ALLOWED_ORIGINS` | none | CORS origins allowed to call the hub API |
+
+Redis is the hub's only dependency. Several hubs can share one Redis behind
+a gRPC load balancer: each change is published on a Redis channel that every
+hub relays to the edges connected to it.
 
 ## Edge (`gate edge`)
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `8080` | gateway listener |
-| `EDGE_ID` | `unknown-edge` | reported in analytics |
-| `HUB_ADDR` | `http://localhost:8081` | hub HTTP API (config and tier lookups) |
-| `HUB_AUTH_TOKEN` | none | hub bearer token |
-| `HUB_GRPC_ADDR` | `localhost:9090` | lease service |
-| `HUB_GRPC_SERVER_NAME` | required | must match a SAN in the hub certificate |
-| `EDGE_TLS_CERT_FILE`, `EDGE_TLS_KEY_FILE`, `EDGE_TLS_CA_FILE` | required | client cert and hub CA |
-| `REDIS_ADDR` | `localhost:6379` | tier and response caches |
-| `EDGE_LEASE_SIZE` | `runtime.edge.rate_lease_size` | default lease quantum; per-prefix `leasing.lease_quantum` wins |
+| `EDGE_ID` | `unknown-edge` | reported in analytics and hub logs |
+| `HUB_GRPC_ADDR` | `localhost:9090` | the hub: leases, key lookups, config and tier changes |
+| `HUB_GRPC_SERVER_NAME` | required with TLS | must match a SAN in the hub certificate |
+| `EDGE_TLS_CERT_FILE`, `EDGE_TLS_KEY_FILE`, `EDGE_TLS_CA_FILE` | required unless the hub is on loopback | client cert and hub CA |
+| `EDGE_CACHE_BYTES` | `67108864` (64 MiB) | in-memory response cache budget |
+| `REDIS_ADDR` | none | keep cached responses in this Redis instead of memory |
+| `EDGE_LEASE_SIZE` | `runtime.edge.rate_lease_size` | default lease quantum; per-service `limits.lease_size` wins |
 | `EDGE_LEASE_LOW_WATER_PERCENT` | `runtime.edge.rate_low_water_pct` | renew when this share of a lease is left |
-| `NATS_URL` (`NATS_TIER_URL`, `NATS_ANALYTICS_URL`) | `nats://127.0.0.1:4222` | |
-| `NATS_TIER_UPDATES_SUBJECT`, `NATS_ANALYTICS_SUBJECT` | from runtime policy | |
 | `GATE_ANALYTICS_ENABLED` | `true` | publish request events |
-| `EDGE_CONFIG_RELOAD_SUBJECT` | `gate.config.reload` | |
-| `EDGE_CONFIG_REFRESH_SECONDS` | `0` (off) | periodic config poll |
-| `EDGE_BOOTSTRAP_CONFIG_FILE` | none | config to use if the hub is unreachable at startup |
+| `NATS_URL` | `nats://127.0.0.1:4222` | analytics events only |
+| `NATS_ANALYTICS_SUBJECT` | `runtime.analytics.nats_subject` | |
+| `EDGE_BOOTSTRAP_CONFIG_FILE` | none | serve this config until the hub sends one |
 | `EDGE_ADMIN_TOKEN` | none | bearer token for `/analytics/metrics`; unset disables it |
 
 ## Analytics (`gate analytics`)
@@ -145,14 +143,15 @@ Dry-run response includes:
 - `analysis.changed_sections`
 - `analysis.invalidations.response_cache`
 - `analysis.warnings`
-- `next_epoch`
 
 Apply behavior:
 
-- Hub validates the next config.
-- Hub applies atomically.
-- Hub publishes a structured reload event on NATS subject `HUB_CONFIG_RELOAD_SUBJECT` (default `gate.config.reload`).
-- Edge subscribes on NATS (and Redis) and refreshes config on receipt. Events are deduplicated by `(boot_id, epoch)`, so a hub restart (epoch back to 1) is still applied.
+- Hub validates the next config and applies it atomically.
+- Hub publishes the change on its Redis control channel; every hub adopts it
+  and pushes a config snapshot down each connected edge's watch stream.
+- Edges swap the config in atomically and drop the response-cache scopes the
+  change invalidated. An edge that reconnects always starts from a fresh
+  snapshot, so changes made while it was disconnected are never lost.
 
 Current invalidation scope:
 

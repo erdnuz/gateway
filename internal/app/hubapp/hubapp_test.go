@@ -26,8 +26,8 @@ func TestValidate_RejectsInvalidGatewayConfig(t *testing.T) {
 	}
 }
 
-func TestValidate_TLSOnlyRequiredWithGRPC(t *testing.T) {
-	if err := (Config{AuthToken: "t", ConfigPath: validConfig}).Validate(); err != nil {
-		t.Fatalf("in-process leasing needs no TLS: %v", err)
+func TestValidate_PlaintextOnlyOnLoopback(t *testing.T) {
+	if err := (Config{AuthToken: "t", ConfigPath: validConfig, GRPCAddr: "127.0.0.1:0"}).Validate(); err != nil {
+		t.Fatalf("loopback gRPC needs no TLS: %v", err)
 	}
 }

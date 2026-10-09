@@ -2,8 +2,9 @@
 // service, authenticates the API key, serves cached responses, enforces rate
 // limits and proxies to the upstream.
 //
-// Edges share nothing on the request path: configuration and key tiers are
-// cached in process, and quota comes from hub leases spent locally. Adding
+// Edges share nothing on the request path: config is pushed by the hub, key
+// tiers and responses are cached in process, and quota comes from hub
+// leases spent locally. Adding
 // edges adds capacity linearly; the hub sees one lease RPC per block of
 // requests, not one per request.
 package edge
@@ -11,7 +12,6 @@ package edge
 import (
 	"context"
 	"crypto/subtle"
-	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"sync/atomic"
@@ -20,8 +20,6 @@ import (
 	"gateway/packages/common/httpx"
 	"gateway/packages/common/types"
 	"gateway/packages/limiter"
-
-	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -37,14 +35,14 @@ const (
 // Deps are the collaborators an edge server needs.
 type Deps struct {
 	Config *ConfigManager
-	Tiers  *TierManager
+	Tiers  *TierCache
 	// Limiter enforces each key's global quota (limiter.Lease in production).
 	Limiter limiter.Limiter
 	// Analytics receives one entry per sampled request; nil disables it.
 	Analytics AnalyticsSink
-	// Redis is the edge's own response and tier cache; /readyz probes it.
-	// Nil disables response caching.
-	Redis *redis.Client
+	// Responses caches upstream responses; nil disables caching. /readyz
+	// probes it (for a Redis-backed store).
+	Responses ResponseStore
 }
 
 // Options tune an edge server; zero values take the runtime defaults.
@@ -139,17 +137,12 @@ func chain(h http.Handler, mw ...func(http.Handler) http.Handler) http.Handler {
 	return h
 }
 
-// StartBackgroundWorkers starts tier invalidation and limiter housekeeping.
+// StartBackgroundWorkers starts limiter housekeeping.
 func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 	if r, ok := s.Limiter.(interface{ Run(context.Context) }); ok {
 		go r.Run(ctx)
 	}
 	go s.safety.Run(ctx)
-	if s.Tiers != nil {
-		if err := s.Tiers.StartHubUpdateListener(ctx); err != nil {
-			slog.Warn("tier invalidation listener failed to start", "err", err)
-		}
-	}
 }
 
 // SetStartupReady opens (or holds) proxy traffic.
@@ -180,11 +173,11 @@ func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-// StartReadinessProbe ties /readyz to edge-local dependencies (Redis) once
-// startup is complete. Hub or analytics outages must not take every edge out
-// of rotation at once: the failure policies handle them per request.
+// StartReadinessProbe ties /readyz to edge-local dependencies (a Redis
+// response store). Hub or analytics outages must not take every edge out of
+// rotation at once: the failure policies handle them per request.
 func (s *Server) StartReadinessProbe(ctx context.Context) {
-	if s.Redis == nil {
+	if s.Responses == nil {
 		return
 	}
 	go func() {
@@ -193,13 +186,13 @@ func (s *Server) StartReadinessProbe(ctx context.Context) {
 		failures := 0
 		for {
 			probeCtx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
-			err := s.Redis.Ping(probeCtx).Err()
+			err := s.Responses.Ping(probeCtx)
 			cancel()
 			if err == nil {
 				failures = 0
 				s.localHealthy.Store(true)
 			} else if failures++; failures >= readyProbeFailures {
-				s.SetPendingDependency("edge_redis")
+				s.SetPendingDependency("response_cache")
 				s.localHealthy.Store(false)
 			}
 			select {

@@ -1,45 +1,28 @@
 package edgeapp
 
 import (
-	"context"
 	"strings"
 	"testing"
-
-	"gateway/packages/common/types"
 )
 
-type stubLeases struct{}
-
-func (stubLeases) RequestQuotaLease(context.Context, *types.QuotaLeaseRequest) (*types.QuotaLeaseResponse, error) {
-	return &types.QuotaLeaseResponse{}, nil
-}
-func (stubLeases) Close() error { return nil }
-
-func valid() Config {
-	return Config{RedisAddr: "localhost:6379", HubAddr: "http://hub:8080", NATSTierURL: "nats://n:4222"}
-}
-
-func TestValidate_RequiresTLSForGRPCLeasing(t *testing.T) {
-	err := valid().Validate()
-	if err == nil || !strings.Contains(err.Error(), "HUB_GRPC_SERVER_NAME") || !strings.Contains(err.Error(), "EDGE_TLS_CERT_FILE") {
-		t.Fatalf("want TLS errors, got %v", err)
+func TestValidate_TLSUnlessLoopback(t *testing.T) {
+	c := Config{HubGRPCAddr: "hub:9090"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "EDGE_TLS_CERT_FILE") {
+		t.Fatalf("remote hub without TLS: %v", err)
 	}
-	c := valid()
-	c.LeaseClient = stubLeases{}
+	c.HubGRPCAddr = "127.0.0.1:9090"
 	if err := c.Validate(); err != nil {
-		t.Fatalf("in-process leasing needs no TLS: %v", err)
+		t.Fatalf("loopback hub needs no TLS: %v", err)
+	}
+	c = Config{HubGRPCAddr: "hub:9090", TLSCertFile: "c", TLSKeyFile: "k", TLSCAFile: "ca"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "HUB_GRPC_SERVER_NAME") {
+		t.Fatalf("TLS without server name: %v", err)
 	}
 }
 
-func TestValidate_RejectsBadValues(t *testing.T) {
-	c := valid()
-	c.LeaseClient = stubLeases{}
-	c.HubAddr = "hub:8080"
-	c.AnalyticsEnabled = true
-	err := c.Validate()
-	for _, want := range []string{"HUB_ADDR", "NATS_ANALYTICS_URL"} {
-		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("error does not mention %s: %v", want, err)
-		}
+func TestValidate_AnalyticsNeedsNATS(t *testing.T) {
+	c := Config{HubGRPCAddr: "127.0.0.1:9090", AnalyticsEnabled: true}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "NATS_URL") {
+		t.Fatalf("got %v", err)
 	}
 }

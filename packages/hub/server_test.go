@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"gateway/packages/common/types"
-	"gateway/packages/common/workers"
 	"gateway/packages/config"
 	"gateway/packages/edge"
 	testutils "gateway/testing"
@@ -510,38 +509,5 @@ func TestServeHTTP_HealthBypassesAuth(t *testing.T) {
 
 	if rw.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rw.Code)
-	}
-}
-
-func TestQueueMetricsReportsDroppedSubmissions(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-	hs.asyncQueue = workers.NewBoundedQueue(1)
-
-	hs.publishTierUpdate("v1", "user-a", "free")
-	hs.publishTierUpdate("v1", "user-a", "pro")
-
-	req := httptest.NewRequest(http.MethodGet, "/queue-metrics", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
-	}
-
-	var payload struct {
-		TierUpdateQueue struct {
-			Dropped uint64 `json:"dropped"`
-		} `json:"tier_update_queue"`
-		SubmitNonBlocking bool `json:"tier_update_submit_non_blocking_mode"`
-	}
-	if err := json.NewDecoder(rw.Body).Decode(&payload); err != nil {
-		t.Fatalf("decode queue metrics: %v", err)
-	}
-	if payload.TierUpdateQueue.Dropped == 0 {
-		t.Fatalf("expected dropped submissions to be reported, got %+v", payload)
-	}
-	if !payload.SubmitNonBlocking {
-		t.Fatalf("expected non-blocking submit mode to be true, got %+v", payload)
 	}
 }

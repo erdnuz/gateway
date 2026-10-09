@@ -12,8 +12,9 @@ flowchart LR
     LB --> E2[Edge 2]
     LB --> EN[Edge N]
     E1 & E2 & EN --> U[Upstreams]
-    E1 & E2 & EN -. "gRPC (mTLS): lease a block of tokens" .-> H[Hub]
-    H --> HR[(Redis: quota ledger, tiers)]
+    E1 & E2 -. "one gRPC stream each (mTLS):<br/>leases, key lookups, config + tier changes" .-> H1[Hub 1]
+    EN -.-> H2[Hub 2]
+    H1 & H2 --> HR[(Redis: ledger, tiers,<br/>hub-to-hub change channel)]
     E1 & E2 & EN -. "NATS: request events" .-> A[Analytics]
     A --> CH[(ClickHouse)]
 ```
@@ -32,9 +33,9 @@ Scaling is mostly a question of where state lives and who has to agree on it.
 | --- | --- | --- | --- |
 | Quota ledger (key × service × window) | hub Redis, updated by one Lua script per lease | all edges, through the hub | no, only on a lease miss |
 | Leased tokens | edge process memory | nobody | yes: a few atomic operations |
-| Config | edge memory, swapped atomically on reload | nobody | yes: lock-free read |
-| Key → tier | edge Redis cache, filled from the hub | nobody | yes, on a cache miss only |
-| Cached responses | edge Redis | nobody | yes |
+| Config | edge memory, pushed by the hub and swapped atomically | nobody | yes: lock-free read |
+| Key → tier | edge memory (sharded TTL cache), filled from the hub, updated by pushes | nobody | yes; a miss costs one gRPC call per key |
+| Cached responses | edge memory (byte budget), or the edge's own Redis | nobody | yes |
 | Request events | bounded edge buffer, then NATS | analytics consumers | no: published asynchronously |
 
 Nothing on the request path is shared between edges, so N edges serve N times
@@ -71,6 +72,31 @@ Lease size is the knob between hub load and fairness:
 Concurrent misses for one key share a single RPC (singleflight). A hub
 outage costs one RPC per 500 ms backoff, not one per request.
 
+## One control-plane channel
+
+Each edge holds a single mTLS gRPC connection to a hub
+([`edge.HubClient`](../packages/edge/hubclient.go)) and uses it for
+everything it needs from the control plane:
+
+| Call | Purpose |
+| --- | --- |
+| `RequestQuotaLease` | a block of tokens for a key, service and window |
+| `ResolveKey` | a key's tier, on a tier-cache miss |
+| `Watch` (server stream) | a config snapshot, then every config and tier change |
+
+Every `Watch` stream opens with a full config snapshot and a "revalidate
+tiers" flag, so an edge that reconnects after a network blip or a hub
+restart never misses a change. It doesn't need resume tokens or replay
+logs. An edge that falls too far behind is disconnected rather than allowed
+to slow the hub, and it resynchronises the same way.
+
+Hubs keep no state of their own: the ledger, the tiers and the change
+channel all live in Redis. A tier change or config reload made through any
+hub is published on Redis, and every hub relays it to the edges watching it
+([`hub.ControlPlane`](../packages/hub/controlplane.go)). Hubs can therefore
+run as replicas behind a gRPC load balancer, and each edge talks to
+whichever one it reaches.
+
 ## The edge request path
 
 [`edge.NewServer`](../packages/edge/server.go) composes one middleware chain.
@@ -97,7 +123,8 @@ request ID.
 | --- | --- | --- |
 | Hub down | Edges spend the tokens they hold, then apply the service's `when_hub_unavailable` limit per edge, or return 503 | the data plane degrades instead of stopping; edge readiness ignores the hub so the load balancer does not drain every edge at once |
 | Hub slow or overloaded | Renewals are asynchronous and coalesced; WAITING retries are jittered | hub latency stays off the request path |
-| Edge Redis down | `/readyz` fails after 3 probes and the load balancer drains that edge | one edge's local dependency affects only that edge |
+| Hub connection lost | Edges keep serving with their current config and cached tiers, and reconnect with backoff to any hub | the watch stream resynchronises from a snapshot on reconnect |
+| Edge's Redis response cache down (if used) | `/readyz` fails after 3 probes and the load balancer drains that edge | one edge's local dependency affects only that edge |
 | NATS down | Analytics events are dropped from a bounded buffer | requests never wait on observability |
 | Edge crash | Its unspent tokens are lost for the rest of the window | bounded by one lease per active key |
 
@@ -106,8 +133,10 @@ request ID.
 - **Edges** scale horizontally behind any load balancer, and need no sticky
   sessions. Each edge's memory grows with its active key set: idle keys are
   evicted after a minute.
-- **Hub** work grows with lease RPCs, not requests. Each grant is one atomic
-  Redis script, so the ledger stays correct with concurrent callers.
+- **Hubs** do work that grows with lease RPCs and key lookups, not requests.
+  Each grant is one atomic Redis script, so the ledger stays correct with
+  any number of hub replicas. Redis is the remaining shared component, and
+  ledger keys are per key and window, so it shards cleanly.
 - **Analytics** consumers join a NATS queue group, so ingestion scales by adding
   consumers. ClickHouse handles the aggregate queries.
 

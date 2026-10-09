@@ -11,6 +11,7 @@ import (
 	analyticsapi "gateway/packages/analytics"
 	"gateway/packages/common/types"
 	"gateway/packages/edge"
+	"gateway/packages/config"
 	"gateway/packages/hub"
 	"gateway/packages/limiter"
 	"io"
@@ -24,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -59,6 +59,7 @@ type integrationHarness struct {
 	hubGRPCListener net.Listener
 
 	hubTierStore *hub.InMemoryTierStore
+	hubControl   *hub.ControlPlane
 	edgeLeases   []*limiter.Lease
 	analyticsKey string
 	mtlsFiles    *mtlsFiles
@@ -103,7 +104,7 @@ func newIntegrationHarness(t *testing.T) *integrationHarness {
 		h.waitReady(analyticsSrv.URL + "/healthz")
 	}
 	for _, edgeSrv := range h.edgeHTTPAll {
-		h.waitReady(edgeSrv.URL + "/healthz")
+		h.waitReady(edgeSrv.URL + "/readyz")
 	}
 	return h
 }
@@ -234,11 +235,10 @@ func (h *integrationHarness) startHubAndLeaseGRPC(configPath string) {
 	if err != nil {
 		h.t.Fatalf("new hub config manager: %v", err)
 	}
-	hubSrv := hub.NewHubServerWithManagers(h.rdb, cfgMgr, h.hubTierStore, "")
-	if err := hubSrv.SetTierUpdateMessaging(h.natsURL, "tier.updates"); err != nil {
-		h.t.Fatalf("hub tier update messaging setup failed: %v", err)
-	}
-	hubSrv.StartBackgroundWorkers(h.ctx)
+	h.hubControl = hub.NewControlPlane(cfgMgr, h.hubTierStore, h.rdb)
+	go h.hubControl.Run(h.ctx)
+	hubSrv := hub.NewHubServer(h.rdb, cfgMgr, h.hubTierStore, h.hubControl, "")
+	hubSrv.SetStartupReady(true)
 	h.hubHTTP = httptest.NewServer(hubSrv)
 
 	grpcSrv, lis := h.startLeaseGRPCServer(h.mtlsFiles, cfgMgr)
@@ -262,6 +262,9 @@ func (h *integrationHarness) startLeaseGRPCServer(files *mtlsFiles, cfgMgr *hub.
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool, MinVersion: tls.VersionTLS13}
 	grpcSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
 	types.RegisterQuotaLeaseServiceServer(grpcSrv, hub.NewQuotaLeaseServer(h.rdb, cfgMgr, h.hubTierStore))
+	if h.hubControl != nil {
+		types.RegisterControlPlaneServer(grpcSrv, h.hubControl)
+	}
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		h.t.Fatalf("listen grpc: %v", err)
@@ -293,38 +296,59 @@ func (h *integrationHarness) startAnalytics() {
 	h.analyticsAll = append(h.analyticsAll, secondary)
 }
 
+// startEdge runs an edge the way production does: one mTLS connection to
+// the hub for leases, key resolution and the config/tier stream. Edges share
+// the harness Redis as their response store so cache invalidation can be
+// observed across edges.
 func (h *integrationHarness) startEdge(configPath string) {
 	h.t.Helper()
-	configMgr, err := edge.NewConfigManager(h.hubHTTP.URL, "", nil, configPath)
+	bootstrap, err := config.Load(configPath)
 	if err != nil {
-		h.t.Fatalf("new edge config manager: %v", err)
+		h.t.Fatalf("load edge bootstrap config: %v", err)
 	}
-	h.subscribeConfigReloadNATS(configMgr)
-	tierMgr := edge.NewTierManager(h.hubHTTP.URL, h.rdb, edge.TierManagerOptions{
-		NATSURL:  h.natsURL,
-		NATSSubj: types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
-	})
-	leaseClient, err := edge.NewGRPCQuotaLeaseClient(h.hubGRPCListener.Addr().String(), "hub-server", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, h.mtlsFiles.CAPath)
+	tlsCfg, err := edge.ClientTLS("hub-server", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, h.mtlsFiles.CAPath)
 	if err != nil {
-		h.t.Fatalf("new lease client: %v", err)
+		h.t.Fatalf("edge tls: %v", err)
 	}
-	policy := configMgr.Get().Runtime.Effective().Edge
-	lease := limiter.NewLease(leaseClient, limiter.LeaseOptions{LeaseSize: policy.RateLeaseSize, LowWaterPct: policy.RateLowWaterPct})
+	hubClient, err := edge.DialHub(h.hubGRPCListener.Addr().String(), tlsCfg)
+	if err != nil {
+		h.t.Fatalf("dial hub: %v", err)
+	}
+	go func() { <-h.ctx.Done(); hubClient.Close() }()
+
+	policy := bootstrap.Runtime.Effective().Edge
+	lease := limiter.NewLease(hubClient, limiter.LeaseOptions{LeaseSize: policy.RateLeaseSize, LowWaterPct: policy.RateLowWaterPct})
 	h.edgeLeases = append(h.edgeLeases, lease)
 
 	es := edge.NewServer(edge.Deps{
-		Config:    configMgr,
-		Tiers:     tierMgr,
+		Config:    edge.NewConfigManager(bootstrap),
+		Tiers:     edge.NewTierCache(hubClient.ResolveKey),
 		Limiter:   lease,
 		Analytics: &redisAnalyticsSink{rdb: h.rdb, key: h.analyticsKey},
-		Redis:     h.rdb,
+		Responses: edge.NewRedisResponses(h.rdb),
 	}, edge.Options{})
 	es.StartBackgroundWorkers(h.ctx)
+	go es.FollowHub(h.ctx, hubClient)
 	srv := httptest.NewServer(es)
 	if h.edgeHTTP == nil {
 		h.edgeHTTP = srv
 	}
 	h.edgeHTTPAll = append(h.edgeHTTPAll, srv)
+}
+
+// dialHub opens an edge-style mTLS connection to the harness hub.
+func (h *integrationHarness) dialHub(serverName, caPath string) *edge.HubClient {
+	h.t.Helper()
+	tlsCfg, err := edge.ClientTLS(serverName, h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, caPath)
+	if err != nil {
+		h.t.Fatalf("edge tls: %v", err)
+	}
+	c, err := edge.DialHub(h.hubGRPCListener.Addr().String(), tlsCfg)
+	if err != nil {
+		h.t.Fatalf("dial hub: %v", err)
+	}
+	h.t.Cleanup(func() { c.Close() })
+	return c
 }
 
 func (h *integrationHarness) waitReady(url string) {
@@ -476,11 +500,11 @@ func (h *integrationHarness) setSafetyFallback(allow bool, quota uint32) {
 	}
 }
 
-func (h *integrationHarness) setLeaseClient(client edge.QuotaLeaseRequester) {
+func (h *integrationHarness) setLeaseClient(client limiter.LeaseClient) {
 	h.setLeaseClientAt(0, client)
 }
 
-func (h *integrationHarness) setLeaseClientAt(index int, client edge.QuotaLeaseRequester) {
+func (h *integrationHarness) setLeaseClientAt(index int, client limiter.LeaseClient) {
 	h.t.Helper()
 	if index < 0 || index >= len(h.edgeLeases) {
 		h.t.Fatalf("edge index out of range: %d", index)
@@ -503,19 +527,6 @@ func (h *integrationHarness) requireWindowHeadroom(d time.Duration) {
 	into := time.Duration(time.Now().UnixNano()) % period
 	if left := period - into; left < d {
 		time.Sleep(left + 100*time.Millisecond)
-	}
-}
-
-// subscribeConfigReloadNATS wires the production reload path (NATS) so the
-// harness does not depend on hub and edge sharing one Redis.
-func (h *integrationHarness) subscribeConfigReloadNATS(cm *edge.ConfigManager) {
-	nc, err := nats.Connect(h.natsURL)
-	if err != nil {
-		h.t.Fatalf("edge reload nats connect: %v", err)
-	}
-	go func() { <-h.ctx.Done(); nc.Close() }()
-	if err := cm.StartConfigReloadNATSSubscriber(h.ctx, nc, types.DefaultConfigReloadSubject, h.rdb); err != nil {
-		h.t.Fatalf("edge reload nats subscribe: %v", err)
 	}
 }
 
