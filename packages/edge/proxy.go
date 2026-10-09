@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"gateway/packages/common/httpx"
@@ -28,8 +29,24 @@ func (s *Server) newProxy() *httputil.ReverseProxy {
 		ModifyResponse: modifyResponse,
 		ErrorHandler:   proxyError,
 		ErrorLog:       slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn),
+		// Without a pool ReverseProxy allocates a 32 KiB copy buffer per
+		// response, which dominates the edge's garbage at high request rates.
+		BufferPool: &copyBuffers,
 	}
 }
+
+var copyBuffers bufferPool
+
+type bufferPool struct{ pool sync.Pool }
+
+func (b *bufferPool) Get() []byte {
+	if buf, ok := b.pool.Get().(*[]byte); ok {
+		return *buf
+	}
+	return make([]byte, 32<<10)
+}
+
+func (b *bufferPool) Put(buf []byte) { b.pool.Put(&buf) }
 
 // forward is the end of the chain: it bounds the request body and proxies.
 func (s *Server) forward(w http.ResponseWriter, r *http.Request) {
