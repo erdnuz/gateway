@@ -43,7 +43,8 @@ type Config struct {
 	NATSSubject string // empty: runtime.analytics.nats_subject
 	NATSQueue   string // empty: runtime.analytics.nats_queue
 
-	MetricsAddr string // Prometheus /metrics; empty disables it
+	MetricsAddr   string // Prometheus /metrics; empty disables it
+	PrometheusURL string // dashboard scaling strip; empty hides it
 }
 
 // FromEnv reads the analytics configuration from environment variables.
@@ -61,6 +62,7 @@ func FromEnv() Config {
 		NATSSubject:     strings.TrimSpace(config.String("NATS_ANALYTICS_SUBJECT", "")),
 		NATSQueue:       strings.TrimSpace(config.String("NATS_ANALYTICS_QUEUE", "")),
 		MetricsAddr:     config.String("METRICS_ADDR", ":9100"),
+		PrometheusURL:   config.String("PROMETHEUS_URL", ""),
 	}
 }
 
@@ -126,6 +128,7 @@ func Start(ctx context.Context, cfg Config) (*Analytics, error) {
 		server = analyticsapi.NewServerWithPolicy(rdb, types.DefaultAnalyticsKey, cfg.APIToken, policy)
 		ping = func(ctx context.Context) error { return rdb.Ping(ctx).Err() }
 	}
+	server.SetPrometheus(cfg.PrometheusURL)
 	server.SetHubReady(false)
 	server.SetPendingDependency("hub_readyz")
 

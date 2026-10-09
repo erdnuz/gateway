@@ -62,6 +62,7 @@ hub relays to the edges connected to it.
 | `CLICKHOUSE_DSN` | none | e.g. `clickhouse://user:pass@host:9000/db` |
 | `ANALYTICS_CLICKHOUSE_TABLE` | `analytics_events` | |
 | `ANALYTICS_RETENTION_DAYS` | `30` | ClickHouse TTL |
+| `PROMETHEUS_URL` | none | enables the dashboard's scaling section |
 | `REDIS_ADDR` | none | Redis-backed store when `CLICKHOUSE_DSN` is unset (development) |
 | `NATS_URL` (`NATS_ANALYTICS_URL`) | required | |
 | `NATS_ANALYTICS_SUBJECT`, `NATS_ANALYTICS_QUEUE` | from runtime policy | |

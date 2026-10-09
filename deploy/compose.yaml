@@ -128,6 +128,7 @@ services:
       HUB_ADDR: http://hub:8080
       HUB_AUTH_TOKEN: ${GATE_HUB_TOKEN:-gate-local-token}
       CLICKHOUSE_DSN: clickhouse://gate:gate@clickhouse:9000/gate
+      PROMETHEUS_URL: http://prometheus:9090   # dashboard scaling strip (observability profile)
     ports: ["8091:8091"]
     depends_on:
       hub: { condition: service_healthy }

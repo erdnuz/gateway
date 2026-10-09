@@ -28,6 +28,7 @@ var staticAssets embed.FS
 type Server struct {
 	rdb               *redis.Client
 	store             analyticsStore
+	prom              *prometheus // nil: no scaling strip on the dashboard
 	key               string
 	authToken         string
 	policy            types.AnalyticsRuntimePolicy
@@ -209,6 +210,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.queryEvents(w, r)
+	case "/analytics/overview", "/analytics/scaling":
+		if !s.authorize(r) {
+			httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if r.URL.Path == "/analytics/overview" {
+			s.handleOverview(w, r)
+		} else {
+			s.handleScaling(w, r)
+		}
 	case "/analytics/summary":
 		if !s.authorize(r) {
 			httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")

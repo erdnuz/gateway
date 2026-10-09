@@ -3,180 +3,142 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gate Analytics</title>
+  <title>Gate live traffic</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
-<body>
-  <main class="app-shell">
-    <header class="hero panel">
-    <p class="eyebrow">Gate Platform</p>
-    <h1>Operations Overview</h1>
-    <p class="subtle">Real-time health, traffic distribution, and policy enforcement across the distributed gateway.</p>
-      <p id="authBanner" class="auth-banner" role="alert" hidden>Authentication failed. Update token and refresh.</p>
-    </header>
-
-    <section class="panel controls" aria-label="filters">
-      <h2>Filters</h2>
-      <div class="controls-grid">
-        <label class="col-6">
-          API Base
-          <input id="apiBase" type="text" placeholder="http://localhost:8091">
-        </label>
-        <label class="col-6">
-          Bearer Token
-          <input id="token" type="password" placeholder="Auth Token">
-        </label>
-
-        <label class="col-2">
-          Interval
-          <select id="interval">
-            <option value="1m">1m</option>
-            <option value="5m">5m</option>
-            <option value="15m" selected>15m</option>
-            <option value="1h">1h</option>
-          </select>
-        </label>
-        <label class="col-5">
-          Start
-          <input id="filterStart" type="datetime-local">
-        </label>
-        <label class="col-5">
-          End
-          <input id="filterEnd" type="datetime-local">
-        </label>
-
-        <label class="col-3">
-          Prefix (comma-separated)
-          <input id="filterPrefix" type="text" placeholder="/v1,/v2">
-        </label>
-        <label class="col-3">
-          Service (comma-separated)
-          <input id="filterService" type="text" placeholder="svc-a,svc-b">
-        </label>
-        <label class="col-3">
-          Edge ID (comma-separated)
-          <input id="filterEdge" type="text" placeholder="edge-a,edge-b">
-        </label>
-        <label class="col-3">
-          Tier (comma-separated)
-          <input id="filterTier" type="text" placeholder="free,pro">
-        </label>
-        <label class="col-3">
-          Method (comma-separated)
-          <input id="filterMethod" type="text" placeholder="GET,POST">
-        </label>
-
-        <label class="col-2">
-          Response Min
-          <input id="filterRcMin" type="number" min="100" max="599" placeholder="200">
-        </label>
-        <label class="col-2">
-          Response Max
-          <input id="filterRcMax" type="number" min="100" max="599" placeholder="599">
-        </label>
-        <label class="col-2">
-          Cache Hit
-          <select id="filterCacheHit">
-            <option value="">Any</option>
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        </label>
-        <label class="col-2">
-          Upstream Error
-          <select id="filterUpstreamError">
-            <option value="">Any</option>
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
-        </label>
-        <label class="col-2">
-          Latency Min (ms)
-          <input id="filterLatencyMin" type="number" min="0" step="0.01" placeholder="0">
-        </label>
-        <label class="col-2">
-          Latency Max (ms)
-          <input id="filterLatencyMax" type="number" min="0" step="0.01" placeholder="250">
-        </label>
+<body class="viz-root">
+  <header class="topbar">
+    <div class="brand">
+      <h1>Gate <span class="muted">· live traffic</span></h1>
+      <p class="live"><span id="liveDot" class="dot" aria-hidden="true"></span><span id="updated">connecting…</span></p>
+    </div>
+    <nav class="filters" aria-label="Filters">
+      <div class="segmented" role="radiogroup" aria-label="Time range" id="ranges">
+        <button type="button" role="radio" data-range="15m">15m</button>
+        <button type="button" role="radio" data-range="1h">1h</button>
+        <button type="button" role="radio" data-range="6h">6h</button>
+        <button type="button" role="radio" data-range="24h">24h</button>
+        <button type="button" role="radio" data-range="7d">7d</button>
       </div>
+      <label class="select"><span>Service</span><select id="fService"><option value="">All</option></select></label>
+      <label class="select"><span>Tier</span><select id="fTier"><option value="">All</option></select></label>
+      <label class="select"><span>Edge</span><select id="fEdge"><option value="">All</option></select></label>
+      <button type="button" id="settingsBtn" class="icon-btn" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm7.43-2.53.04-.97-.04-.97 2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.3 7.3 0 0 0-1.68-.97l-.38-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.38 2.65c-.6.25-1.17.57-1.68.97l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64L4.57 11l-.04.97.04.97-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.3.61.22l2.49-1c.51.4 1.08.72 1.68.97l.38 2.65c.05.24.25.42.5.42h4c.25 0 .45-.18.5-.42l.38-2.65c.6-.25 1.17-.57 1.68-.97l2.49 1c.22.08.48 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65Z"/></svg>
+      </button>
+    </nav>
+  </header>
 
-      <div class="actions">
-        <button id="refreshBtn" type="button">Refresh</button>
-        <button id="clearBtn" type="button" hidden>Clear Analytics</button>
-        <p id="status" role="status" aria-live="polite">Idle</p>
-      </div>
+  <main id="main">
+    <p id="error" class="banner banner-bad" role="alert" hidden></p>
+    <section id="empty" class="banner" hidden>
+      <strong>No traffic in this range yet.</strong>
+      Run <code>make demo</code>, or send a request:
+      <code id="emptyCurl">curl -H "X-API-Key: freekey" http://localhost:8080/v1/echo/hello</code>
     </section>
 
-    <section class="summary-block">
-      <div id="summaryGrid" class="summary-grid"></div>
+    <section class="kpis" id="kpis" aria-label="Key metrics"></section>
+
+    <section class="card scaling" id="scaling" hidden aria-label="Scaling">
+      <div>
+        <h2>Scaling</h2>
+        <p id="scalingLine" class="lede"></p>
+      </div>
+      <dl class="mini-stats" id="scalingStats"></dl>
     </section>
 
-    <section class="series-block">
-
-      <article class="panel series-card">
-        <div class="series-head">
-          <h3>Latency</h3>
-          <p>latency_total, latency_upstream, latency_added</p>
+    <section class="card">
+      <header class="card-head">
+        <div>
+          <h2>Requests by outcome</h2>
+          <p class="sub" id="trafficSub">Requests per interval</p>
         </div>
-        <div class="chart-wrap"><svg id="latencyChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
-        <div id="latencyLegend" class="legend"></div>
-      </article>
+        <ul class="legend" id="trafficLegend"></ul>
+      </header>
+      <div class="chart" id="trafficChart"></div>
+      <details class="table-view">
+        <summary>Show as table</summary>
+        <div id="trafficTable"></div>
+      </details>
+    </section>
 
-      <article class="panel series-card">
-        <div class="series-head">
-          <h3>Volume</h3>
-          <p>request_avg and response_avg</p>
-        </div>
-        <div class="chart-wrap"><svg id="volumeChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
-        <div id="volumeLegend" class="legend"></div>
-      </article>
+    <div class="two-up">
+      <section class="card">
+        <header class="card-head">
+          <div>
+            <h2>Latency</h2>
+            <p class="sub">End-to-end at the edge, per interval</p>
+          </div>
+          <ul class="legend" id="latencyLegend"></ul>
+        </header>
+        <div class="chart short" id="latencyChart"></div>
+      </section>
 
-      <article class="panel series-card">
-        <div class="series-head">
-          <h3>Rates</h3>
-          <p>cache_hit, upstream_err, and rate_limited</p>
-        </div>
-        <div class="chart-wrap"><svg id="ratesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
-        <div id="ratesLegend" class="legend"></div>
-      </article>
+      <section class="card">
+        <header class="card-head">
+          <div>
+            <h2>Rate limiting by tier</h2>
+            <p class="sub">Requests per tier; the rate-limited part answered 429</p>
+          </div>
+          <ul class="legend" id="tierLegend"></ul>
+        </header>
+        <div class="bars" id="tierBars"></div>
+      </section>
+    </div>
 
-      <article id="prefixesCard" class="panel series-card">
-        <div class="series-head">
-          <h3>Prefixes</h3>
-          <p>Traffic count by prefix</p>
-        </div>
-        <div class="chart-wrap"><svg id="prefixesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
-        <div id="prefixesLegend" class="legend"></div>
-      </article>
+    <div class="two-up">
+      <section class="card">
+        <header class="card-head">
+          <div>
+            <h2>Load across edges</h2>
+            <p class="sub">Share of requests each edge served. Edges share no state, so they scale out evenly.</p>
+          </div>
+        </header>
+        <div class="bars" id="edgeBars"></div>
+      </section>
 
-      <article id="servicesCard" class="panel series-card">
-        <div class="series-head">
-          <h3>Services</h3>
-          <p>Traffic counts by service</p>
-        </div>
-        <div class="chart-wrap"><svg id="servicesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
-        <div id="servicesLegend" class="legend"></div>
-      </article>
+      <section class="card">
+        <header class="card-head">
+          <div>
+            <h2>Services</h2>
+            <p class="sub">Click a column to sort</p>
+          </div>
+        </header>
+        <div class="table-wrap"><table id="services" class="data"></table></div>
+      </section>
+    </div>
 
-      <article id="edgesCard" class="panel series-card">
-        <div class="series-head">
-          <h3>Edges</h3>
-          <p>Traffic counts by edge</p>
+    <section class="card">
+      <header class="card-head">
+        <div>
+          <h2>Recent requests</h2>
+          <p class="sub">Newest first. API keys never reach analytics; callers appear as tiers.</p>
         </div>
-        <div class="chart-wrap"><svg id="edgesChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
-        <div id="edgesLegend" class="legend"></div>
-      </article>
-
-      <article id="tiersCard" class="panel series-card">
-        <div class="series-head">
-          <h3>Tiers</h3>
-          <p>Traffic counts by tier</p>
-        </div>
-        <div class="chart-wrap"><svg id="tiersChart" viewBox="0 0 900 280" preserveAspectRatio="none"></svg></div>
-        <div id="tiersLegend" class="legend"></div>
-      </article>
+      </header>
+      <div class="table-wrap"><table id="recent" class="data"></table></div>
     </section>
   </main>
+
+  <footer class="footnote">
+    Requests, latency and outcomes come from edge events (NATS → analytics).
+    Scaling numbers come from Prometheus. Detailed graphs: Grafana on :3000.
+  </footer>
+
+  <div id="tooltip" class="tooltip" role="status" hidden></div>
+
+  <dialog id="settings">
+    <form method="dialog">
+      <h2>Settings</h2>
+      <p id="authHint" class="sub" hidden>This analytics API needs a token (ANALYTICS_API_TOKEN).</p>
+      <label class="field"><span>API token</span><input id="token" type="password" autocomplete="off" placeholder="Bearer token"></label>
+      <div class="dialog-actions">
+        <button type="button" id="clearBtn" class="danger" hidden>Clear analytics data</button>
+        <span class="spacer"></span>
+        <button value="cancel">Close</button>
+        <button value="save" id="saveSettings" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/assets/app.js"></script>
 </body>

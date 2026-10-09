@@ -87,7 +87,7 @@ exceeding its quota.
 | <http://localhost:8080/v1/echo/hello> | the gateway (`X-API-Key: demopro1`) |
 | <http://localhost:8081> | hub admin API (`Authorization: Bearer gate-local-token`) |
 | <http://localhost:3000> | Grafana: requests, 429s per tier, hub work per request |
-| <http://localhost:8091> | analytics dashboard |
+| <http://localhost:8091> | live dashboard: traffic, latency, 429s per tier, load per edge, hub work per request |
 
 ### 3. Issue, use and revoke a key
 

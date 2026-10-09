@@ -130,7 +130,7 @@ func TestServesFrontendRoot(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", res.Code)
 	}
-	if !bytes.Contains(res.Body.Bytes(), []byte("Operations Overview")) {
+	if !bytes.Contains(res.Body.Bytes(), []byte("Gate live traffic")) {
 		t.Fatalf("expected frontend html content")
 	}
 }
