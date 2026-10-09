@@ -12,6 +12,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// admitUsage runs one period-less request and returns the edge-local usage after
+// it, or limit+1 when denied: the shape these lease-mechanics tests assert on.
+func admitUsage(rm *RateManager, ctx context.Context, prefix, service, key string, limit, cost int64) (int64, error) {
+	d, err := rm.Allow(ctx, RateRequest{Prefix: prefix, Service: service, APIKey: key, Limit: limit, Cost: cost})
+	if err != nil || !d.Allowed {
+		return limit + 1, err
+	}
+	return rm.getLeaseCounter(prefix, service, key).consumed.Load(), nil
+}
+
 type fakeLeaseClient struct {
 	mu         sync.Mutex
 	grants     []int64
@@ -49,7 +59,7 @@ func TestEdgeRateManager_RequestsLeaseAndConsumesTokens(t *testing.T) {
 	rm.SetLeaseClient(client)
 
 	for i := 0; i < 7; i++ {
-		usage, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 100, 1)
+		usage, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 100, 1)
 		if err != nil {
 			t.Fatalf("increment failed: %v", err)
 		}
@@ -68,14 +78,14 @@ func TestEdgeRateManager_DeniesWhenNoLeaseAvailable(t *testing.T) {
 	client := &fakeLeaseClient{grants: []int64{2, 0}}
 	rm.SetLeaseClient(client)
 
-	if _, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 2, 1); err != nil {
+	if _, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 2, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 2, 1); err != nil {
+	if _, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 2, 1); err != nil {
 		t.Fatal(err)
 	}
 
-	usage, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 2, 1)
+	usage, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +100,7 @@ func TestEdgeRateManager_UsesMinTokensReserveUntilExpiry(t *testing.T) {
 	rm.SetLeaseClient(client)
 
 	for i := 0; i < 3; i++ {
-		usage, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 100, 1)
+		usage, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 100, 1)
 		if err != nil {
 			t.Fatalf("increment failed: %v", err)
 		}
@@ -100,7 +110,7 @@ func TestEdgeRateManager_UsesMinTokensReserveUntilExpiry(t *testing.T) {
 	}
 
 	// Fourth request should fail: reserve floor is exhausted.
-	usage, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 100, 1)
+	usage, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 100, 1)
 	if err != nil {
 		t.Fatalf("increment failed: %v", err)
 	}
@@ -114,13 +124,13 @@ func TestEdgeRateManager_DoesNotUseReserveAfterExpiry(t *testing.T) {
 	client := &fakeLeaseClient{grants: []int64{1, 0}, ttlSeconds: 1}
 	rm.SetLeaseClient(client)
 
-	if _, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 100, 1); err != nil {
+	if _, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 100, 1); err != nil {
 		t.Fatalf("first increment failed: %v", err)
 	}
 
 	time.Sleep(1100 * time.Millisecond)
 
-	usage, err := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 100, 1)
+	usage, err := admitUsage(rm, context.Background(), "v1", "svc", "k1", 100, 1)
 	if err != nil {
 		t.Fatalf("increment failed: %v", err)
 	}
@@ -144,7 +154,7 @@ func TestEdgeRateManager_UsesRedisLuaLocalTokens(t *testing.T) {
 	rm.SetLeaseClient(client)
 
 	for i := 0; i < 2; i++ {
-		usage, incErr := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 100, 1)
+		usage, incErr := admitUsage(rm, context.Background(), "v1", "svc", "k1", 100, 1)
 		if incErr != nil {
 			t.Fatalf("increment %d failed: %v", i+1, incErr)
 		}
@@ -153,7 +163,7 @@ func TestEdgeRateManager_UsesRedisLuaLocalTokens(t *testing.T) {
 		}
 	}
 
-	usage, incErr := rm.IncrementWithService(context.Background(), "v1", "svc", "k1", 100, 1)
+	usage, incErr := admitUsage(rm, context.Background(), "v1", "svc", "k1", 100, 1)
 	if incErr != nil {
 		t.Fatalf("increment after exhaustion failed: %v", incErr)
 	}
@@ -176,7 +186,7 @@ func TestEdgeRateManager_RedisLeaseTokensExpireWithTTL(t *testing.T) {
 	client := &fakeLeaseClient{grants: []int64{1}, ttlSeconds: 1}
 	rm.SetLeaseClient(client)
 
-	if _, incErr := rm.IncrementWithService(context.Background(), "v1", "svc", "k-ttl", 100, 1); incErr != nil {
+	if _, incErr := admitUsage(rm, context.Background(), "v1", "svc", "k-ttl", 100, 1); incErr != nil {
 		t.Fatalf("first increment failed: %v", incErr)
 	}
 
@@ -251,7 +261,7 @@ func TestT1_TemporalOverlap(t *testing.T) {
 	rm.SetLeaseClient(client)
 
 	// Fetch Lease A (100 tokens).
-	if _, err := rm.IncrementWithService(ctx, "v1", "svc", "k-t1", 10000, 1); err != nil {
+	if _, err := admitUsage(rm, ctx, "v1", "svc", "k-t1", 10000, 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -265,7 +275,7 @@ func TestT1_TemporalOverlap(t *testing.T) {
 	counter.expiresAtUnixMs.Store(time.Now().UnixMilli() + 1800)
 
 	// This call should detect the temporal trigger and queue an async renewal.
-	if _, err := rm.IncrementWithService(ctx, "v1", "svc", "k-t1", 10000, 1); err != nil {
+	if _, err := admitUsage(rm, ctx, "v1", "svc", "k-t1", 10000, 1); err != nil {
 		t.Fatal(err)
 	}
 	// Allow the async goroutine to complete.
@@ -309,7 +319,7 @@ func TestT2_LWMTopUpUnderPressure(t *testing.T) {
 
 	// Burst of 850 requests.
 	for i := 0; i < 850; i++ {
-		if _, err := rm.IncrementWithService(ctx, "v1", "svc", "k-t2", 100000, 1); err != nil {
+		if _, err := admitUsage(rm, ctx, "v1", "svc", "k-t2", 100000, 1); err != nil {
 			t.Fatalf("request %d failed: %v", i+1, err)
 		}
 	}
@@ -340,7 +350,7 @@ func TestT3_GlobalExhaustionAndBackoff(t *testing.T) {
 	ctx := context.Background()
 
 	// First request: triggers lease fetch → Hub says WAITING.
-	usage, err := rm.IncrementWithService(ctx, "v1", "svc", "k-t3", 10, 1)
+	usage, err := admitUsage(rm, ctx, "v1", "svc", "k-t3", 10, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +365,7 @@ func TestT3_GlobalExhaustionAndBackoff(t *testing.T) {
 
 	// All subsequent requests within the retry window must be short-circuited.
 	for i := 0; i < 5; i++ {
-		usage, err = rm.IncrementWithService(ctx, "v1", "svc", "k-t3", 10, 1)
+		usage, err = admitUsage(rm, ctx, "v1", "svc", "k-t3", 10, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -369,7 +379,7 @@ func TestT3_GlobalExhaustionAndBackoff(t *testing.T) {
 	time.Sleep(550 * time.Millisecond)
 
 	// Next call: retry window has elapsed → triggers a new async renewal.
-	usage, err = rm.IncrementWithService(ctx, "v1", "svc", "k-t3", 10, 1)
+	usage, err = admitUsage(rm, ctx, "v1", "svc", "k-t3", 10, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +422,7 @@ func TestT4_StaleLeasePartitionHardExpiry(t *testing.T) {
 	rm.SetLeaseClient(client)
 
 	// Fetch the initial lease.
-	if _, err := rm.IncrementWithService(ctx, "v1", "svc", "k-t4", 100000, 1); err != nil {
+	if _, err := admitUsage(rm, ctx, "v1", "svc", "k-t4", 100000, 1); err != nil {
 		t.Fatal(err)
 	}
 
@@ -432,7 +442,7 @@ func TestT4_StaleLeasePartitionHardExpiry(t *testing.T) {
 
 	// Network partition: no more lease grants available (grants slice empty).
 	// The next request must be denied (usage > limit).
-	usage, err := rm.IncrementWithService(ctx, "v1", "svc", "k-t4", 100000, 1)
+	usage, err := admitUsage(rm, ctx, "v1", "svc", "k-t4", 100000, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

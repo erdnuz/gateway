@@ -201,141 +201,10 @@ func TestGetTier(t *testing.T) {
 	}
 }
 
-// TestConfigManagerGetPrefix tests prefix retrieval
-func TestConfigManagerGetPrefix(t *testing.T) {
-	config := testutils.NewTestGatewayConfig()
-	configMgr := testutils.NewMockConfigManager(config)
 
-	tests := []struct {
-		name   string
-		prefix string
-		wantOk bool
-	}{
-		{name: "existing prefix", prefix: "/api/v1", wantOk: true},
-		{name: "another existing prefix", prefix: "/api/v2", wantOk: true},
-		{name: "non-existing prefix", prefix: "/api/v3", wantOk: false},
-	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			prefixCfg, ok := configMgr.GetPrefix(tt.prefix)
-			testutils.AssertEqual(t, tt.wantOk, ok, "prefix found")
-			if ok {
-				testutils.AssertEqual(t, tt.prefix, prefixCfg.Prefix, "prefix value")
-			}
-		})
-	}
-}
 
-// TestConfigManagerGetServiceConfig tests service configuration retrieval
-func TestConfigManagerGetServiceConfig(t *testing.T) {
-	config := testutils.NewTestGatewayConfig()
-	configMgr := testutils.NewMockConfigManager(config)
 
-	tests := []struct {
-		name       string
-		prefix     string
-		service    string
-		wantErr    bool
-		wantTarget string
-	}{
-		{
-			name:       "existing service",
-			prefix:     "/api/v1",
-			service:    "users-service",
-			wantErr:    false,
-			wantTarget: "http://upstream:3000",
-		},
-		{
-			name:    "non-existing service",
-			prefix:  "/api/v1",
-			service: "unknown-service",
-			wantErr: true,
-		},
-		{
-			name:    "non-existing prefix",
-			prefix:  "/api/v3",
-			service: "any-service",
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			svc, err := configMgr.GetServiceConfig(tt.prefix, tt.service)
-			if tt.wantErr {
-				testutils.AssertError(t, err, "should return error")
-			} else {
-				testutils.AssertNoError(t, err, "should not return error")
-				testutils.AssertEqual(t, tt.service, svc.ServiceID, "service ID")
-				testutils.AssertEqual(t, tt.wantTarget, svc.TargetURL, "target URL")
-			}
-		})
-	}
-}
-
-// TestTierManager tests tier lookup
-func TestTierManager(t *testing.T) {
-	tierMgr := testutils.NewMockTierManager()
-
-	// Set a tier
-	tierMgr.SetTier("api/v1", "user-123", "premium")
-
-	// Get the tier
-	tier, err := tierMgr.GetUserTier(context.TODO(), "api/v1", "user-123")
-	testutils.AssertNoError(t, err, "should not error")
-	testutils.AssertEqual(t, "premium", tier, "tier should match")
-
-	// Get unknown tier (should default)
-	tier, err = tierMgr.GetUserTier(context.TODO(), "api/v1", "unknown-user")
-	testutils.AssertNoError(t, err, "should not error")
-	testutils.AssertEqual(t, "free", tier, "should default to free")
-}
-
-// TestRateManager tests rate limiting
-func TestRateManager(t *testing.T) {
-	rateMgr := testutils.NewMockRateManager()
-
-	// First increment
-	usage, err := rateMgr.Increment(context.TODO(), "api/v1", "user-123", 100, 10)
-	testutils.AssertNoError(t, err, "should increment")
-	testutils.AssertEqual(t, int64(10), usage, "usage should be 10")
-
-	// Second increment
-	usage, err = rateMgr.Increment(context.TODO(), "api/v1", "user-123", 100, 20)
-	testutils.AssertNoError(t, err, "should increment")
-	testutils.AssertEqual(t, int64(30), usage, "usage should be 30")
-
-	// Get usage
-	current := rateMgr.GetUsage("api/v1", "user-123")
-	testutils.AssertEqual(t, int64(30), current, "usage should match")
-
-	// Reset
-	rateMgr.Reset()
-	current = rateMgr.GetUsage("api/v1", "user-123")
-	testutils.AssertEqual(t, int64(0), current, "usage should be 0 after reset")
-}
-
-// TestAnalyticsManager tests analytics capture
-func TestAnalyticsManager(t *testing.T) {
-	analyticsMgr := testutils.NewMockAnalyticsManager()
-
-	entry := testutils.NewTestAnalyticsEntry("api/v1", "users-service", "free", "GET")
-	analyticsMgr.Capture(entry)
-
-	testutils.AssertEqual(t, 1, analyticsMgr.GetEntriesCount(), "should have 1 entry")
-	entries := analyticsMgr.GetEntries()
-	testutils.AssertEqual(t, "api/v1", entries[0].Prefix, "prefix should match")
-	testutils.AssertEqual(t, "GET", entries[0].Method, "method should match")
-
-	// Capture more
-	analyticsMgr.Capture(testutils.NewTestAnalyticsEntry("api/v1", "posts-service", "premium", "POST"))
-	testutils.AssertEqual(t, 2, analyticsMgr.GetEntriesCount(), "should have 2 entries")
-
-	// Clear
-	analyticsMgr.Clear()
-	testutils.AssertEqual(t, 0, analyticsMgr.GetEntriesCount(), "should have 0 after clear")
-}
 
 // TestApplyRequestTransforms tests request transformation
 func TestApplyRequestTransforms(t *testing.T) {
@@ -1045,5 +914,31 @@ func TestEdgeServer_AnalyticsMetricsEndpoint(t *testing.T) {
 	}
 	if stats.Captured != 1 || stats.BufferDepth != 1 {
 		t.Fatalf("unexpected analytics stats payload: %+v", stats)
+	}
+}
+
+// The real edge.ConfigManager resolves prefixes and services from its index.
+func TestConfigManager_Lookups(t *testing.T) {
+	cfg := testutils.NewTestGatewayConfig()
+	cm := &ConfigManager{}
+	cm.active.Store(cfg)
+	cm.indexes.Store(buildConfigIndexes(cfg))
+
+	prefix := cfg.Prefixes[0].Prefix
+	service := cfg.Prefixes[0].Services[0].ServiceID
+	if p, ok := cm.GetPrefix(prefix); !ok || p.Prefix != prefix {
+		t.Fatalf("GetPrefix(%q) = %v, %v", prefix, p, ok)
+	}
+	if _, ok := cm.GetPrefix("missing"); ok {
+		t.Fatal("GetPrefix found a missing prefix")
+	}
+	if svc, err := cm.GetServiceConfig(prefix, service); err != nil || svc.ServiceID != service {
+		t.Fatalf("GetServiceConfig(%q, %q) = %v, %v", prefix, service, svc, err)
+	}
+	if _, err := cm.GetServiceConfig(prefix, "missing"); err == nil {
+		t.Fatal("GetServiceConfig found a missing service")
+	}
+	if _, err := cm.GetServiceConfig("missing", service); err == nil {
+		t.Fatal("GetServiceConfig found a service under a missing prefix")
 	}
 }

@@ -131,9 +131,6 @@ func TestAllowSafety_EnforcesLimitPerWindow(t *testing.T) {
 	if !rm.AllowSafety(req).Allowed {
 		t.Fatal("safety quota did not reset in the next window")
 	}
-	if usage, _ := rm.IncrementSafety(context.Background(), "x", "k", 2, 1); usage > 2 {
-		t.Fatalf("legacy IncrementSafety denied first request: %d", usage)
-	}
 }
 
 func TestAllow_HubOutageBacksOffAndReportsUnavailable(t *testing.T) {

@@ -163,8 +163,6 @@ func DefaultRateManagerOptions() RateManagerOptions {
 	}
 }
 
-var _ types.Limiter = (*RateManager)(nil)
-
 func NewRateManager(counterStore *redis.Client) *RateManager {
 	return NewRateManagerWithOptions(counterStore, DefaultRateManagerOptions())
 }
@@ -209,25 +207,6 @@ func (rm *RateManager) StartBackgroundWorkers(ctx context.Context) {
 	}
 	rm.leaseManager.Start(ctx)
 	go rm.sweepIdleCounters(ctx)
-}
-
-// Increment implements types.Limiter for period-less callers.
-func (rm *RateManager) Increment(ctx context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
-	return rm.IncrementWithService(ctx, prefix, "", apiKey, limit, amount)
-}
-
-// IncrementWithService is the legacy usage-style API: it returns the admitted
-// usage, or limit+1 when the request is denied. New code should call Allow.
-func (rm *RateManager) IncrementWithService(ctx context.Context, prefix, serviceID, apiKey string, limit, amount int64) (int64, error) {
-	d, err := rm.Allow(ctx, RateRequest{Prefix: prefix, Service: serviceID, APIKey: apiKey, Limit: limit, Cost: amount})
-	if err != nil {
-		return 0, err
-	}
-	if !d.Allowed {
-		return limit + 1, nil
-	}
-	c := rm.getLeaseCounter(prefix, serviceID, apiKey)
-	return c.consumed.Load(), nil
 }
 
 // Allow admits or denies one request against the key's leased quota.
@@ -343,16 +322,6 @@ func (rm *RateManager) AllowSafety(req RateRequest) RateDecision {
 	decision.Allowed = true
 	decision.Remaining = req.Limit - used
 	return decision
-}
-
-// IncrementSafety is the legacy usage-style safety API (single unbounded
-// window per edge process). Prefer AllowSafety.
-func (rm *RateManager) IncrementSafety(_ context.Context, prefix, apiKey string, limit, amount int64) (int64, error) {
-	d := rm.AllowSafety(RateRequest{Prefix: prefix, APIKey: apiKey, Limit: limit, Cost: amount})
-	if !d.Allowed {
-		return limit + 1, nil
-	}
-	return limit - d.Remaining, nil
 }
 
 // rollWindow resets per-window state when the epoch-aligned quota window has

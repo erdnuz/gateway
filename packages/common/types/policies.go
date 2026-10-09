@@ -40,7 +40,6 @@ type HubRuntimePolicy struct {
 	CORSAllowedMethods  []string      `bson:"cors_allowed_methods" json:"cors_allowed_methods,omitempty"`
 	CORSPreflightMaxAge time.Duration `bson:"cors_preflight_max_age" json:"cors_preflight_max_age,omitempty"`
 	APIKeyPattern       string        `bson:"api_key_pattern" json:"api_key_pattern,omitempty"`
-	MaxDelta            int64         `bson:"max_delta" json:"max_delta,omitempty"`
 	QueueWorkers        int           `bson:"queue_workers" json:"queue_workers,omitempty"`
 	QueueSubmitTimeout  time.Duration `bson:"queue_submit_timeout" json:"queue_submit_timeout,omitempty"`
 	QueueRetryMax       int           `bson:"queue_retry_max" json:"queue_retry_max,omitempty"`
@@ -54,7 +53,6 @@ type HubRuntimePolicy struct {
 type EdgeRuntimePolicy struct {
 	AnalyticsBufferSize     int           `bson:"analytics_buffer_size" json:"analytics_buffer_size,omitempty"`
 	AnalyticsPublishTimeout time.Duration `bson:"analytics_publish_timeout" json:"analytics_publish_timeout,omitempty"`
-	RateHardThresholdPct    float64       `bson:"rate_hard_threshold_pct" json:"rate_hard_threshold_pct,omitempty"`
 	RateLeaseSize           int64         `bson:"rate_lease_size" json:"rate_lease_size,omitempty"`
 	RateLowWaterPct         float64       `bson:"rate_low_water_pct" json:"rate_low_water_pct,omitempty"`
 	CacheMaxObjectBytes     int64         `bson:"cache_max_object_bytes" json:"cache_max_object_bytes,omitempty"`
@@ -89,7 +87,6 @@ func DefaultRuntimePolicy() RuntimePolicy {
 			CORSAllowedMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 			CORSPreflightMaxAge: 5 * time.Minute,
 			APIKeyPattern:       "^[A-Za-z0-9]{3,128}$",
-			MaxDelta:            10000,
 			QueueWorkers:        2,
 			QueueSubmitTimeout:  25 * time.Millisecond,
 			QueueRetryMax:       1,
@@ -102,7 +99,6 @@ func DefaultRuntimePolicy() RuntimePolicy {
 		Edge: EdgeRuntimePolicy{
 			AnalyticsBufferSize:     1000,
 			AnalyticsPublishTimeout: 2 * time.Second,
-			RateHardThresholdPct:    0.9,
 			RateLeaseSize:           100,
 			RateLowWaterPct:         20,
 			CacheMaxObjectBytes:     1 << 20,
@@ -145,9 +141,6 @@ func (rp RuntimePolicy) Effective() RuntimePolicy {
 	if strings.TrimSpace(rp.Hub.APIKeyPattern) == "" {
 		rp.Hub.APIKeyPattern = defaults.Hub.APIKeyPattern
 	}
-	if rp.Hub.MaxDelta <= 0 {
-		rp.Hub.MaxDelta = defaults.Hub.MaxDelta
-	}
 	if rp.Hub.QueueWorkers <= 0 {
 		rp.Hub.QueueWorkers = defaults.Hub.QueueWorkers
 	}
@@ -178,9 +171,6 @@ func (rp RuntimePolicy) Effective() RuntimePolicy {
 	}
 	if rp.Edge.AnalyticsPublishTimeout <= 0 {
 		rp.Edge.AnalyticsPublishTimeout = defaults.Edge.AnalyticsPublishTimeout
-	}
-	if rp.Edge.RateHardThresholdPct <= 0 || rp.Edge.RateHardThresholdPct > 1 {
-		rp.Edge.RateHardThresholdPct = defaults.Edge.RateHardThresholdPct
 	}
 	if rp.Edge.RateLeaseSize <= 0 {
 		rp.Edge.RateLeaseSize = defaults.Edge.RateLeaseSize
@@ -270,9 +260,6 @@ func (p HubRuntimePolicy) Validate() error {
 	if p.CORSPreflightMaxAge < 0 {
 		return errConfig("cors_preflight_max_age must be >= 0")
 	}
-	if p.MaxDelta < 0 {
-		return errConfig("max_delta must be >= 0")
-	}
 	if p.QueueWorkers < 0 {
 		return errConfig("queue_workers must be >= 0")
 	}
@@ -291,9 +278,6 @@ func (p EdgeRuntimePolicy) Validate() error {
 	}
 	if p.AnalyticsPublishTimeout < 0 {
 		return errConfig("analytics_publish_timeout must be >= 0")
-	}
-	if p.RateHardThresholdPct < 0 || p.RateHardThresholdPct > 1 {
-		return errConfig("rate_hard_threshold_pct must be between 0 and 1")
 	}
 	if p.RateLeaseSize < 0 {
 		return errConfig("rate_lease_size must be >= 0")

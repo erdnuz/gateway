@@ -18,7 +18,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,11 +40,9 @@ type integrationHarness struct {
 
 	redisContainer testcontainers.Container
 	natsContainer  testcontainers.Container
-	mongoContainer testcontainers.Container
 
 	redisAddr string
 	natsURL   string
-	mongoURI  string
 
 	rdb *redis.Client
 
@@ -150,9 +147,6 @@ func (h *integrationHarness) close() {
 	if h.natsContainer != nil {
 		_ = h.natsContainer.Terminate(context.Background())
 	}
-	if h.mongoContainer != nil {
-		_ = h.mongoContainer.Terminate(context.Background())
-	}
 	if h.workingDir != "" {
 		_ = os.RemoveAll(h.workingDir)
 	}
@@ -163,9 +157,6 @@ func (h *integrationHarness) startInfra() error {
 		return err
 	}
 	if err := h.startNATSContainer(); err != nil {
-		return err
-	}
-	if err := h.startMongoContainer(); err != nil {
 		return err
 	}
 	return nil
@@ -226,36 +217,6 @@ func (h *integrationHarness) startNATSContainer() error {
 	return nil
 }
 
-func (h *integrationHarness) startMongoContainer() error {
-	ctx, cancel := context.WithTimeout(h.ctx, 90*time.Second)
-	defer cancel()
-	cont, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "mongo:7",
-			ExposedPorts: []string{"27017/tcp"},
-			WaitingFor:   wait.ForListeningPort("27017/tcp").WithStartupTimeout(90 * time.Second),
-		},
-		Started: true,
-	})
-	if err != nil {
-		return fmt.Errorf("start mongo container: %w", err)
-	}
-	h.mongoContainer = cont
-	host, err := cont.Host(ctx)
-	if err != nil {
-		return err
-	}
-	port, err := cont.MappedPort(ctx, "27017/tcp")
-	if err != nil {
-		return err
-	}
-	mongoPort, err := strconv.Atoi(port.Port())
-	if err != nil {
-		return err
-	}
-	h.mongoURI = fmt.Sprintf("mongodb://%s:%d", host, mongoPort)
-	return nil
-}
 
 func (h *integrationHarness) startUpstream() {
 	h.upstreamSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -274,8 +235,7 @@ func (h *integrationHarness) startHubAndLeaseGRPC(configPath string) {
 	if err != nil {
 		h.t.Fatalf("new hub config manager: %v", err)
 	}
-	rateMgr := hub.NewRateManager(h.rdb, cfgMgr)
-	hubSrv := hub.NewHubServerWithManagers(h.rdb, cfgMgr, h.hubTierStore, rateMgr, "", 10_000, types.DefaultHubUpdatesChannel)
+	hubSrv := hub.NewHubServerWithManagers(h.rdb, cfgMgr, h.hubTierStore, "", types.DefaultHubUpdatesChannel)
 	if err := hubSrv.SetTierUpdateMessaging(h.natsURL, "tier.updates"); err != nil {
 		h.t.Fatalf("hub tier update messaging setup failed: %v", err)
 	}

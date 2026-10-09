@@ -133,8 +133,7 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	})
 
 	tierStore := hub.NewTierManager(rdb)
-	server := hub.NewHubServerWithManagers(rdb, cfgManager, tierStore, hub.NewRateManager(rdb, cfgManager),
-		cfg.AuthToken, policy.MaxDelta, cfg.UpdatesChannel)
+	server := hub.NewHubServerWithManagers(rdb, cfgManager, tierStore, cfg.AuthToken, cfg.UpdatesChannel)
 	server.SetCORSAllowedOrigins(cfg.EdgeOrigins)
 	server.SetCORSPreflightPolicy(policy.CORSAllowedHeaders, policy.CORSAllowedMethods, policy.CORSPreflightMaxAge)
 	if err := server.SetAPIKeyPattern(policy.APIKeyPattern); err != nil {

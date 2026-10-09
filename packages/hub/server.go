@@ -61,9 +61,7 @@ type HubServer struct {
 	rdb               *redis.Client
 	cfgManager        ConfigRegistry
 	tierManager       TierStore
-	rateManager       RateLimiter
 	authToken         string
-	maxDelta          int64
 	hubUpdatesChan    string
 	asyncQueue        *workers.BoundedQueue
 	queueWorkers      int
@@ -102,14 +100,9 @@ func NewHubServerWithManagers(
 	rdb *redis.Client,
 	cfg ConfigRegistry,
 	tierStore TierStore,
-	rateLimiter RateLimiter,
 	authToken string,
-	maxDelta int64,
 	hubUpdatesChannel string,
 ) *HubServer {
-	if maxDelta <= 0 {
-		maxDelta = 10000
-	}
 	if hubUpdatesChannel == "" {
 		hubUpdatesChannel = types.DefaultHubUpdatesChannel
 	}
@@ -118,9 +111,7 @@ func NewHubServerWithManagers(
 		rdb:              rdb,
 		cfgManager:       cfg,
 		tierManager:      tierStore,
-		rateManager:      rateLimiter,
 		authToken:        authToken,
-		maxDelta:         maxDelta,
 		hubUpdatesChan:   hubUpdatesChannel,
 		asyncQueue:       queue,
 		queueWorkers:     2,
@@ -352,8 +343,6 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleQueueMetrics(w, r)
 	case "tiers":
 		s.handleTiers(w, r, ctx, parts[1:])
-	case "rate":
-		s.handleRate(w, r, ctx, parts[1:])
 	default:
 		http.NotFound(w, r)
 	}
@@ -390,60 +379,6 @@ func (s *HubServer) isCORSOriginAllowed(origin string) bool {
 	}
 	_, ok := policy.allowed[origin]
 	return ok
-}
-
-func (s *HubServer) handleRate(w http.ResponseWriter, r *http.Request, ctx context.Context, params []string) {
-	// Expecting: {prefix}/{api_key}
-	if len(params) < 2 {
-		http.Error(w, "invalid path: expected /rate/{prefix}/{api_key}", http.StatusBadRequest)
-		return
-	}
-
-	prefix := params[0]
-	apiKey := params[1]
-	if !s.isAllowedPrefix(prefix) || !s.matchesAPIKey(apiKey) {
-		http.Error(w, "invalid prefix or api key", http.StatusBadRequest)
-		return
-	}
-
-	var total int64
-	var err error
-
-	switch r.Method {
-	case http.MethodPost:
-		// 1. Parse Delta for Increment
-		delta := int64(1)
-		maxDelta := s.maxDelta
-		if maxDelta <= 0 {
-			maxDelta = 10000
-		}
-		if dStr := r.URL.Query().Get("delta"); dStr != "" {
-			d, err := strconv.ParseInt(dStr, 10, 64)
-			if err != nil || d <= 0 || d > maxDelta {
-				http.Error(w, "invalid delta", http.StatusBadRequest)
-				return
-			}
-			delta = d
-		}
-		total, err = s.rateManager.Increment(ctx, prefix, apiKey, delta)
-
-	case http.MethodGet:
-		// 2. Pure retrieval (Weighted Calculation only)
-		total, err = s.rateManager.Increment(ctx, prefix, apiKey, 0)
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if err != nil {
-		s.writeInternalError(w, "handleRate", err)
-		return
-	}
-
-	// 3. Clean integer response
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(total)
 }
 
 // --- Handler Implementations ---

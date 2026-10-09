@@ -27,6 +27,3 @@ type TierStore interface {
 	DeleteTier(ctx context.Context, prefix, apiKey string) error
 }
 
-type RateLimiter interface {
-	Increment(ctx context.Context, prefix, key string, delta int64) (int64, error)
-}

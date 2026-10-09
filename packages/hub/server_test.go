@@ -221,7 +221,7 @@ func newTestHubServer(t *testing.T) (*HubServer, func()) {
 	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
 
 	// Use a single-segment prefix so it maps cleanly to a URL path segment,
-	// e.g. /rate/v1/user1.
+	// e.g. /tiers/v1/user1.
 	cfg := &types.GatewayConfig{
 		Prefixes: []types.PrefixConfig{
 			{
@@ -238,7 +238,6 @@ func newTestHubServer(t *testing.T) (*HubServer, func()) {
 	hs := &HubServer{
 		rdb:         rdb,
 		cfgManager:  cfgMgr,
-		rateManager: NewRateManager(rdb, cfgMgr),
 	}
 
 	cleanup := func() {
@@ -423,24 +422,6 @@ func TestHandleConfigReload_WithPayloadAppliesConfig(t *testing.T) {
 	}
 }
 
-// TestHandleRate_Get verifies that GET /rate/{prefix}/{apiKey} returns the current total.
-func TestHandleRate_Get(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodGet, "/rate/v1/user1", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
-	}
-
-	var total int64
-	if err := json.NewDecoder(rw.Body).Decode(&total); err != nil {
-		t.Fatalf("decode total: %v", err)
-	}
-}
 
 func cloneGatewayConfig(t *testing.T, cfg *types.GatewayConfig) *types.GatewayConfig {
 	t.Helper()
@@ -455,96 +436,10 @@ func cloneGatewayConfig(t *testing.T, cfg *types.GatewayConfig) *types.GatewayCo
 	return &out
 }
 
-// TestHandleRate_Post verifies that POST /rate/{prefix}/{apiKey}?delta=N increments the counter.
-func TestHandleRate_Post(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodPost, "/rate/v1/user1?delta=10", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
 
-	if rw.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
-	}
 
-	var total int64
-	if err := json.NewDecoder(rw.Body).Decode(&total); err != nil {
-		t.Fatalf("decode total: %v", err)
-	}
-	if total != 10 {
-		t.Errorf("expected total=10 after incrementing by 10, got %d", total)
-	}
-}
 
-// TestHandleRate_PostCumulative verifies that subsequent increments accumulate.
-func TestHandleRate_PostCumulative(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	for _, delta := range []string{"5", "3"} {
-		req := httptest.NewRequest(http.MethodPost, "/rate/v1/user2?delta="+delta, nil)
-		rw := httptest.NewRecorder()
-		hs.ServeHTTP(rw, req)
-		if rw.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rw.Code, rw.Body.String())
-		}
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/rate/v1/user2", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	var total int64
-	if err := json.NewDecoder(rw.Body).Decode(&total); err != nil {
-		t.Fatalf("decode total: %v", err)
-	}
-	if total != 8 {
-		t.Errorf("expected cumulative total=8, got %d", total)
-	}
-}
-
-// TestHandleRate_InvalidPath verifies that a missing apiKey segment returns 400.
-func TestHandleRate_InvalidPath(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodPost, "/rate/v1", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rw.Code)
-	}
-}
-
-// TestHandleRate_InvalidDelta verifies that a non-numeric delta returns 400.
-func TestHandleRate_InvalidDelta(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodPost, "/rate/v1/user1?delta=notanumber", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rw.Code, rw.Body.String())
-	}
-}
-
-// TestHandleRate_MethodNotAllowed verifies that unsupported methods return 405.
-func TestHandleRate_MethodNotAllowed(t *testing.T) {
-	hs, cleanup := newTestHubServer(t)
-	defer cleanup()
-
-	req := httptest.NewRequest(http.MethodDelete, "/rate/v1/user1", nil)
-	rw := httptest.NewRecorder()
-	hs.ServeHTTP(rw, req)
-
-	if rw.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", rw.Code)
-	}
-}
 
 // TestServeHTTP_NotFound verifies that unrecognised routes return 404.
 func TestServeHTTP_NotFound(t *testing.T) {
