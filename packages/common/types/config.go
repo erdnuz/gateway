@@ -110,6 +110,54 @@ type ServiceConfig struct {
 
 	// Reliability Strategy
 	Failure FailureConfig `bson:"failure" json:"failure"`
+
+	// Upstreams, when set, replaces TargetURL with a load-balanced pool.
+	Upstreams      []string              `json:"upstreams,omitempty"`
+	LoadBalancing  string                `json:"load_balancing,omitempty"` // round_robin (default) or least_requests
+	CircuitBreaker *CircuitBreakerConfig `json:"circuit_breaker,omitempty"`
+
+	Auth          AuthConfig    `json:"auth,omitempty"`
+	MaxConcurrent int           `json:"max_concurrent,omitempty"` // per caller, per edge; 0 = unlimited
+	Methods       []string      `json:"methods,omitempty"`        // allowed methods; empty = any
+	Host          string        `json:"host,omitempty"`           // required Host; empty = any
+	Timeout       time.Duration `json:"timeout,omitempty"`        // whole upstream exchange, retries included
+	MaxBodyBytes  int64         `json:"max_body_bytes,omitempty"` // request body limit; 0 = edge default
+}
+
+// CircuitBreakerConfig ejects an upstream target after consecutive failures.
+type CircuitBreakerConfig struct {
+	Failures int           `json:"failures"`
+	Cooldown time.Duration `json:"cooldown"`
+}
+
+// AuthConfig selects how callers are identified.
+type AuthConfig struct {
+	Type string     `json:"type,omitempty"` // api_key (default), jwt or none
+	JWT  *JWTConfig `json:"jwt,omitempty"`
+}
+
+// JWTConfig verifies bearer JWTs against a JWKS.
+type JWTConfig struct {
+	JWKSURL   string `json:"jwks_url"`
+	Issuer    string `json:"issuer,omitempty"`
+	Audience  string `json:"audience,omitempty"`
+	TierClaim string `json:"tier_claim,omitempty"`
+}
+
+// Targets returns the service's upstream base URLs.
+func (s *ServiceConfig) Targets() []string {
+	if len(s.Upstreams) > 0 {
+		return s.Upstreams
+	}
+	return []string{s.TargetURL}
+}
+
+// AuthType returns the effective auth type.
+func (s *ServiceConfig) AuthType() string {
+	if s.Auth.Type == "" {
+		return "api_key"
+	}
+	return s.Auth.Type
 }
 
 func (s *ServiceConfig) Validate() error {

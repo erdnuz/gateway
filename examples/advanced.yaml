@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=../schema/gate.schema.json
+#
+# Replicated upstreams, JWT and anonymous callers, and per-caller
+# concurrency limits.
+version: 2
+services:
+  # Three replicas behind round robin. A replica that fails 5 times in a row
+  # is ejected for 10s (the default for several upstreams); retries move to
+  # another replica.
+  - name: orders
+    match: { path_prefix: /v1/orders, methods: [GET, POST] }
+    upstreams: [http://orders-1:8080, http://orders-2:8080, http://orders-3:8080]
+    retries: { attempts: 2, statuses: [502, 503] }
+    timeout: 5s
+    limits:
+      window: 1m
+      max_concurrent: 20
+      tiers:
+        free: { requests: 600 }
+        pro: { requests: 60000 }
+
+  # Callers present a JWT; the "plan" claim picks their tier.
+  - name: reports
+    match: { path_prefix: /v1/reports }
+    upstreams: [http://reports-1:8080, http://reports-2:8080]
+    load_balancing: least_requests
+    circuit_breaker: { failures: 3, cooldown: 30s }
+    auth:
+      type: jwt
+      jwt:
+        jwks_url: https://idp.example.com/.well-known/jwks.json
+        issuer: https://idp.example.com/
+        audience: gate
+        tier_claim: plan
+    limits:
+      window: 1m
+      default_tier: free
+      tiers:
+        free: { requests: 600 }
+        pro: { requests: 60000 }
+
+  # A public endpoint: no credentials, each client IP gets the public tier.
+  - name: status
+    match: { path_prefix: /public/status, methods: [GET] }
+    upstream: http://status:8080
+    max_request_body: 1024
+    auth: { type: none }
+    limits:
+      window: 1m
+      tiers:
+        public: { requests: 60 }
+    cache: { ttl: 5s }

@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"net/http/httputil"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -65,6 +66,9 @@ type Server struct {
 	Deps
 	opts      Options
 	safety    *limiter.Local
+	inflight  *limiter.Concurrency
+	jwt       *jwtVerifier
+	pools     sync.Map // service label -> *pool
 	transport *http.Transport
 	proxy     *httputil.ReverseProxy
 	keys      atomic.Pointer[keyMatcher]
@@ -94,7 +98,7 @@ func NewServer(d Deps, o Options) *Server {
 	if o.MaxRequestBodyBytes <= 0 {
 		o.MaxRequestBodyBytes = defaultMaxRequestBodyBytes
 	}
-	s := &Server{Deps: d, opts: o, safety: limiter.NewLocal()}
+	s := &Server{Deps: d, opts: o, safety: limiter.NewLocal(), inflight: limiter.NewConcurrency(), jwt: newJWTVerifier()}
 	s.transport = &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		MaxIdleConns:          o.UpstreamMaxIdleConns,
@@ -144,6 +148,7 @@ func (s *Server) StartBackgroundWorkers(ctx context.Context) {
 		go r.Run(ctx)
 	}
 	go s.safety.Run(ctx)
+	go s.inflight.Run(ctx)
 }
 
 // SetStartupReady opens (or holds) proxy traffic.

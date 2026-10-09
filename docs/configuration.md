@@ -87,7 +87,7 @@ services:
     cache: { ttl: 15s }
 ```
 
-- **Examples:** [basic.yaml](../examples/basic.yaml), [multi-service.yaml](../examples/multi-service.yaml), and [full.yaml](../examples/full.yaml), which shows every option with its default.
+- **Examples:** [basic.yaml](../examples/basic.yaml), [multi-service.yaml](../examples/multi-service.yaml), [advanced.yaml](../examples/advanced.yaml) (replicated upstreams, JWT and anonymous callers, concurrency limits), and [full.yaml](../examples/full.yaml), which shows every option with its default.
 - **Durations** are strings with units: `500ms`, `30s`, `5m`, `1h`.
 - **Defaults:** every field under `runtime:` is optional, as is everything in a service beyond `name`, `match`, `upstream` and `limits`.
 - **Editor support:** [schema/gate.schema.json](../schema/gate.schema.json) is a JSON Schema generated from the Go types. Files that start with `# yaml-language-server: $schema=...` get completion and inline docs in VS Code (YAML extension) and JetBrains IDEs.

@@ -59,6 +59,11 @@ var (
 		Help: "Response-cache lookups, by service and result (hit, miss).",
 	}, []string{"service", "result"})
 
+	UpstreamEjections = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_upstream_ejections_total",
+		Help: "Upstream replicas ejected by the circuit breaker, by service.",
+	}, []string{"service"})
+
 	ControlEvents = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gate_control_events_total",
 		Help: "Control-plane events applied by this edge (config, tier).",

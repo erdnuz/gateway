@@ -236,6 +236,7 @@ func (l *Lease) fetch(ctx context.Context, req Request, c *leaseCounter, windowE
 			Prefix:          req.Scope,
 			ServiceId:       req.Service,
 			ApiKey:          req.Key,
+			TierId:          req.Tier,
 			RequestedTokens: c.leaseSize.Load(),
 		})
 		if err != nil {

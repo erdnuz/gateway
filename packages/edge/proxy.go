@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gateway/packages/common/httpx"
@@ -49,17 +49,31 @@ func (b *bufferPool) Get() []byte {
 
 func (b *bufferPool) Put(buf []byte) { b.pool.Put(&buf) }
 
-// forward is the end of the chain: it bounds the request body and proxies.
+// forward is the end of the chain: it picks an upstream replica, bounds the
+// request body and time, and proxies.
 func (s *Server) forward(w http.ResponseWriter, r *http.Request) {
 	st := stateOf(r)
-	target, err := url.Parse(st.svc.TargetURL)
-	if err != nil || target.Host == "" {
+	pool, err := s.poolFor(st)
+	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusBadGateway, "bad_upstream", "the service's upstream URL is invalid")
 		return
 	}
-	st.target = target
+	st.pool, st.target = pool, pool.pick(nil)
+	if st.target == nil {
+		proxyError(w, r, errCircuitOpen)
+		return
+	}
+	if d := st.svc.Timeout; d > 0 {
+		ctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		r = r.WithContext(ctx)
+	}
+	limit := s.opts.MaxRequestBodyBytes
+	if st.svc.MaxBodyBytes > 0 {
+		limit = st.svc.MaxBodyBytes
+	}
 	hasBody := r.Body != nil && r.Body != http.NoBody
-	r.Body = http.MaxBytesReader(w, r.Body, s.opts.MaxRequestBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	// Retries resend the body, so buffer it (bounded) when one is possible.
 	if p := st.svc.Failure.Upstream; hasBody && p.MaxRetries > 0 && retryable(r.Method, p) {
 		buf, err := io.ReadAll(r.Body)
@@ -81,7 +95,7 @@ func rewrite(pr *httputil.ProxyRequest) {
 	st := stateOf(pr.In)
 	pr.Out.URL.Path = upstreamPath(pr.In.URL.Path, st.svc.Transform.StripPrefix)
 	pr.Out.URL.RawPath = ""
-	pr.SetURL(st.target)
+	pr.SetURL(st.target.url)
 	pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"] // append, don't replace
 	pr.SetXForwarded()
 
@@ -133,7 +147,7 @@ func proxyError(w http.ResponseWriter, r *http.Request, err error) {
 		bodyError(w, r, err)
 		return
 	}
-	if r.Context().Err() != nil {
+	if errors.Is(r.Context().Err(), context.Canceled) {
 		return // the client went away; nobody is listening
 	}
 	httpx.Logger(r.Context()).Warn("upstream request failed", "scope", st.scope, "service", st.service, "err", err)
@@ -152,6 +166,11 @@ func proxyError(w http.ResponseWriter, r *http.Request, err error) {
 		httpx.WriteProblem(w, r, http.StatusGatewayTimeout, "upstream_timeout", "the upstream service did not respond in time")
 		return
 	}
+	if errors.Is(err, errCircuitOpen) {
+		w.Header().Set("Retry-After", "1")
+		httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "upstream_circuit_open", "every replica of the upstream is failing; retry shortly")
+		return
+	}
 	httpx.WriteProblem(w, r, http.StatusBadGateway, "upstream_unavailable", "the upstream service failed")
 }
 
@@ -164,8 +183,9 @@ func bodyError(w http.ResponseWriter, r *http.Request, err error) {
 	httpx.WriteProblem(w, r, http.StatusBadRequest, "bad_body", "the request body could not be read")
 }
 
-// retryTransport retries failed upstream attempts as the service's policy
-// allows, and records the upstream latency.
+// retryTransport sends each attempt to a replica of the service's pool,
+// retries as the service's policy allows (on another replica when there is
+// one), feeds outcomes to the circuit breaker, and records upstream latency.
 type retryTransport struct{ base http.RoundTripper }
 
 // errRetryableStatus marks a final response whose status the policy treats as
@@ -186,15 +206,29 @@ func (t retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			st.entry.UpstreamLatency = time.Since(start)
 		}
 	}()
+	target := st.target
 	for i := 0; ; i++ {
+		if i > 0 {
+			if target = st.pool.pick(target); target == nil {
+				return nil, errCircuitOpen
+			}
+			st.target = target
+		}
 		attempt, cancel, err := newAttempt(req, i, p.AttemptTimeout)
 		if err != nil {
 			return nil, err
 		}
+		attempt.URL.Scheme, attempt.URL.Host = target.url.Scheme, target.url.Host
+		used := target
+		used.inflight.Add(1)
+		done := func() { used.inflight.Add(-1); cancel() }
 		resp, err := t.base.RoundTrip(attempt)
+		st.pool.report(target, err == nil && resp.StatusCode < 500)
 		if err == nil && !retryStatus(resp.StatusCode, p) {
-			if resp.StatusCode != http.StatusSwitchingProtocols { // upgraded bodies must stay writable
-				resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+			if resp.StatusCode == http.StatusSwitchingProtocols { // upgraded bodies must stay writable
+				target.inflight.Add(-1)
+			} else {
+				resp.Body = &onClose{ReadCloser: resp.Body, done: done}
 			}
 			return resp, nil
 		}
@@ -202,7 +236,7 @@ func (t retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			resp.Body.Close()
 			err = fmt.Errorf("%w: %d", errRetryableStatus, resp.StatusCode)
 		}
-		cancel()
+		done()
 		if i+1 >= attempts {
 			return nil, err
 		}
@@ -218,7 +252,7 @@ func (t retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func newAttempt(req *http.Request, i int, timeout time.Duration) (*http.Request, context.CancelFunc, error) {
 	attempt := req
 	if i > 0 {
-		attempt = req.Clone(req.Context())
+		attempt = req.Clone(req.Context()) // also copies the URL, which retries re-point
 		if req.GetBody != nil {
 			body, err := req.GetBody()
 			if err != nil {
@@ -251,14 +285,20 @@ func retryable(method string, p types.UpstreamFailurePolicy) bool {
 	return p.RetryNonIdempotentMethods
 }
 
-type cancelOnClose struct {
+// onClose runs done once, when the response body is closed: the attempt's
+// deadline must outlive RoundTrip (it governs reading the body) and the
+// replica counts as busy until then.
+type onClose struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	done   func()
+	closed atomic.Bool
 }
 
-func (c *cancelOnClose) Close() error {
+func (c *onClose) Close() error {
 	err := c.ReadCloser.Close()
-	c.cancel()
+	if c.closed.CompareAndSwap(false, true) {
+		c.done()
+	}
 	return err
 }
 

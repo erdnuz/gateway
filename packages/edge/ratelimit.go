@@ -21,10 +21,21 @@ import (
 func (s *Server) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := stateOf(r)
+		if n := st.svc.MaxConcurrent; n > 0 {
+			release, ok := s.inflight.Acquire(st.label()+"\x00"+st.key, n)
+			if !ok {
+				telemetry.RateLimitDecisions.WithLabelValues(st.label(), st.tier.TierID, "concurrency_limited").Inc()
+				w.Header().Set("Retry-After", "1")
+				httpx.WriteProblem(w, r, http.StatusTooManyRequests, "concurrency_limited", "too many requests in flight for this caller")
+				return
+			}
+			defer release()
+		}
 		req := limiter.Request{
 			Scope:   st.scope,
 			Service: st.service,
 			Key:     st.key,
+			Tier:    st.tier.TierID,
 			Limit:   int64(st.tier.Quota),
 			Cost:    methodCost(r.Method, st.tier),
 		}

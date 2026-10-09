@@ -266,3 +266,74 @@ func TestShippedConfigsAreValid(t *testing.T) {
 		}
 	}
 }
+
+func TestCompile_ReplicasAuthAndMatching(t *testing.T) {
+	cfg, err := Load("../../examples/advanced.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders := cfg.Prefixes[0].Services[0]
+	if len(orders.Upstreams) != 3 || orders.CircuitBreaker == nil || orders.CircuitBreaker.Failures != 5 ||
+		orders.MaxConcurrent != 20 || orders.Timeout != 5*time.Second || len(orders.Methods) != 2 {
+		t.Fatalf("orders: %+v", orders)
+	}
+	reports := cfg.Prefixes[0].Services[1]
+	if reports.AuthType() != "jwt" || reports.Auth.JWT.TierClaim != "plan" || reports.LoadBalancing != "least_requests" || reports.CircuitBreaker.Cooldown != 30*time.Second {
+		t.Fatalf("reports: %+v", reports)
+	}
+	status := cfg.Prefixes[1].Services[0]
+	if status.AuthType() != "none" || status.MaxBodyBytes != 1024 {
+		t.Fatalf("status: %+v", status)
+	}
+	// The v2 form survives a round trip through the runtime model.
+	out, err := Marshal(FromInternal(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := ParseAndCompile(out, "roundtrip")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !reflect.DeepEqual(again.Prefixes, cfg.Prefixes) {
+		t.Fatalf("round trip changed services:\n%s", out)
+	}
+}
+
+func TestParse_ReplicasAndAuthProblems(t *testing.T) {
+	doc := `version: 2
+services:
+  - name: a
+    match: { path_prefix: /v1/a, methods: [get] }
+    upstream: http://a
+    upstreams: [http://b]
+    limits: { window: 1m, tiers: { x: { requests: 1 }, y: { requests: 2 } } }
+  - name: b
+    match: { path_prefix: /v1/b }
+    upstreams: [http://b1/api, http://b2/other]
+    load_balancing: random
+    auth: { type: none }
+    limits: { window: 1m, tiers: { x: { requests: 1 }, y: { requests: 2 } } }
+  - name: c
+    match: { path_prefix: /v1/c }
+    upstream: http://c
+    auth: { type: jwt }
+    limits: { window: 1m, tiers: { x: { requests: 1 }, y: { requests: 2 } } }
+`
+	got := map[string]bool{}
+	for _, p := range problems(t, doc) {
+		got[p.Path] = true
+	}
+	for _, path := range []string{
+		"services[0].match.methods[0]",
+		"services[0].upstreams",
+		"services[1].upstreams[1]",
+		"services[1].load_balancing",
+		"services[1].limits.default_tier",
+		"services[2].auth.jwt.jwks_url",
+		"services[2].limits.default_tier",
+	} {
+		if !got[path] {
+			t.Errorf("no problem reported at %s (got %v)", path, got)
+		}
+	}
+}

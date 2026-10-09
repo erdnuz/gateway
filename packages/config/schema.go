@@ -20,7 +20,15 @@ type File struct {
 type Service struct {
 	Name     string `yaml:"name" desc:"Unique service name, used in analytics and errors."`
 	Match    Match  `yaml:"match" desc:"Which requests this service handles."`
-	Upstream string `yaml:"upstream" desc:"Base URL of the upstream, e.g. http://orders:8080. A path here is prepended to forwarded paths."`
+	Upstream string `yaml:"upstream,omitempty" desc:"Base URL of the upstream, e.g. http://orders:8080. A path here is prepended to forwarded paths. Use upstreams for several replicas."`
+
+	Upstreams      []string        `yaml:"upstreams,omitempty" desc:"Replicas of the upstream, load balanced. They must share one base path. Use instead of upstream."`
+	LoadBalancing  string          `yaml:"load_balancing,omitempty" desc:"How requests spread over upstreams. Default round_robin." enum:"round_robin,least_requests"`
+	CircuitBreaker *CircuitBreaker `yaml:"circuit_breaker,omitempty" desc:"Stop sending to an upstream after consecutive failures. Default with several upstreams: 5 failures, 10s cooldown."`
+	Timeout        Duration        `yaml:"timeout,omitempty" desc:"Limit for the whole upstream exchange, retries included. Default runtime.edge.upstream_timeout per attempt."`
+	MaxRequestBody int64           `yaml:"max_request_body,omitempty" desc:"Largest request body in bytes. Default 10485760."`
+
+	Auth *Auth `yaml:"auth,omitempty" desc:"How callers are identified. Default: an API key in X-API-Key."`
 
 	StripPathPrefix *bool    `yaml:"strip_path_prefix,omitempty" desc:"Remove match.path_prefix before forwarding. Default true."`
 	Headers         *Headers `yaml:"headers,omitempty" desc:"Header changes on the way to the upstream and back."`
@@ -36,7 +44,29 @@ type Service struct {
 
 // Match selects requests for a service.
 type Match struct {
-	PathPrefix string `yaml:"path_prefix" desc:"Two path segments, /<group>/<service>, e.g. /v1/orders. Services sharing the first segment share a quota window."`
+	PathPrefix string   `yaml:"path_prefix" desc:"Two path segments, /<group>/<service>, e.g. /v1/orders. Services sharing the first segment share a quota window."`
+	Methods    []string `yaml:"methods,omitempty" desc:"Allowed methods; others get 405. Default: any."`
+	Host       string   `yaml:"host,omitempty" desc:"Required Host header (without port). Default: any."`
+}
+
+// CircuitBreaker ejects failing upstreams.
+type CircuitBreaker struct {
+	Failures int      `yaml:"failures" desc:"Consecutive failures (connection errors or 5xx) that eject an upstream."`
+	Cooldown Duration `yaml:"cooldown" desc:"How long an ejected upstream rests before it is tried again."`
+}
+
+// Auth selects caller identification.
+type Auth struct {
+	Type string `yaml:"type" desc:"api_key (X-API-Key, tiers assigned on the hub), jwt (bearer token, tier from a claim) or none (callers limited by client IP)." enum:"api_key,jwt,none"`
+	JWT  *JWT   `yaml:"jwt,omitempty" desc:"JWT verification, for type jwt."`
+}
+
+// JWT verifies bearer tokens.
+type JWT struct {
+	JWKSURL   string `yaml:"jwks_url" desc:"URL of the issuer's JSON Web Key Set."`
+	Issuer    string `yaml:"issuer,omitempty" desc:"Required iss claim."`
+	Audience  string `yaml:"audience,omitempty" desc:"Required aud claim."`
+	TierClaim string `yaml:"tier_claim,omitempty" desc:"Claim naming the caller's tier. Without it (or when absent) limits.default_tier applies."`
 }
 
 // Headers adds or removes headers.
@@ -52,6 +82,7 @@ type Limits struct {
 	DefaultTier        string          `yaml:"default_tier,omitempty" desc:"Tier used for a key whose tier cannot be looked up while the hub is unreachable (after any cached tier)."`
 	WhenHubUnavailable *Fallback       `yaml:"when_hub_unavailable,omitempty" desc:"Local limit applied while the hub cannot grant quota. Omit to reject with 503 instead."`
 	LeaseSize          int64           `yaml:"lease_size,omitempty" desc:"Tokens an edge takes from the hub per lease. Default runtime.edge.lease_size."`
+	MaxConcurrent      int             `yaml:"max_concurrent,omitempty" desc:"Requests one caller may have in flight on one edge. Default unlimited."`
 }
 
 // Tier is a quota level.

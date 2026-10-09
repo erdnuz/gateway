@@ -2,8 +2,9 @@ package edge
 
 import (
 	"context"
+	"net"
 	"net/http"
-	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,8 @@ type request struct {
 	service string
 	svc     *types.ServiceConfig
 	prefix  *types.PrefixConfig
-	target  *url.URL
+	pool    *pool
+	target  *target // the replica the current attempt uses
 	key     string // SHA-256 of the caller's API key (keys.Hash)
 	tier    *types.TierConfig
 	entry   *types.AnalyticsEntry // nil when analytics is off
@@ -65,6 +67,15 @@ func (s *Server) route(next http.Handler) http.Handler {
 			httpx.WriteProblem(w, r, http.StatusNotFound, "no_route", "no service is configured at /"+scope+"/"+service)
 			return
 		}
+		if svc.Host != "" && hostOnly(r.Host) != svc.Host {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "no_route", "no service is configured at /"+scope+"/"+service+" for this host")
+			return
+		}
+		if len(svc.Methods) > 0 && !slices.Contains(svc.Methods, r.Method) && !(r.Method == http.MethodOptions && svc.CORS != nil) {
+			w.Header().Set("Allow", strings.Join(svc.Methods, ", "))
+			httpx.WriteProblem(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "")
+			return
+		}
 		st.scope, st.service, st.svc = scope, service, svc
 		st.prefix, _ = s.Config.GetPrefix(scope)
 		if st.entry != nil {
@@ -72,6 +83,13 @@ func (s *Server) route(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func hostOnly(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 func splitRoute(path string) (scope, service string) {

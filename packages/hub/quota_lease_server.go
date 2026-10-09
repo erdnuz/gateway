@@ -77,11 +77,18 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 		return nil, status.Errorf(codes.NotFound, "service %q not found in prefix %q", req.ServiceId, req.Prefix)
 	}
 
-	tierCtx, tierCancel := context.WithTimeout(ctx, leaseRedisOpTimeout)
-	tierID, err := s.tierStore.GetTier(tierCtx, req.Prefix, req.ApiKey)
-	tierCancel()
-	if err != nil {
-		return nil, fmt.Errorf("tier lookup failed: %w", err)
+	// API keys get their tier from the hub's own record. Callers of jwt and
+	// none services have no record: the (mTLS-authenticated) edge resolved
+	// their tier from the token or the service default.
+	tierID := req.GetTierId()
+	if svcCfg.AuthType() == "api_key" {
+		tierCtx, tierCancel := context.WithTimeout(ctx, leaseRedisOpTimeout)
+		var err error
+		tierID, err = s.tierStore.GetTier(tierCtx, req.Prefix, req.ApiKey)
+		tierCancel()
+		if err != nil {
+			return nil, fmt.Errorf("tier lookup failed: %w", err)
+		}
 	}
 	tierCfg, ok := findTier(svcCfg, tierID)
 	if !ok {

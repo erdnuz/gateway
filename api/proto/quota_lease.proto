@@ -12,6 +12,10 @@ message QuotaLeaseRequest {
   string service_id = 2;
   string api_key = 3;
   int64 requested_tokens = 4;
+  // tier_id is the tier the edge resolved. The hub trusts it only for
+  // services whose callers are not API keys (jwt, none); for API keys it
+  // uses its own record.
+  string tier_id = 5;
 }
 
 message QuotaLeaseResponse {

@@ -16,6 +16,9 @@ var (
 	cacheTokens   = map[string]bool{"method": true, "path": true, "query": true, "key": true, "encoding": true}
 	costMethods   = map[string]bool{"GET": true, "POST": true, "PUT": true, "DELETE": true, "*": true}
 	upstreamModes = map[string]bool{"fail-closed": true, "fail-open": true}
+	balancers     = map[string]bool{"": true, "round_robin": true, "least_requests": true}
+	authTypes     = map[string]bool{"api_key": true, "jwt": true, "none": true}
+	httpMethods   = map[string]bool{"GET": true, "HEAD": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true, "OPTIONS": true}
 )
 
 // group returns the first path segment of a service's path prefix.
@@ -71,10 +74,18 @@ func (p *parser) validate(f *File) {
 			prefixes[pp] = i
 		}
 
-		if u, err := url.Parse(s.Upstream); s.Upstream == "" {
-			p.at(path+".upstream", "is required, e.g. http://%s:8080", orDefault(s.Name, "orders"))
-		} else if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			p.at(path+".upstream", "%q must be an http(s) URL with a host", s.Upstream)
+		p.validateUpstreams(path, s)
+		p.validateAuth(path, s)
+		for j, m := range s.Match.Methods {
+			if !httpMethods[m] {
+				p.at(fmt.Sprintf("%s.match.methods[%d]", path, j), "%q is not an HTTP method (use upper case, e.g. GET)", m)
+			}
+		}
+		if s.Limits.MaxConcurrent < 0 {
+			p.at(path+".limits.max_concurrent", "must not be negative")
+		}
+		if s.MaxRequestBody < 0 {
+			p.at(path+".max_request_body", "must not be negative")
 		}
 
 		p.validateLimits(path+".limits", s.Limits)
@@ -136,6 +147,81 @@ func (p *parser) validate(f *File) {
 	}
 	if v := f.Runtime.Edge.LeaseLowWaterPct; v < 0 || v > 100 {
 		p.at("runtime.edge.lease_low_water_pct", "must be between 0 and 100")
+	}
+}
+
+func (p *parser) validateUpstreams(path string, s Service) {
+	switch {
+	case s.Upstream == "" && len(s.Upstreams) == 0:
+		p.at(path+".upstream", "is required, e.g. http://%s:8080 (or upstreams: [...] for replicas)", orDefault(s.Name, "orders"))
+		return
+	case s.Upstream != "" && len(s.Upstreams) > 0:
+		p.at(path+".upstreams", "set upstream or upstreams, not both")
+		return
+	}
+	check := func(field, raw string) *url.URL {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			p.at(field, "%q must be an http(s) URL with a host", raw)
+			return nil
+		}
+		return u
+	}
+	if s.Upstream != "" {
+		check(path+".upstream", s.Upstream)
+	}
+	basePath := ""
+	for i, raw := range s.Upstreams {
+		u := check(fmt.Sprintf("%s.upstreams[%d]", path, i), raw)
+		if u == nil {
+			continue
+		}
+		if i == 0 {
+			basePath = strings.TrimSuffix(u.Path, "/")
+		} else if strings.TrimSuffix(u.Path, "/") != basePath {
+			p.at(fmt.Sprintf("%s.upstreams[%d]", path, i), "must have the same path as upstreams[0] (%q) so retries can move between replicas", basePath)
+		}
+	}
+	if !balancers[s.LoadBalancing] {
+		p.at(path+".load_balancing", "must be round_robin or least_requests (got %q)", s.LoadBalancing)
+	}
+	if cb := s.CircuitBreaker; cb != nil {
+		if cb.Failures < 1 {
+			p.at(path+".circuit_breaker.failures", "must be at least 1")
+		}
+		if cb.Cooldown <= 0 {
+			p.at(path+".circuit_breaker.cooldown", "is required, e.g. 10s")
+		}
+	}
+}
+
+func (p *parser) validateAuth(path string, s Service) {
+	a := s.Auth
+	if a == nil {
+		return
+	}
+	if !authTypes[a.Type] {
+		p.at(path+".auth.type", "must be api_key, jwt or none (got %q)", a.Type)
+		return
+	}
+	hasDefault := s.Limits.DefaultTier != "" || len(s.Limits.Tiers) == 1
+	switch a.Type {
+	case "jwt":
+		if a.JWT == nil || a.JWT.JWKSURL == "" {
+			p.at(path+".auth.jwt.jwks_url", "is required for jwt auth")
+		} else if u, err := url.Parse(a.JWT.JWKSURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			p.at(path+".auth.jwt.jwks_url", "%q must be an http(s) URL", a.JWT.JWKSURL)
+		}
+		if (a.JWT == nil || a.JWT.TierClaim == "") && !hasDefault {
+			p.at(path+".limits.default_tier", "is required for jwt auth without auth.jwt.tier_claim")
+		}
+	case "none":
+		if !hasDefault {
+			p.at(path+".limits.default_tier", "is required for auth type none (callers are limited by client IP on that tier)")
+		}
+	}
+	if a.Type != "jwt" && a.JWT != nil {
+		p.at(path+".auth.jwt", "only applies to auth type jwt")
 	}
 }
 

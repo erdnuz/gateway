@@ -46,10 +46,32 @@ func Compile(f *File) *types.GatewayConfig {
 
 func compileService(s Service) types.ServiceConfig {
 	svc := types.ServiceConfig{
-		ServiceID: s.Name,
-		TargetURL: s.Upstream,
-		Transform: types.TransformConfig{StripPrefix: s.StripPathPrefix == nil || *s.StripPathPrefix, AddHeaders: map[string]string{}},
-		Analytics: types.AnalyticsConfig{Enabled: true, Mode: types.AnalyticsModeHeavy, SamplingRate: 1},
+		ServiceID:     s.Name,
+		TargetURL:     s.Upstream,
+		Transform:     types.TransformConfig{StripPrefix: s.StripPathPrefix == nil || *s.StripPathPrefix, AddHeaders: map[string]string{}},
+		Analytics:     types.AnalyticsConfig{Enabled: true, Mode: types.AnalyticsModeHeavy, SamplingRate: 1},
+		LoadBalancing: s.LoadBalancing,
+		MaxConcurrent: s.Limits.MaxConcurrent,
+		Methods:       s.Match.Methods,
+		Host:          s.Match.Host,
+		Timeout:       s.Timeout.D(),
+		MaxBodyBytes:  s.MaxRequestBody,
+	}
+	if len(s.Upstreams) > 0 {
+		svc.Upstreams = s.Upstreams
+		svc.TargetURL = s.Upstreams[0]
+	}
+	switch cb := s.CircuitBreaker; {
+	case cb != nil:
+		svc.CircuitBreaker = &types.CircuitBreakerConfig{Failures: cb.Failures, Cooldown: cb.Cooldown.D()}
+	case len(s.Upstreams) > 1:
+		svc.CircuitBreaker = &types.CircuitBreakerConfig{Failures: 5, Cooldown: 10 * time.Second}
+	}
+	if a := s.Auth; a != nil {
+		svc.Auth.Type = a.Type
+		if j := a.JWT; j != nil {
+			svc.Auth.JWT = &types.JWTConfig{JWKSURL: j.JWKSURL, Issuer: j.Issuer, Audience: j.Audience, TierClaim: j.TierClaim}
+		}
 	}
 
 	for _, name := range sortedTierNames(s.Limits.Tiers) {
@@ -205,10 +227,25 @@ func FromInternal(cfg *types.GatewayConfig) *File {
 
 func serviceFromInternal(group string, p types.PrefixConfig, svc types.ServiceConfig) Service {
 	s := Service{
-		Name:     svc.ServiceID,
-		Match:    Match{PathPrefix: "/" + group + "/" + svc.ServiceID},
-		Upstream: svc.TargetURL,
-		Limits:   Limits{Window: Duration(p.QuotaPeriod), LeaseSize: p.Leasing.LeaseQuantum, Tiers: map[string]Tier{}},
+		Name:           svc.ServiceID,
+		Match:          Match{PathPrefix: "/" + group + "/" + svc.ServiceID, Methods: svc.Methods, Host: svc.Host},
+		Upstream:       svc.TargetURL,
+		LoadBalancing:  svc.LoadBalancing,
+		Timeout:        Duration(svc.Timeout),
+		MaxRequestBody: svc.MaxBodyBytes,
+		Limits:         Limits{Window: Duration(p.QuotaPeriod), LeaseSize: p.Leasing.LeaseQuantum, Tiers: map[string]Tier{}, MaxConcurrent: svc.MaxConcurrent},
+	}
+	if len(svc.Upstreams) > 0 {
+		s.Upstream, s.Upstreams = "", svc.Upstreams
+	}
+	if cb := svc.CircuitBreaker; cb != nil && !(len(svc.Upstreams) > 1 && cb.Failures == 5 && cb.Cooldown == 10*time.Second) {
+		s.CircuitBreaker = &CircuitBreaker{Failures: cb.Failures, Cooldown: Duration(cb.Cooldown)}
+	}
+	if svc.Auth.Type != "" && svc.Auth.Type != "api_key" {
+		s.Auth = &Auth{Type: svc.Auth.Type}
+		if j := svc.Auth.JWT; j != nil {
+			s.Auth.JWT = &JWT{JWKSURL: j.JWKSURL, Issuer: j.Issuer, Audience: j.Audience, TierClaim: j.TierClaim}
+		}
 	}
 	if !svc.Transform.StripPrefix {
 		f := false

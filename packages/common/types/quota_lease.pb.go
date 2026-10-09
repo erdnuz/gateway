@@ -31,8 +31,12 @@ type QuotaLeaseRequest struct {
 	ServiceId       string                 `protobuf:"bytes,2,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
 	ApiKey          string                 `protobuf:"bytes,3,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`
 	RequestedTokens int64                  `protobuf:"varint,4,opt,name=requested_tokens,json=requestedTokens,proto3" json:"requested_tokens,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// tier_id is the tier the edge resolved. The hub trusts it only for
+	// services whose callers are not API keys (jwt, none); for API keys it
+	// uses its own record.
+	TierId        string `protobuf:"bytes,5,opt,name=tier_id,json=tierId,proto3" json:"tier_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QuotaLeaseRequest) Reset() {
@@ -91,6 +95,13 @@ func (x *QuotaLeaseRequest) GetRequestedTokens() int64 {
 		return x.RequestedTokens
 	}
 	return 0
+}
+
+func (x *QuotaLeaseRequest) GetTierId() string {
+	if x != nil {
+		return x.TierId
+	}
+	return ""
 }
 
 type QuotaLeaseResponse struct {
@@ -580,13 +591,14 @@ var File_api_proto_quota_lease_proto protoreflect.FileDescriptor
 
 const file_api_proto_quota_lease_proto_rawDesc = "" +
 	"\n" +
-	"\x1bapi/proto/quota_lease.proto\x12\rgate.quota.v1\"\x8e\x01\n" +
+	"\x1bapi/proto/quota_lease.proto\x12\rgate.quota.v1\"\xa7\x01\n" +
 	"\x11QuotaLeaseRequest\x12\x16\n" +
 	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x02 \x01(\tR\tserviceId\x12\x17\n" +
 	"\aapi_key\x18\x03 \x01(\tR\x06apiKey\x12)\n" +
-	"\x10requested_tokens\x18\x04 \x01(\x03R\x0frequestedTokens\"\xea\x01\n" +
+	"\x10requested_tokens\x18\x04 \x01(\x03R\x0frequestedTokens\x12\x17\n" +
+	"\atier_id\x18\x05 \x01(\tR\x06tierId\"\xea\x01\n" +
 	"\x12QuotaLeaseResponse\x12%\n" +
 	"\x0egranted_tokens\x18\x01 \x01(\x03R\rgrantedTokens\x12*\n" +
 	"\x11lease_ttl_seconds\x18\x02 \x01(\x03R\x0fleaseTtlSeconds\x12)\n" +

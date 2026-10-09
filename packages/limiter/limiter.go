@@ -19,7 +19,8 @@ import (
 type Request struct {
 	Scope   string // quota scope shared with the hub (the route group, e.g. "v1")
 	Service string
-	Key     string // caller identity
+	Key     string // caller identity (a hash; never a raw credential)
+	Tier    string // the caller's tier, asserted to the hub for non-API-key callers
 	Limit   int64  // cost admitted per window
 	Cost    int64  // cost of this request; <= 0 counts as 1
 	// Window is the quota period. Windows are epoch aligned (unix / window),
