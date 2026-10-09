@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"gateway/packages/common/types"
 	"log"
 	"net/http"
 	neturl "net/url"
@@ -36,8 +35,10 @@ type TierManager struct {
 }
 
 type TierManagerOptions struct {
-	NATSURL  string
-	NATSSubj string
+	AuthToken string       // hub bearer token
+	Client    *http.Client // nil: a default hub client
+	NATSURL   string       // tier update stream; empty: nats.DefaultURL
+	NATSSubj  string       // empty: tier.updates
 }
 
 type tierSnapshot struct {
@@ -45,28 +46,12 @@ type tierSnapshot struct {
 	updatedAt time.Time
 }
 
-func NewTierManager(hubAddr string, rdb *redis.Client, hubUpdatesChannel string, authTok ...string) *TierManager {
-	token := ""
-	if len(authTok) > 0 {
-		token = authTok[0]
-	}
-	return NewTierManagerWithClient(hubAddr, rdb, hubUpdatesChannel, token, nil)
-}
-
-func NewTierManagerWithClient(hubAddr string, rdb *redis.Client, hubUpdatesChannel string, authTok string, client *http.Client) *TierManager {
-	return NewTierManagerWithOptions(hubAddr, rdb, hubUpdatesChannel, authTok, client, TierManagerOptions{})
-}
-
-func NewTierManagerWithOptions(hubAddr string, rdb *redis.Client, hubUpdatesChannel string, authTok string, client *http.Client, options TierManagerOptions) *TierManager {
-	token := ""
-	if authTok != "" {
-		token = authTok
-	}
+// NewTierManager resolves API keys to tiers through the edge's Redis cache,
+// falling back to the hub, and applies tier updates streamed over NATS.
+func NewTierManager(hubAddr string, rdb *redis.Client, options TierManagerOptions) *TierManager {
+	client := options.Client
 	if client == nil {
 		client = newHubHTTPClient(0)
-	}
-	if hubUpdatesChannel == "" {
-		hubUpdatesChannel = types.DefaultHubUpdatesChannel
 	}
 	natsURL := strings.TrimSpace(options.NATSURL)
 	if natsURL == "" {
@@ -83,7 +68,7 @@ func NewTierManagerWithOptions(hubAddr string, rdb *redis.Client, hubUpdatesChan
 	return &TierManager{
 		hubAddr:     hubAddr,
 		rdb:         rdb,
-		authTok:     token,
+		authTok:     options.AuthToken,
 		client:      client,
 		natsConn:    nc,
 		natsSubject: subject,

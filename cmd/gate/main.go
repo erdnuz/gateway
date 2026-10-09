@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -62,6 +63,7 @@ func run(args []string) error {
 	defer stop()
 
 	cmd, rest := args[0], args[1:]
+	setupLogging(cmd)
 	switch cmd {
 	case "dev":
 		return runDev(ctx, rest)
@@ -84,6 +86,26 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q (run \"gate help\")", cmd)
 	}
+}
+
+// setupLogging routes slog (and the log package) to stderr: JSON for the
+// services, text for gate dev. LOG_FORMAT and LOG_LEVEL override.
+func setupLogging(cmd string) {
+	format := os.Getenv("LOG_FORMAT")
+	if format == "" {
+		format = "json"
+		if cmd == "dev" {
+			format = "text"
+		}
+	}
+	var level slog.Level
+	_ = level.UnmarshalText([]byte(os.Getenv("LOG_LEVEL"))) // empty: info
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler = slog.NewJSONHandler(os.Stderr, opts)
+	if format == "text" {
+		h = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(h).With("service", cmd))
 }
 
 func noFlags(name string, args []string, fn func() error) error {

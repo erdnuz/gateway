@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"gateway/packages/common/httpx"
 	"gateway/packages/common/types"
 	"gateway/packages/common/workers"
 	"io"
@@ -62,14 +63,12 @@ type HubServer struct {
 	cfgManager        ConfigRegistry
 	tierManager       TierStore
 	authToken         string
-	hubUpdatesChan    string
 	asyncQueue        *workers.BoundedQueue
 	queueWorkers      int
 	submitTimeout     time.Duration
 	retryMax          int
 	retryBackoff      time.Duration
 	messaging         atomic.Pointer[natsMessaging] // set once NATS is reachable
-	configReloadChan  string
 	configReloadSubj  string
 	bootID            string
 	corsPolicy        atomic.Pointer[corsPolicy]
@@ -101,24 +100,18 @@ func NewHubServerWithManagers(
 	cfg ConfigRegistry,
 	tierStore TierStore,
 	authToken string,
-	hubUpdatesChannel string,
 ) *HubServer {
-	if hubUpdatesChannel == "" {
-		hubUpdatesChannel = types.DefaultHubUpdatesChannel
-	}
 	queue := workers.NewBoundedQueue(512)
 	server := &HubServer{
 		rdb:              rdb,
 		cfgManager:       cfg,
 		tierManager:      tierStore,
 		authToken:        authToken,
-		hubUpdatesChan:   hubUpdatesChannel,
 		asyncQueue:       queue,
 		queueWorkers:     2,
 		submitTimeout:    25 * time.Millisecond,
 		retryMax:         1,
 		retryBackoff:     10 * time.Millisecond,
-		configReloadChan: types.DefaultConfigReloadChannel,
 		configReloadSubj: types.DefaultConfigReloadSubject,
 		bootID:           newBootID(),
 	}
@@ -181,13 +174,6 @@ func (s *HubServer) SetCORSAllowedOrigins(origins []string) {
 		}
 	}
 	s.corsPolicy.Store(newCORSPolicy(allowed, current.allowHeaders, current.allowMethods, current.maxAge))
-}
-
-func (s *HubServer) SetConfigReloadChannel(channel string) {
-	if strings.TrimSpace(channel) == "" {
-		return
-	}
-	s.configReloadChan = channel
 }
 
 // SetConfigReloadSubject sets the NATS subject for config reload events.
@@ -326,7 +312,7 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.authorize(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -355,7 +341,7 @@ func (s *HubServer) handleCORS(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	if !s.isCORSOriginAllowed(origin) {
-		http.Error(w, "forbidden origin", http.StatusForbidden)
+		httpx.Error(w, r, http.StatusForbidden, "forbidden origin")
 		return true
 	}
 	w.Header().Set("Vary", "Origin")
@@ -385,35 +371,35 @@ func (s *HubServer) isCORSOriginAllowed(origin string) bool {
 
 func (s *HubServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.Error(w, r, http.StatusInternalServerError, err.Error())
 	}
 }
 
 func (s *HubServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	config := s.cfgManager.Snapshot()
 	if err := json.NewEncoder(w).Encode(config); err != nil {
-		s.writeInternalError(w, "handleConfig", err)
+		s.writeInternalError(w, r, "handleConfig", err)
 	}
 
 }
 
 func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	nextCfg, mode, err := s.resolveReloadTargetConfig(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	current := s.cfgManager.Snapshot()
@@ -422,21 +408,21 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 	if mode == "payload" {
 		reloader, ok := s.cfgManager.(configPayloadReloader)
 		if !ok {
-			http.Error(w, "config payload reload unsupported", http.StatusNotImplemented)
+			httpx.Error(w, r, http.StatusNotImplemented, "config payload reload unsupported")
 			return
 		}
 		if err := reloader.ReloadFromPayload(nextCfg); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			httpx.Error(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
 	} else {
 		reloader, ok := s.cfgManager.(interface{ ReloadFromFile() error })
 		if !ok {
-			http.Error(w, "config reload unsupported", http.StatusNotImplemented)
+			httpx.Error(w, r, http.StatusNotImplemented, "config reload unsupported")
 			return
 		}
 		if err := reloader.ReloadFromFile(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			httpx.Error(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
@@ -454,12 +440,12 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 
 func (s *HubServer) handleConfigReloadDryRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	nextCfg, mode, err := s.resolveReloadTargetConfig(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	analysis := analyzeConfigUpdate(s.cfgManager.Snapshot(), nextCfg)
@@ -496,8 +482,8 @@ func (s *HubServer) resolveReloadTargetConfig(r *http.Request) (*types.GatewayCo
 	return cfg, "file", nil
 }
 
-// publishConfigReloadEvent fans the event out on NATS (reaches every edge and
-// analytics instance) and on hub Redis pub/sub (legacy single-Redis setups).
+// publishConfigReloadEvent fans the event out on NATS to every edge and
+// analytics instance.
 func (s *HubServer) publishConfigReloadEvent(event types.ConfigReloadEvent) {
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -509,21 +495,13 @@ func (s *HubServer) publishConfigReloadEvent(event types.ConfigReloadEvent) {
 			log.Printf("hub config reload nats publish failed subject=%s err=%v", s.configReloadSubj, err)
 		}
 	} else {
-		log.Printf("hub config reload: nats not connected; edges with private Redis will not see epoch %d", event.Epoch)
+		log.Printf("hub config reload: nats not connected; edges will not see epoch %d", event.Epoch)
 	}
-	if s.rdb == nil {
-		return
-	}
-	go func(channel string, data []byte) {
-		pubCtx, cancel := context.WithTimeout(context.Background(), hubReadyRedisTimeout)
-		defer cancel()
-		_ = s.rdb.Publish(pubCtx, channel, data).Err()
-	}(s.configReloadChan, payload)
 }
 
 func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !s.readyHealthy.Load() {
@@ -538,7 +516,7 @@ func (s *HubServer) handleReady(w http.ResponseWriter, r *http.Request) {
 
 func (s *HubServer) handleQueueMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	snapshot := workers.QueueSnapshot{}
@@ -557,14 +535,14 @@ func (s *HubServer) handleQueueMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx context.Context, params []string) {
 	// Expecting: {prefix}/{api_key}
 	if len(params) < 2 {
-		http.Error(w, "invalid path: expected /tiers/{prefix}/{api_key}", http.StatusBadRequest)
+		httpx.Error(w, r, http.StatusBadRequest, "invalid path: expected /tiers/{prefix}/{api_key}")
 		return
 	}
 
 	prefix := params[0]
 	apiKey := params[1]
 	if !s.isAllowedPrefix(prefix) || !s.matchesAPIKey(apiKey) {
-		http.Error(w, "invalid prefix or api key", http.StatusBadRequest)
+		httpx.Error(w, r, http.StatusBadRequest, "invalid prefix or api key")
 		return
 	}
 
@@ -572,7 +550,7 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 	case http.MethodGet:
 		tier, err := s.tierManager.GetTier(ctx, prefix, apiKey)
 		if err != nil {
-			s.writeInternalError(w, "handleTiers.GetTier", err)
+			s.writeInternalError(w, r, "handleTiers.GetTier", err)
 			return
 		}
 
@@ -584,17 +562,17 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 			TierID string `json:"tier_id"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			httpx.Error(w, r, http.StatusBadRequest, err.Error())
 			return
 		}
 		req.TierID = strings.TrimSpace(req.TierID)
 		if !s.tierDefinedInPrefix(prefix, req.TierID) {
-			http.Error(w, "unknown tier_id for prefix", http.StatusBadRequest)
+			httpx.Error(w, r, http.StatusBadRequest, "unknown tier_id for prefix")
 			return
 		}
 
 		if err := s.tierManager.SetTier(ctx, prefix, apiKey, req.TierID); err != nil {
-			s.writeInternalError(w, "handleTiers.SetTier", err)
+			s.writeInternalError(w, r, "handleTiers.SetTier", err)
 			return
 		}
 
@@ -604,7 +582,7 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 
 	case http.MethodDelete:
 		if err := s.tierManager.DeleteTier(ctx, prefix, apiKey); err != nil {
-			s.writeInternalError(w, "handleTiers.DeleteTier", err)
+			s.writeInternalError(w, r, "handleTiers.DeleteTier", err)
 			return
 		}
 
@@ -613,13 +591,13 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func (s *HubServer) writeInternalError(w http.ResponseWriter, op string, err error) {
-	log.Printf("hub internal error op=%s err=%v", op, err)
-	http.Error(w, "internal server error", http.StatusInternalServerError)
+func (s *HubServer) writeInternalError(w http.ResponseWriter, r *http.Request, op string, err error) {
+	httpx.Logger(r.Context()).Error("hub internal error", "op", op, "err", err)
+	httpx.Error(w, r, http.StatusInternalServerError, "internal server error")
 }
 
 // authorize checks the bearer token in constant time. An empty authToken

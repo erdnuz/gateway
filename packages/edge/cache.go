@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"hash/fnv"
@@ -13,6 +14,81 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
+
+// serveFromCache answers GETs from the edge's response cache, and stores
+// cacheable upstream responses that fit the size bound. Hits are served
+// before rate limiting, so they cost the key no quota.
+func (s *Server) serveFromCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		st := stateOf(r)
+		cfg := st.svc.Cache
+		if r.Method != http.MethodGet || s.Redis == nil || cfg == nil || !cfg.Enabled {
+			next.ServeHTTP(w, r)
+			return
+		}
+		cm := NewCacheManager(s.Redis, *cfg)
+		if cached, ok, err := cm.CheckCache(r.Context(), r, st.key); err == nil && ok {
+			if st.entry != nil {
+				st.entry.CacheHit = true
+			}
+			w.Header().Set("X-Cache", "HIT")
+			if cached.ContentType != "" {
+				w.Header().Set("Content-Type", cached.ContentType)
+			}
+			w.WriteHeader(cached.StatusCode)
+			_, _ = w.Write(cached.Body)
+			return
+		}
+		w.Header().Set("X-Cache", "MISS")
+		cw := &cacheWriter{ResponseWriter: w, limit: s.opts.MaxCacheableBytes}
+		next.ServeHTTP(cw, r)
+		if cacheableStatus[cw.status] && !cw.overflow && !st.upstreamFailed {
+			_ = cm.SetCache(r.Context(), r, st.key, &CachedResponse{
+				StatusCode:  cw.status,
+				ContentType: w.Header().Get("Content-Type"),
+				Body:        cw.buf.Bytes(),
+			})
+		}
+	})
+}
+
+// cacheableStatus lists the statuses RFC 9111 §4.2.2 allows caching by
+// default.
+var cacheableStatus = map[int]bool{200: true, 203: true, 204: true, 300: true, 301: true, 308: true, 404: true, 405: true, 410: true, 414: true, 501: true}
+
+// cacheWriter streams the response to the client while keeping a copy of
+// up to limit bytes.
+type cacheWriter struct {
+	http.ResponseWriter
+	status   int
+	buf      bytes.Buffer
+	limit    int64
+	overflow bool
+}
+
+func (w *cacheWriter) WriteHeader(code int) {
+	if w.status == 0 && code >= 200 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *cacheWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if !w.overflow {
+		if int64(w.buf.Len()+len(b)) > w.limit {
+			w.overflow = true
+			w.buf = bytes.Buffer{}
+		} else {
+			w.buf.Write(b)
+		}
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *cacheWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 type CacheManager struct {
 	rdb          *redis.Client
@@ -36,17 +112,7 @@ type cacheTemplatePart struct {
 	literal string
 }
 
-const edgeCacheRedisTimeout = 150 * time.Millisecond
-
-func withCacheRedisTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx == nil {
-		return context.WithTimeout(context.Background(), edgeCacheRedisTimeout)
-	}
-	if _, hasDeadline := ctx.Deadline(); hasDeadline {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, edgeCacheRedisTimeout)
-}
+const cacheRedisTimeout = 150 * time.Millisecond
 
 type CachedResponse struct {
 	StatusCode  int    `json:"status_code"`
@@ -55,64 +121,40 @@ type CachedResponse struct {
 }
 
 func NewCacheManager(rdb *redis.Client, cfg types.CacheConfig) *CacheManager {
-	return &CacheManager{
-		rdb:          rdb,
-		cfg:          cfg,
-		templatePlan: compileCacheTemplate(cfg.CacheKey),
-	}
+	return &CacheManager{rdb: rdb, cfg: cfg, templatePlan: compileCacheTemplate(cfg.CacheKey)}
 }
 
-// CheckCache retrieves cached response metadata from Redis.
-func (cm *CacheManager) CheckCache(ctx context.Context, request *http.Request, apiKey string) (*CachedResponse, bool, error) {
-	key := cm.generateCacheKey(request, apiKey)
-	redisCtx, cancel := withCacheRedisTimeout(ctx)
+// CheckCache looks up the cached response for a request.
+func (cm *CacheManager) CheckCache(ctx context.Context, r *http.Request, apiKey string) (*CachedResponse, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, cacheRedisTimeout)
 	defer cancel()
-	val, err := cm.rdb.Get(redisCtx, key).Bytes()
+	val, err := cm.rdb.Get(ctx, cm.generateCacheKey(r, apiKey)).Bytes()
 	if err == redis.Nil {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, err
 	}
-
 	var cached CachedResponse
-	if err := json.Unmarshal(val, &cached); err != nil {
-		// Backward compatibility with older cache format (raw body only).
-		return &CachedResponse{StatusCode: http.StatusOK, ContentType: "application/json", Body: val}, true, nil
-	}
-	if len(cached.Body) == 0 && cached.StatusCode == 0 && cached.ContentType == "" {
-		// Backward compatibility for valid JSON payloads that are not cache envelopes.
-		return &CachedResponse{StatusCode: http.StatusOK, ContentType: "application/json", Body: val}, true, nil
-	}
-	if cached.StatusCode == 0 {
-		cached.StatusCode = http.StatusOK
-	}
-	if cached.ContentType == "" {
-		cached.ContentType = "application/json"
+	if err := json.Unmarshal(val, &cached); err != nil || cached.StatusCode == 0 {
+		return nil, false, err
 	}
 	return &cached, true, nil
 }
 
-// SetCache stores the upstream response metadata using the configured TTL.
-func (cm *CacheManager) SetCache(ctx context.Context, request *http.Request, apiKey string, cached *CachedResponse) error {
-	key := cm.generateCacheKey(request, apiKey)
-	if cached == nil {
-		return nil
-	}
+// SetCache stores a response for the configured TTL.
+func (cm *CacheManager) SetCache(ctx context.Context, r *http.Request, apiKey string, cached *CachedResponse) error {
 	b, err := json.Marshal(cached)
 	if err != nil {
 		return err
 	}
-	redisCtx, cancel := withCacheRedisTimeout(ctx)
+	ctx, cancel := context.WithTimeout(ctx, cacheRedisTimeout)
 	defer cancel()
-	return cm.rdb.Set(redisCtx, key, b, cm.cfg.TTL).Err()
+	return cm.rdb.Set(ctx, cm.generateCacheKey(r, apiKey), b, cm.cfg.TTL).Err()
 }
 
 func (cm *CacheManager) generateCacheKey(r *http.Request, apiKey string) string {
 	h := fnv.New64a()
-	path := r.URL.Path
-	method := r.Method
-	encoding := r.Header.Get("Accept-Encoding")
 	var query string
 	queryResolved := false
 	for _, part := range cm.templatePlan {
@@ -120,29 +162,24 @@ func (cm *CacheManager) generateCacheKey(r *http.Request, apiKey string) string 
 		case tokenLiteral:
 			_, _ = h.Write([]byte(part.literal))
 		case tokenPath:
-			_, _ = h.Write([]byte(path))
+			_, _ = h.Write([]byte(r.URL.Path))
 		case tokenMethod:
-			_, _ = h.Write([]byte(method))
+			_, _ = h.Write([]byte(r.Method))
 		case tokenEncoding:
-			_, _ = h.Write([]byte(encoding))
+			_, _ = h.Write([]byte(r.Header.Get("Accept-Encoding")))
 		case tokenAPIKey:
 			_, _ = h.Write([]byte(apiKey))
 		case tokenQuery:
 			if !queryResolved {
-				// Canonicalized query preserves stable keys regardless of param ordering.
+				// Canonical order keeps keys stable regardless of param order.
 				query = r.URL.Query().Encode()
 				queryResolved = true
 			}
 			_, _ = h.Write([]byte(query))
 		}
 	}
-	var b strings.Builder
-	b.Grow(3 + len(path) + 1 + 16)
-	b.WriteString("c:")
-	b.WriteString(path)
-	b.WriteByte(':')
-	b.WriteString(strconv.FormatUint(h.Sum64(), 16))
-	return b.String()
+	// The path prefix lets a config reload invalidate one service's entries.
+	return "c:" + r.URL.Path + ":" + strconv.FormatUint(h.Sum64(), 16)
 }
 
 func compileCacheTemplate(tpl string) []cacheTemplatePart {
@@ -160,8 +197,8 @@ func compileCacheTemplate(tpl string) []cacheTemplatePart {
 			parts = append(parts, cacheTemplatePart{token: tokenLiteral, literal: tpl[:dollar]})
 			tpl = tpl[dollar:]
 		}
-		matched, token, size := matchCacheToken(tpl)
-		if !matched {
+		token, size := matchCacheToken(tpl)
+		if size == 0 {
 			parts = append(parts, cacheTemplatePart{token: tokenLiteral, literal: "$"})
 			tpl = tpl[1:]
 			continue
@@ -172,25 +209,22 @@ func compileCacheTemplate(tpl string) []cacheTemplatePart {
 	return parts
 }
 
-func matchCacheToken(s string) (bool, cacheToken, int) {
-	switch {
-	case strings.HasPrefix(s, "$PATH"), strings.HasPrefix(s, "$path"):
-		return true, tokenPath, 5
-	case strings.HasPrefix(s, "$QUERY"), strings.HasPrefix(s, "$query"):
-		return true, tokenQuery, 6
-	case strings.HasPrefix(s, "$KEY"), strings.HasPrefix(s, "$key"):
-		return true, tokenAPIKey, 4
-	case strings.HasPrefix(s, "$ENC"), strings.HasPrefix(s, "$enc"):
-		return true, tokenEncoding, 4
-	case strings.HasPrefix(s, "$METHOD"), strings.HasPrefix(s, "$method"):
-		return true, tokenMethod, 7
-	default:
-		return false, tokenLiteral, 0
+func matchCacheToken(s string) (cacheToken, int) {
+	for _, t := range []struct {
+		name  string
+		token cacheToken
+	}{{"path", tokenPath}, {"query", tokenQuery}, {"key", tokenAPIKey}, {"enc", tokenEncoding}, {"method", tokenMethod}} {
+		if n := len(t.name) + 1; len(s) >= n && strings.EqualFold(s[1:n], t.name) {
+			return t.token, n
+		}
 	}
+	return tokenLiteral, 0
 }
 
+// InvalidateResponseCacheScopes deletes cached responses for reloaded
+// services.
 func InvalidateResponseCacheScopes(ctx context.Context, rdb *redis.Client, scopes []types.ConfigInvalidationScope) error {
-	if rdb == nil || len(scopes) == 0 {
+	if rdb == nil {
 		return nil
 	}
 	for _, scope := range scopes {
@@ -201,8 +235,7 @@ func InvalidateResponseCacheScopes(ctx context.Context, rdb *redis.Client, scope
 		if scope.ServiceID != "" {
 			pattern += "/" + scope.ServiceID
 		}
-		pattern += "*"
-		if err := deleteKeysByPattern(ctx, rdb, pattern); err != nil {
+		if err := deleteKeysByPattern(ctx, rdb, pattern+"*"); err != nil {
 			return err
 		}
 	}
@@ -212,24 +245,17 @@ func InvalidateResponseCacheScopes(ctx context.Context, rdb *redis.Client, scope
 func deleteKeysByPattern(ctx context.Context, rdb *redis.Client, pattern string) error {
 	var cursor uint64
 	for {
-		redisCtx, cancel := withCacheRedisTimeout(ctx)
-		keys, next, err := rdb.Scan(redisCtx, cursor, pattern, 256).Result()
-		cancel()
+		keys, next, err := rdb.Scan(ctx, cursor, pattern, 256).Result()
 		if err != nil {
 			return err
 		}
 		if len(keys) > 0 {
-			redisCtx, delCancel := withCacheRedisTimeout(ctx)
-			if err := rdb.Del(redisCtx, keys...).Err(); err != nil {
-				delCancel()
+			if err := rdb.Del(ctx, keys...).Err(); err != nil {
 				return err
 			}
-			delCancel()
 		}
-		cursor = next
-		if cursor == 0 {
-			break
+		if cursor = next; cursor == 0 {
+			return nil
 		}
 	}
-	return nil
 }

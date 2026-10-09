@@ -35,10 +35,9 @@ func TestValidate_RejectsBadValues(t *testing.T) {
 	c := valid()
 	c.LeaseClient = stubLeases{}
 	c.HubAddr = "hub:8080"
-	c.LeaseStore = "disk"
 	c.AnalyticsEnabled = true
 	err := c.Validate()
-	for _, want := range []string{"HUB_ADDR", "EDGE_LEASE_STORE", "NATS_ANALYTICS_URL"} {
+	for _, want := range []string{"HUB_ADDR", "NATS_ANALYTICS_URL"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %s: %v", want, err)
 		}

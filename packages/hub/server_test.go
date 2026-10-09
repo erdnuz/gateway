@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"gateway/packages/common/types"
-	"gateway/packages/config"
 	"gateway/packages/common/workers"
+	"gateway/packages/config"
 	"gateway/packages/edge"
 	testutils "gateway/testing"
 	"net/http"
@@ -236,8 +236,8 @@ func newTestHubServer(t *testing.T) (*HubServer, func()) {
 	cfgMgr.active.Store(cfg)
 
 	hs := &HubServer{
-		rdb:         rdb,
-		cfgManager:  cfgMgr,
+		rdb:        rdb,
+		cfgManager: cfgMgr,
 	}
 
 	cleanup := func() {
@@ -422,7 +422,6 @@ func TestHandleConfigReload_WithPayloadAppliesConfig(t *testing.T) {
 	}
 }
 
-
 func cloneGatewayConfig(t *testing.T, cfg *types.GatewayConfig) *types.GatewayConfig {
 	t.Helper()
 	b, err := json.Marshal(cfg)
@@ -435,11 +434,6 @@ func cloneGatewayConfig(t *testing.T, cfg *types.GatewayConfig) *types.GatewayCo
 	}
 	return &out
 }
-
-
-
-
-
 
 // TestServeHTTP_NotFound verifies that unrecognised routes return 404.
 func TestServeHTTP_NotFound(t *testing.T) {

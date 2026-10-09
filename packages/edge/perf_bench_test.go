@@ -1,75 +1,72 @@
 package edge
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
 	"gateway/packages/common/types"
 )
 
+// BenchmarkEdgeRequest measures one request through the whole chain
+// (route, auth, rate limit, proxy) against an in-process upstream.
+func BenchmarkEdgeRequest(b *testing.B) {
+	f := newFixture(b, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }, func(s *types.ServiceConfig) {
+		s.Tiers[0].Quota = 1 << 31
+		s.Analytics.Enabled = false
+	})
+	edge := httptest.NewServer(f.server)
+	defer edge.Close()
+	client := edge.Client()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			req, _ := http.NewRequest(http.MethodGet, edge.URL+"/v1/svc/x", nil)
+			req.Header.Set("X-API-Key", "testkey")
+			resp, err := client.Do(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				b.Fatalf("status %d", resp.StatusCode)
+			}
+		}
+	})
+}
+
 func BenchmarkConfigManagerGetServiceConfig(b *testing.B) {
-	cfg := benchmarkGatewayConfig(80, 25)
+	cfg := &types.GatewayConfig{Prefixes: make([]types.PrefixConfig, 80)}
+	for i := range cfg.Prefixes {
+		p := &cfg.Prefixes[i]
+		p.Prefix, p.QuotaPeriod = "p"+strconv.Itoa(i), time.Minute
+		for j := 0; j < 25; j++ {
+			p.Services = append(p.Services, types.ServiceConfig{ServiceID: "svc-" + strconv.Itoa(j)})
+		}
+	}
 	cm := &ConfigManager{}
 	cm.active.Store(cfg)
-	cm.indexes.Store(buildConfigIndexes(cfg))
-
-	prefix := cfg.Prefixes[37].Prefix
-	service := cfg.Prefixes[37].Services[12].ServiceID
-
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		svc, err := cm.GetServiceConfig(prefix, service)
-		if err != nil || svc == nil {
-			b.Fatalf("unexpected lookup failure: %v", err)
+		if _, err := cm.GetServiceConfig("p37", "svc-12"); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkCacheManagerGenerateCacheKey(b *testing.B) {
-	cm := NewCacheManager(nil, types.CacheConfig{
-		Enabled:  true,
-		TTL:      30 * time.Second,
-		CacheKey: "$method:$path:$query:$key:$enc",
-	})
+func BenchmarkCacheKey(b *testing.B) {
+	cm := NewCacheManager(nil, types.CacheConfig{Enabled: true, TTL: 30 * time.Second, CacheKey: "$method:$path:$query:$key:$enc"})
 	req := httptest.NewRequest("GET", "http://edge.local/v1/search?b=2&a=1&z=4", nil)
 	req.Header.Set("Accept-Encoding", "gzip, br")
-
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = cm.generateCacheKey(req, "benchmark-api-key")
 	}
-}
-
-func benchmarkGatewayConfig(prefixCount, servicesPerPrefix int) *types.GatewayConfig {
-	cfg := &types.GatewayConfig{Prefixes: make([]types.PrefixConfig, prefixCount)}
-	for i := 0; i < prefixCount; i++ {
-		prefix := types.PrefixConfig{
-			Prefix:      "/p" + itoa(i),
-			QuotaPeriod: time.Minute,
-			Services:    make([]types.ServiceConfig, servicesPerPrefix),
-		}
-		for j := 0; j < servicesPerPrefix; j++ {
-			prefix.Services[j] = types.ServiceConfig{ServiceID: "svc-" + itoa(j)}
-		}
-		cfg.Prefixes[i] = prefix
-	}
-	return cfg
-}
-
-func itoa(v int) string {
-	if v == 0 {
-		return "0"
-	}
-	buf := make([]byte, 0, 12)
-	for v > 0 {
-		buf = append(buf, byte('0'+(v%10)))
-		v /= 10
-	}
-	for l, r := 0, len(buf)-1; l < r; l, r = l+1, r-1 {
-		buf[l], buf[r] = buf[r], buf[l]
-	}
-	return string(buf)
 }

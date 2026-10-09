@@ -26,4 +26,3 @@ type TierStore interface {
 	SetTier(ctx context.Context, prefix, apiKey, tierID string) error
 	DeleteTier(ctx context.Context, prefix, apiKey string) error
 }
-

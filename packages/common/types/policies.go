@@ -451,12 +451,6 @@ func (fc FailureConfig) EffectiveUpstreamPolicy() UpstreamFailurePolicy {
 	if up.FallbackStatusCode <= 0 {
 		up.FallbackStatusCode = 503
 	}
-	if len(up.FallbackHeaders) == 0 {
-		up.FallbackHeaders = map[string]string{}
-	}
-	if _, ok := up.FallbackHeaders["X-Upstream-Error"]; !ok {
-		up.FallbackHeaders["X-Upstream-Error"] = "true"
-	}
 	if up.FallbackBody == "" {
 		up.FallbackBody = "Service temporarily degraded"
 	}

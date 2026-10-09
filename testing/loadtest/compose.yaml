@@ -15,7 +15,6 @@ x-edge-env: &edge-env
   EDGE_TLS_CERT_FILE: /certs/edge/tls.crt
   EDGE_TLS_KEY_FILE: /certs/edge/tls.key
   EDGE_TLS_CA_FILE: /certs/ca/ca.crt
-  EDGE_LEASE_STORE: ${LT_EDGE_LEASE_STORE:-}
 
 x-edge: &edge
   build:

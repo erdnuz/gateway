@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"gateway/packages/common/httpx"
 	"io/fs"
 	"net/http"
 	"sort"
@@ -193,29 +194,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleFeatures(w, r)
 	case "/analytics/ingestion-metrics":
 		if !s.authorize(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		s.handleIngestionMetrics(w, r)
 	case "/analytics/events":
 		if !s.authorize(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
 		s.queryEvents(w, r)
 	case "/analytics/summary":
 		if !s.authorize(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		s.handleSummary(w, r)
 	case "/analytics/clear":
 		if !s.authorize(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		s.handleClear(w, r)
@@ -227,14 +228,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveFrontend(w http.ResponseWriter, r *http.Request) {
 	assets, err := fs.Sub(staticAssets, "static")
 	if err != nil {
-		http.Error(w, "frontend unavailable", http.StatusInternalServerError)
+		httpx.Error(w, r, http.StatusInternalServerError, "frontend unavailable")
 		return
 	}
 
 	if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 		b, err := fs.ReadFile(assets, "index.html")
 		if err != nil {
-			http.Error(w, "frontend unavailable", http.StatusInternalServerError)
+			httpx.Error(w, r, http.StatusInternalServerError, "frontend unavailable")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -264,7 +265,7 @@ func (s *Server) authorize(r *http.Request) bool {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
@@ -272,7 +273,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !s.hubReady.Load() {
@@ -319,7 +320,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFeatures(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	writeJSON(w, map[string]bool{"testing_clear_enabled": s.allowTestingClear})
@@ -327,7 +328,7 @@ func (s *Server) handleFeatures(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleIngestionMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	writeJSON(w, s.snapshotIngestionMetrics())
@@ -473,7 +474,7 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 
 	entries, err := s.readEntries(ctx, limit, offset)
 	if err != nil {
-		http.Error(w, "analytics storage error", http.StatusInternalServerError)
+		httpx.Error(w, r, http.StatusInternalServerError, "analytics storage error")
 		return
 	}
 	entries = filterEntries(entries, r)
@@ -482,13 +483,13 @@ func (s *Server) queryEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	spec, err := parseAnalyticsSummaryQuery(r.URL.Query(), time.Now().UTC())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.Error(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 	intervalID := spec.Interval
@@ -497,12 +498,12 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 	if clickStore, ok := s.store.(*clickHouseAnalyticsStore); ok {
 		if groupBy != "" {
-			http.Error(w, "group_by is not supported for contract responses", http.StatusBadRequest)
+			httpx.Error(w, r, http.StatusBadRequest, "group_by is not supported for contract responses")
 			return
 		}
 		resp, err := clickStore.QueryContractSummary(r.Context(), spec)
 		if err != nil {
-			http.Error(w, "analytics storage error", http.StatusInternalServerError)
+			httpx.Error(w, r, http.StatusInternalServerError, "analytics storage error")
 			return
 		}
 		writeJSON(w, resp)
@@ -514,7 +515,7 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		offset := parseIntWithBounds(query.Get("offset"), 0, 0, s.policy.MaxEventsOffset)
 		entries, err := s.readEntries(r.Context(), limit, offset)
 		if err != nil {
-			http.Error(w, "analytics storage error", http.StatusInternalServerError)
+			httpx.Error(w, r, http.StatusInternalServerError, "analytics storage error")
 			return
 		}
 		entries = filterEntries(entries, r)
@@ -560,11 +561,11 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !s.allowTestingClear {
-		http.Error(w, "clear endpoint disabled", http.StatusForbidden)
+		httpx.Error(w, r, http.StatusForbidden, "clear endpoint disabled")
 		return
 	}
 
@@ -580,7 +581,7 @@ func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
 		delCancel()
 	}
 	if err != nil {
-		http.Error(w, "analytics storage error", http.StatusInternalServerError)
+		httpx.Error(w, r, http.StatusInternalServerError, "analytics storage error")
 		return
 	}
 

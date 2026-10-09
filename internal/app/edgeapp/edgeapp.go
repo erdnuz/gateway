@@ -18,6 +18,7 @@ import (
 	"gateway/packages/common/ready"
 	"gateway/packages/common/types"
 	"gateway/packages/edge"
+	"gateway/packages/limiter"
 
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
@@ -41,9 +42,6 @@ type Config struct {
 	TLSCAFile         string
 	LeaseClient       edge.QuotaLeaseRequester
 
-	// LeaseStore is "memory" (default) or "redis" (share lease tokens
-	// between edge replicas that share one Redis).
-	LeaseStore       string
 	LeaseSize        int64   // 0: runtime.edge.rate_lease_size
 	LeaseLowWaterPct float64 // 0: runtime.edge.rate_low_water_pct
 
@@ -52,8 +50,6 @@ type Config struct {
 	TierUpdatesSubject  string // empty: runtime.hub.tier_updates_subject
 	AnalyticsSubject    string // empty: runtime.analytics.nats_subject
 	AnalyticsEnabled    bool
-	UpdatesChannel      string
-	ConfigReloadChannel string
 	ConfigReloadSubject string
 	ConfigRefresh       time.Duration
 	BootstrapConfigFile string
@@ -74,7 +70,6 @@ func FromEnv() Config {
 		TLSCertFile:         strings.TrimSpace(config.String("EDGE_TLS_CERT_FILE", "")),
 		TLSKeyFile:          strings.TrimSpace(config.String("EDGE_TLS_KEY_FILE", "")),
 		TLSCAFile:           strings.TrimSpace(config.String("EDGE_TLS_CA_FILE", "")),
-		LeaseStore:          strings.ToLower(strings.TrimSpace(config.String("EDGE_LEASE_STORE", "memory"))),
 		LeaseSize:           config.Int64("EDGE_LEASE_SIZE", 0),
 		LeaseLowWaterPct:    float64(config.Int("EDGE_LEASE_LOW_WATER_PERCENT", 0)),
 		NATSTierURL:         config.String("NATS_TIER_URL", natsURL),
@@ -82,8 +77,6 @@ func FromEnv() Config {
 		TierUpdatesSubject:  config.String("NATS_TIER_UPDATES_SUBJECT", ""),
 		AnalyticsSubject:    config.String("NATS_ANALYTICS_SUBJECT", ""),
 		AnalyticsEnabled:    config.Bool("GATE_ANALYTICS_ENABLED", true),
-		UpdatesChannel:      config.String("HUB_UPDATES_CHANNEL", types.DefaultHubUpdatesChannel),
-		ConfigReloadChannel: config.String("EDGE_CONFIG_RELOAD_CHANNEL", types.DefaultConfigReloadChannel),
 		ConfigReloadSubject: config.String("EDGE_CONFIG_RELOAD_SUBJECT", types.DefaultConfigReloadSubject),
 		ConfigRefresh:       time.Duration(config.Int("EDGE_CONFIG_REFRESH_SECONDS", 0)) * time.Second,
 		BootstrapConfigFile: config.String("EDGE_BOOTSTRAP_CONFIG_FILE", ""),
@@ -107,11 +100,6 @@ func (c Config) Validate() error {
 		if c.TLSCertFile == "" || c.TLSKeyFile == "" || c.TLSCAFile == "" {
 			errs = append(errs, errors.New("EDGE_TLS_CERT_FILE, EDGE_TLS_KEY_FILE and EDGE_TLS_CA_FILE are required"))
 		}
-	}
-	switch c.LeaseStore {
-	case "", "memory", "redis":
-	default:
-		errs = append(errs, fmt.Errorf("EDGE_LEASE_STORE must be memory or redis, got %q", c.LeaseStore))
 	}
 	if c.NATSTierURL == "" {
 		errs = append(errs, errors.New("NATS_TIER_URL or NATS_URL is required"))
@@ -149,7 +137,7 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 	}()
 
 	hubClient := edge.NewHubHTTPClient(types.DefaultRuntimePolicy().Edge.HubHTTPTimeout)
-	configMgr, err := edge.NewConfigManagerWithFallback(cfg.HubAddr, cfg.HubToken, hubClient, cfg.BootstrapConfigFile)
+	configMgr, err := edge.NewConfigManager(cfg.HubAddr, cfg.HubToken, hubClient, cfg.BootstrapConfigFile)
 	if err != nil {
 		return nil, fmt.Errorf("load config from hub: %w", err)
 	}
@@ -159,7 +147,6 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 	if cfg.ConfigRefresh > 0 {
 		configMgr.StartAutoRefresh(ctx, cfg.ConfigRefresh)
 	}
-	configMgr.StartConfigReloadSubscriber(ctx, e.rdb, cfg.ConfigReloadChannel)
 	if nc, err := nats.Connect(cfg.NATSTierURL, nats.MaxReconnects(-1)); err != nil {
 		log.Printf("edge config reload nats connect failed url=%s err=%v (reloads will not propagate)", cfg.NATSTierURL, err)
 	} else {
@@ -173,8 +160,9 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 	if tierSubject == "" {
 		tierSubject = configMgr.TierUpdatesSubject()
 	}
-	tierMgr := edge.NewTierManagerWithOptions(cfg.HubAddr, e.rdb, cfg.UpdatesChannel, cfg.HubToken, hubClient,
-		edge.TierManagerOptions{NATSURL: cfg.NATSTierURL, NATSSubj: tierSubject})
+	tierMgr := edge.NewTierManager(cfg.HubAddr, e.rdb, edge.TierManagerOptions{
+		AuthToken: cfg.HubToken, Client: hubClient, NATSURL: cfg.NATSTierURL, NATSSubj: tierSubject,
+	})
 
 	e.leaseClient = cfg.LeaseClient
 	if e.leaseClient == nil {
@@ -184,18 +172,14 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 		}
 	}
 
-	var leaseRedis *redis.Client
-	if cfg.LeaseStore == "redis" {
-		leaseRedis = e.rdb
-	}
-	rateMgr := edge.NewRateManagerWithOptions(leaseRedis, edge.RateManagerOptions{
+	// Quota state lives in this process only: edges share nothing but the
+	// hub, so they scale out without coordinating with each other.
+	lease := limiter.NewLease(e.leaseClient, limiter.LeaseOptions{
 		LeaseSize:   firstPositive(cfg.LeaseSize, policy.RateLeaseSize),
 		LowWaterPct: firstPositiveFloat(cfg.LeaseLowWaterPct, policy.RateLowWaterPct),
-		MinTokens:   1,
 	})
-	rateMgr.SetLeaseClient(e.leaseClient)
 
-	var sink edge.AnalyticsSink = edge.NoOpAnalyticsSink{}
+	var sink edge.AnalyticsSink
 	if cfg.AnalyticsEnabled {
 		subject := cfg.AnalyticsSubject
 		if subject == "" {
@@ -207,13 +191,19 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 		sink = mgr
 	}
 
-	server := edge.NewEdgeServerWithOptions(configMgr, tierMgr, rateMgr, sink, e.rdb, edge.EdgeServerOptions{
-		UpstreamClientTimeout:     policy.UpstreamClientTimeout,
-		MaxCacheableResponseBytes: policy.CacheMaxObjectBytes,
-		UpstreamMaxIdleConns:      policy.UpstreamMaxIdleConns,
-		UpstreamIdleConnTimeout:   policy.UpstreamIdleConnTimeout,
-		EdgeID:                    cfg.EdgeID,
-		AdminToken:                cfg.AdminToken,
+	server := edge.NewServer(edge.Deps{
+		Config:    configMgr,
+		Tiers:     tierMgr,
+		Limiter:   lease,
+		Analytics: sink,
+		Redis:     e.rdb,
+	}, edge.Options{
+		EdgeID:                  cfg.EdgeID,
+		UpstreamTimeout:         policy.UpstreamClientTimeout,
+		UpstreamMaxIdleConns:    policy.UpstreamMaxIdleConns,
+		UpstreamIdleConnTimeout: policy.UpstreamIdleConnTimeout,
+		MaxCacheableBytes:       policy.CacheMaxObjectBytes,
+		AdminToken:              cfg.AdminToken,
 	})
 	server.StartBackgroundWorkers(ctx)
 	server.SetStartupReady(false)
@@ -246,7 +236,7 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 // /readyz tracks edge-local dependencies only: a hub or analytics outage is
 // handled per request by the failure policies instead of taking every edge
 // out of rotation at once.
-func awaitHub(ctx context.Context, cfg Config, server *edge.EdgeServer) {
+func awaitHub(ctx context.Context, cfg Config, server *edge.Server) {
 	readyURL := strings.TrimSuffix(cfg.HubAddr, "/") + "/readyz"
 	client := &http.Client{Timeout: 2 * time.Second}
 	watchCtx, stop := context.WithCancel(ctx)

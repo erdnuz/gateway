@@ -2,7 +2,6 @@ package edge
 
 import (
 	"context"
-	"gateway/packages/common/types"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -17,7 +16,7 @@ func TestTierManager_AppliesTierUpdatePayload(t *testing.T) {
 	defer m.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
-	tm := NewTierManager("", rdb, types.DefaultHubUpdatesChannel)
+	tm := NewTierManager("", rdb, TierManagerOptions{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -60,7 +59,7 @@ func TestTierManager_IgnoresNonTierUpdatePayload(t *testing.T) {
 	defer m.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
-	tm := NewTierManager("", rdb, types.DefaultHubUpdatesChannel)
+	tm := NewTierManager("", rdb, TierManagerOptions{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -86,7 +85,7 @@ func TestTierManager_EmptyTierDeletesCache(t *testing.T) {
 	defer m.Close()
 
 	rdb := redis.NewClient(&redis.Options{Addr: m.Addr()})
-	tm := NewTierManager("", rdb, types.DefaultHubUpdatesChannel)
+	tm := NewTierManager("", rdb, TierManagerOptions{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

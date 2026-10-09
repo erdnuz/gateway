@@ -15,7 +15,7 @@ import (
 )
 
 func TestIntegration_StartupSafety_EdgeFailsWhenHubIsUnavailableWithoutBootstrap(t *testing.T) {
-	cm, err := edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, "")
+	cm, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, "")
 	if err != nil {
 		t.Fatalf("expected edge startup to remain pending without bootstrap, got error: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestIntegration_StartupSafety_EdgeRecoversWhenHubStartsLate(t *testing.T) {
 		t.Fatalf("write test config: %v", err)
 	}
 
-	cmPending, err := edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, "")
+	cmPending, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, "")
 	if err != nil {
 		t.Fatalf("expected startup to remain pending before hub is available, got: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestIntegration_StartupSafety_EdgeRecoversWhenHubStartsLate(t *testing.T) {
 	}))
 	defer hub.Close()
 
-	cm, err := edge.NewConfigManagerWithFallback(hub.URL, "", nil, "")
+	cm, err := edge.NewConfigManager(hub.URL, "", nil, "")
 	if err != nil {
 		t.Fatalf("expected edge startup to recover after hub becomes available, got: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestIntegration_StartupSafety_EdgeBootstrapMisconfigThenValidFallback(t *te
 		t.Fatalf("write bad config: %v", err)
 	}
 
-	_, err := edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, badPath)
+	_, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, badPath)
 	if err == nil {
 		t.Fatal("expected startup failure with invalid bootstrap config")
 	}
@@ -93,7 +93,7 @@ func TestIntegration_StartupSafety_EdgeBootstrapMisconfigThenValidFallback(t *te
 		t.Fatalf("expected generated config to be valid, got: %v", err)
 	}
 
-	cm, err := edge.NewConfigManagerWithFallback("http://127.0.0.1:1", "", nil, goodPath)
+	cm, err := edge.NewConfigManager("http://127.0.0.1:1", "", nil, goodPath)
 	if err != nil {
 		t.Fatalf("expected startup success with valid bootstrap fallback, got: %v", err)
 	}

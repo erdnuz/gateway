@@ -74,16 +74,10 @@ func (cm *ConfigManager) ensureIndexes(cfg *types.GatewayConfig) *configIndexes 
 	return rebuilt
 }
 
-// NewConfigManager performs a one-time hydration from the Hub on startup.
-func NewConfigManager(hubAddr, authToken string) (*ConfigManager, error) {
-	return NewConfigManagerWithClient(hubAddr, authToken, nil)
-}
-
-func NewConfigManagerWithClient(hubAddr, authToken string, client *http.Client) (*ConfigManager, error) {
-	return NewConfigManagerWithFallback(hubAddr, authToken, client, "")
-}
-
-func NewConfigManagerWithFallback(hubAddr, authToken string, client *http.Client, bootstrapFile string) (*ConfigManager, error) {
+// NewConfigManager hydrates config from the hub once. If the hub is
+// unreachable it falls back to bootstrapFile, or to an empty config (all
+// routes 404) until a reload arrives. A nil client uses a default.
+func NewConfigManager(hubAddr, authToken string, client *http.Client, bootstrapFile string) (*ConfigManager, error) {
 	if client == nil {
 		client = newHubHTTPClient(0)
 	}
@@ -96,7 +90,7 @@ func NewConfigManagerWithFallback(hubAddr, authToken string, client *http.Client
 			log.Printf("edge config bootstrap pending: hub config unavailable (%v); using empty config until hub recovers", err)
 			cfg = &types.GatewayConfig{}
 		} else {
-			fallbackCfg, fallbackErr := loadConfigFromFile(bootstrapFile)
+			fallbackCfg, fallbackErr := config.Load(bootstrapFile)
 			if fallbackErr != nil {
 				return nil, fmt.Errorf("failed to hydrate config on startup from hub (%v) and bootstrap file (%v)", err, fallbackErr)
 			}
@@ -108,11 +102,6 @@ func NewConfigManagerWithFallback(hubAddr, authToken string, client *http.Client
 	cm.active.Store(cfg)
 	cm.indexes.Store(buildConfigIndexes(cfg))
 	return cm, nil
-}
-
-// loadConfigFromFile reads a bootstrap gateway config (version 2).
-func loadConfigFromFile(path string) (*types.GatewayConfig, error) {
-	return config.Load(path)
 }
 
 // Get returns the immutable GatewayConfig.
@@ -254,34 +243,6 @@ func (cm *ConfigManager) SetHTTPClient(client *http.Client) {
 		return
 	}
 	cm.client = client
-}
-
-// StartConfigReloadSubscriber listens for reload events on Redis pub/sub.
-// It only works when the hub and edge share a Redis; prefer
-// StartConfigReloadNATSSubscriber. rdb is also used for cache invalidation.
-func (cm *ConfigManager) StartConfigReloadSubscriber(ctx context.Context, rdb *redis.Client, channel string) {
-	if rdb == nil {
-		return
-	}
-	if channel == "" {
-		channel = types.DefaultConfigReloadChannel
-	}
-	go func() {
-		sub := rdb.Subscribe(ctx, channel)
-		defer sub.Close()
-		ch := sub.Channel()
-		for {
-			select {
-			case msg, ok := <-ch:
-				if !ok {
-					return
-				}
-				cm.handleReloadEvent(ctx, msg.Payload, rdb)
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
 }
 
 // StartConfigReloadNATSSubscriber listens for hub reload events on NATS, the

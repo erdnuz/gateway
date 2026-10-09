@@ -22,8 +22,8 @@ func schemaFor(t reflect.Type) map[string]any {
 	}
 	if t == durationType {
 		return map[string]any{
-			"type":    "string",
-			"pattern": `^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`,
+			"type":     "string",
+			"pattern":  `^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`,
 			"examples": []string{"500ms", "30s", "5m", "1h"},
 		}
 	}

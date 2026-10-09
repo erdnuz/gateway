@@ -56,7 +56,7 @@ Apply endpoint behavior:
 
 ## Config Reload Event
 
-Hub publishes a `ConfigReloadEvent` on NATS subject `HUB_CONFIG_RELOAD_SUBJECT` (default: `gate.config.reload`), which every edge receives, and on Redis channel `HUB_CONFIG_RELOAD_CHANNEL` (default: `gate:config:reload`) for setups where hub and edge share Redis.
+Hub publishes a `ConfigReloadEvent` on NATS subject `HUB_CONFIG_RELOAD_SUBJECT` (default: `gate.config.reload`), which every edge and analytics instance receives.
 
 Event includes:
 

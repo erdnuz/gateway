@@ -8,7 +8,7 @@ own a private Redis, and a minimal upstream
 ```bash
 testing/loadtest/run.sh <label>          # e.g. baseline, after
 KEEP=1 testing/loadtest/run.sh dev       # leave the stack running afterwards
-LT_EDGE_LEASE_STORE=redis testing/loadtest/run.sh redis-store
+ONLY="throughput hotkey" testing/loadtest/run.sh perf   # a subset of scenarios
 ```
 
 Requires Docker only; dev certificates are generated on first run

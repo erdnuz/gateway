@@ -71,12 +71,8 @@ func TestIntegration_TCLK1DurationBasedExpiry(t *testing.T) {
 		t.Fatalf("initial request expected 200 got=%d", resp.StatusCode)
 	}
 
-	key := "edge:lease:tokens:v1:auth-api:kclk1"
-	pttl, err := h.rdb.PTTL(h.ctx, key).Result()
-	if err != nil {
-		t.Fatalf("read pttl: %v", err)
-	}
-	if pttl < 1500*time.Millisecond || pttl > 2200*time.Millisecond {
+	_, exp := h.leaseHolding("kclk1")
+	if pttl := time.Until(exp); pttl < 1500*time.Millisecond || pttl > 2200*time.Millisecond {
 		t.Fatalf("expected lease pttl near 2s, got %s", pttl)
 	}
 

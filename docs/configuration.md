@@ -25,7 +25,6 @@ variables (`gate dev` needs none). Defaults are shown in parentheses.
 | `NATS_URL` (`NATS_TIER_URL`) | `nats://127.0.0.1:4222` | tier updates and config reload events |
 | `NATS_TIER_UPDATES_SUBJECT` | `runtime.hub.tier_updates_subject` | |
 | `HUB_CONFIG_RELOAD_SUBJECT` | `gate.config.reload` | NATS subject for reload events |
-| `HUB_CONFIG_RELOAD_CHANNEL` | `gate:config:reload` | legacy Redis pub/sub channel (still published) |
 | `HUB_EDGE_ALLOWED_ORIGINS` | none | CORS origins allowed to call the hub API |
 
 ## Edge (`gate edge`)
@@ -40,14 +39,12 @@ variables (`gate dev` needs none). Defaults are shown in parentheses.
 | `HUB_GRPC_SERVER_NAME` | required | must match a SAN in the hub certificate |
 | `EDGE_TLS_CERT_FILE`, `EDGE_TLS_KEY_FILE`, `EDGE_TLS_CA_FILE` | required | client cert and hub CA |
 | `REDIS_ADDR` | `localhost:6379` | tier and response caches |
-| `EDGE_LEASE_STORE` | `memory` | `redis` only when several edge replicas share one Redis |
 | `EDGE_LEASE_SIZE` | `runtime.edge.rate_lease_size` | default lease quantum; per-prefix `leasing.lease_quantum` wins |
 | `EDGE_LEASE_LOW_WATER_PERCENT` | `runtime.edge.rate_low_water_pct` | renew when this share of a lease is left |
 | `NATS_URL` (`NATS_TIER_URL`, `NATS_ANALYTICS_URL`) | `nats://127.0.0.1:4222` | |
 | `NATS_TIER_UPDATES_SUBJECT`, `NATS_ANALYTICS_SUBJECT` | from runtime policy | |
 | `GATE_ANALYTICS_ENABLED` | `true` | publish request events |
 | `EDGE_CONFIG_RELOAD_SUBJECT` | `gate.config.reload` | |
-| `EDGE_CONFIG_RELOAD_CHANNEL` | `gate:config:reload` | legacy; only works if hub and edge share Redis |
 | `EDGE_CONFIG_REFRESH_SECONDS` | `0` (off) | periodic config poll |
 | `EDGE_BOOTSTRAP_CONFIG_FILE` | none | config to use if the hub is unreachable at startup |
 | `EDGE_ADMIN_TOKEN` | none | bearer token for `/analytics/metrics`; unset disables it |
@@ -154,7 +151,7 @@ Apply behavior:
 
 - Hub validates the next config.
 - Hub applies atomically.
-- Hub publishes a structured reload event on NATS subject `HUB_CONFIG_RELOAD_SUBJECT` (default `gate.config.reload`) and, for single-Redis setups, on Redis channel `HUB_CONFIG_RELOAD_CHANNEL`.
+- Hub publishes a structured reload event on NATS subject `HUB_CONFIG_RELOAD_SUBJECT` (default `gate.config.reload`).
 - Edge subscribes on NATS (and Redis) and refreshes config on receipt. Events are deduplicated by `(boot_id, epoch)`, so a hub restart (epoch back to 1) is still applied.
 
 Current invalidation scope:

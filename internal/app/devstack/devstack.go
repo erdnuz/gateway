@@ -113,8 +113,6 @@ func Run(ctx context.Context, opts Options) error {
 		AuthToken:           token,
 		RedisAddr:           mr.Addr(),
 		NATSURL:             ns.ClientURL(),
-		UpdatesChannel:      types.DefaultHubUpdatesChannel,
-		ConfigReloadChannel: types.DefaultConfigReloadChannel,
 		ConfigReloadSubject: types.DefaultConfigReloadSubject,
 	})
 	if err != nil {
@@ -134,12 +132,9 @@ func Run(ctx context.Context, opts Options) error {
 		HubAddr:             hubURL,
 		HubToken:            token,
 		LeaseClient:         inProcessLeases{h.Leases},
-		LeaseStore:          "memory",
 		NATSTierURL:         ns.ClientURL(),
 		NATSAnalyticsURL:    ns.ClientURL(),
 		AnalyticsEnabled:    opts.AnalyticsAddr != "",
-		UpdatesChannel:      types.DefaultHubUpdatesChannel,
-		ConfigReloadChannel: types.DefaultConfigReloadChannel,
 		ConfigReloadSubject: types.DefaultConfigReloadSubject,
 	})
 	if err != nil {

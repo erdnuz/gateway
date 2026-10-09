@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"gateway/packages/common/httpx"
 	"log"
 	"net"
 	"net/http"
@@ -41,8 +42,6 @@ type Config struct {
 
 	NATSURL             string
 	TierUpdatesSubject  string // empty: runtime.hub.tier_updates_subject
-	UpdatesChannel      string
-	ConfigReloadChannel string
 	ConfigReloadSubject string
 	EdgeOrigins         []string
 
@@ -64,8 +63,6 @@ func FromEnv() Config {
 		EnforceNoEviction:   config.Bool("HUB_ENFORCE_REDIS_NOEVICTION", true),
 		NATSURL:             config.String("NATS_TIER_URL", natsURL),
 		TierUpdatesSubject:  strings.TrimSpace(config.String("NATS_TIER_UPDATES_SUBJECT", "")),
-		UpdatesChannel:      config.String("HUB_UPDATES_CHANNEL", types.DefaultHubUpdatesChannel),
-		ConfigReloadChannel: config.String("HUB_CONFIG_RELOAD_CHANNEL", types.DefaultConfigReloadChannel),
 		ConfigReloadSubject: config.String("HUB_CONFIG_RELOAD_SUBJECT", types.DefaultConfigReloadSubject),
 		EdgeOrigins:         appkit.SplitCSV(config.String("HUB_EDGE_ALLOWED_ORIGINS", "")),
 		TLSCertFile:         strings.TrimSpace(config.String("HUB_TLS_CERT_FILE", "")),
@@ -133,14 +130,13 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	})
 
 	tierStore := hub.NewTierManager(rdb)
-	server := hub.NewHubServerWithManagers(rdb, cfgManager, tierStore, cfg.AuthToken, cfg.UpdatesChannel)
+	server := hub.NewHubServerWithManagers(rdb, cfgManager, tierStore, cfg.AuthToken)
 	server.SetCORSAllowedOrigins(cfg.EdgeOrigins)
 	server.SetCORSPreflightPolicy(policy.CORSAllowedHeaders, policy.CORSAllowedMethods, policy.CORSPreflightMaxAge)
 	if err := server.SetAPIKeyPattern(policy.APIKeyPattern); err != nil {
 		rdb.Close()
 		return nil, fmt.Errorf("invalid runtime.hub.api_key_pattern: %w", err)
 	}
-	server.SetConfigReloadChannel(cfg.ConfigReloadChannel)
 	server.SetConfigReloadSubject(cfg.ConfigReloadSubject)
 	server.SetAsyncQueueConfig(policy.QueueWorkers, policy.QueueSubmitTimeout, policy.QueueRetryMax, policy.QueueRetryBackoff)
 	server.SetStartupReady(false)
@@ -176,7 +172,7 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 		return nil, fmt.Errorf("http listen %s: %w", cfg.HTTPAddr, err)
 	}
 	h.httpServer = &http.Server{
-		Handler:           server,
+		Handler:           httpx.WithRequestID(server),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       policy.HTTPReadTimeout,
 		WriteTimeout:      policy.HTTPWriteTimeout,

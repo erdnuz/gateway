@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gateway/packages/common/httpx"
 	"log"
 	"net"
 	"net/http"
@@ -14,8 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	analyticsapi "gateway/packages/analytics"
 	"gateway/internal/app/appkit"
+	analyticsapi "gateway/packages/analytics"
 	"gateway/packages/common/config"
 	"gateway/packages/common/ready"
 	"gateway/packages/common/types"
@@ -128,7 +129,7 @@ func Start(ctx context.Context, cfg Config) (*Analytics, error) {
 		return nil, fmt.Errorf("http listen %s: %w", cfg.HTTPAddr, err)
 	}
 	a.httpServer = &http.Server{
-		Handler:           server,
+		Handler:           httpx.WithRequestID(server),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       policy.ReadTimeout,
 		WriteTimeout:      policy.WriteTimeout,

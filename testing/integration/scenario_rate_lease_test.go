@@ -112,12 +112,7 @@ func TestIntegration_T1TemporalOverlapTopUp(t *testing.T) {
 		t.Fatalf("first request expected 200 got=%d", resp.StatusCode)
 	}
 
-	key := "edge:lease:tokens:v1:auth-api:kt1"
-	b1, err := h.rdb.Get(h.ctx, key).Int64()
-	if err != nil {
-		t.Fatalf("read local token balance: %v", err)
-	}
-	if b1 != 99 {
+	if b1, _ := h.leaseHolding("kt1"); b1 != 99 {
 		t.Fatalf("expected 99 tokens after first consume, got %d", b1)
 	}
 
@@ -129,13 +124,9 @@ func TestIntegration_T1TemporalOverlapTopUp(t *testing.T) {
 		t.Fatalf("second request expected 200 got=%d", resp.StatusCode)
 	}
 
-	// Allow async renewal to complete and apply INCRBY + PEXPIRE.
+	// Allow the async renewal to complete and merge.
 	time.Sleep(250 * time.Millisecond)
-	b2, err := h.rdb.Get(h.ctx, key).Int64()
-	if err != nil {
-		t.Fatalf("read merged balance: %v", err)
-	}
-	if b2 < 190 {
+	if b2, _ := h.leaseHolding("kt1"); b2 < 190 {
 		t.Fatalf("expected merged balance around 198 after overlap top-up, got %d", b2)
 	}
 	if fake.callCount() < 2 {
@@ -162,12 +153,7 @@ func TestIntegration_T2LowWaterTopUpUnderPressure(t *testing.T) {
 
 	// Give the async LWM renewal a small window to complete.
 	time.Sleep(250 * time.Millisecond)
-	key := "edge:lease:tokens:v1:auth-api:kt2"
-	b, err := h.rdb.Get(h.ctx, key).Int64()
-	if err != nil {
-		t.Fatalf("read low-water merged balance: %v", err)
-	}
-	if b < 10 {
+	if b, _ := h.leaseHolding("kt2"); b < 10 {
 		t.Fatalf("expected balance to be topped up (>=10), got %d", b)
 	}
 	if fake.callCount() < 2 {
@@ -196,7 +182,7 @@ func TestIntegration_T3GlobalExhaustionBackoff(t *testing.T) {
 		t.Fatalf("expected at most one immediate retry attempt while entering waiting, calls=%d", fake.callCount())
 	}
 
-	time.Sleep(600 * time.Millisecond)
+	time.Sleep(800 * time.Millisecond) // retry_after_ms with up to 50% jitter
 	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt3")
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("post-retry request expected 429 got=%d", resp.StatusCode)
@@ -221,18 +207,13 @@ func TestIntegration_T4StaleLeaseHardExpiry(t *testing.T) {
 		t.Fatalf("first request expected 200 got=%d", resp.StatusCode)
 	}
 
-	key := "edge:lease:tokens:v1:auth-api:kt4"
-	if ttl, err := h.rdb.PTTL(h.ctx, key).Result(); err != nil || ttl <= 0 {
-		t.Fatalf("expected positive ttl on local key, ttl=%v err=%v", ttl, err)
+	if n, exp := h.leaseHolding("kt4"); n <= 0 || time.Until(exp) <= 0 {
+		t.Fatalf("expected an unexpired lease, tokens=%d expires in %v", n, time.Until(exp))
 	}
 
 	time.Sleep(2300 * time.Millisecond)
-	exists, err := h.rdb.Exists(h.ctx, key).Result()
-	if err != nil {
-		t.Fatalf("check expiry key existence: %v", err)
-	}
-	if exists != 0 {
-		t.Fatalf("expected local lease key to hard-expire, still exists=%d", exists)
+	if n, _ := h.leaseHolding("kt4"); n != 0 {
+		t.Fatalf("expected the lease to hard-expire, still holding %d tokens", n)
 	}
 
 	resp, _ = h.edgeRequest(http.MethodPost, "/v1/auth-api/rate", "kt4")

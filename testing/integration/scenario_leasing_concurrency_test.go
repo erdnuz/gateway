@@ -218,11 +218,7 @@ func TestIntegration_TCON3AtomicMergeTopUp(t *testing.T) {
 	// Wait for delayed top-up to apply.
 	time.Sleep(300 * time.Millisecond)
 
-	key := "edge:lease:tokens:v1:auth-api:kcon3"
-	balance, err := h.rdb.Get(h.ctx, key).Int64()
-	if err != nil {
-		t.Fatalf("read local token balance: %v", err)
-	}
+	balance, _ := h.leaseHolding("kcon3")
 
 	// Expected invariant (scaled):
 	// tokens_before_grant=3, used_during_grant=3, new_tokens=10 => final=10.

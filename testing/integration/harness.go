@@ -12,6 +12,7 @@ import (
 	"gateway/packages/common/types"
 	"gateway/packages/edge"
 	"gateway/packages/hub"
+	"gateway/packages/limiter"
 	"io"
 	"net"
 	"net/http"
@@ -58,8 +59,7 @@ type integrationHarness struct {
 	hubGRPCListener net.Listener
 
 	hubTierStore *hub.InMemoryTierStore
-	edgeRateMgr  *edge.RateManager
-	edgeRateAll  []*edge.RateManager
+	edgeLeases   []*limiter.Lease
 	analyticsKey string
 	mtlsFiles    *mtlsFiles
 }
@@ -96,7 +96,7 @@ func newIntegrationHarness(t *testing.T) *integrationHarness {
 	h.startHubAndLeaseGRPC(configPath)
 	h.startAnalytics()
 	h.startEdge(configPath)
-	h.startAdditionalEdge(configPath)
+	h.startEdge(configPath)
 
 	h.waitReady(h.hubHTTP.URL + "/healthz")
 	for _, analyticsSrv := range h.analyticsAll {
@@ -217,7 +217,6 @@ func (h *integrationHarness) startNATSContainer() error {
 	return nil
 }
 
-
 func (h *integrationHarness) startUpstream() {
 	h.upstreamSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hit := h.upstreamHits.Add(1)
@@ -235,7 +234,7 @@ func (h *integrationHarness) startHubAndLeaseGRPC(configPath string) {
 	if err != nil {
 		h.t.Fatalf("new hub config manager: %v", err)
 	}
-	hubSrv := hub.NewHubServerWithManagers(h.rdb, cfgMgr, h.hubTierStore, "", types.DefaultHubUpdatesChannel)
+	hubSrv := hub.NewHubServerWithManagers(h.rdb, cfgMgr, h.hubTierStore, "")
 	if err := hubSrv.SetTierUpdateMessaging(h.natsURL, "tier.updates"); err != nil {
 		h.t.Fatalf("hub tier update messaging setup failed: %v", err)
 	}
@@ -295,60 +294,37 @@ func (h *integrationHarness) startAnalytics() {
 }
 
 func (h *integrationHarness) startEdge(configPath string) {
-	// Reuse hub CA and edge cert generated for this run while connecting to existing lease listener.
-	configMgr, err := edge.NewConfigManagerWithFallback(h.hubHTTP.URL, "", nil, configPath)
+	h.t.Helper()
+	configMgr, err := edge.NewConfigManager(h.hubHTTP.URL, "", nil, configPath)
 	if err != nil {
 		h.t.Fatalf("new edge config manager: %v", err)
 	}
-	configMgr.StartConfigReloadSubscriber(h.ctx, h.rdb, types.DefaultConfigReloadChannel)
 	h.subscribeConfigReloadNATS(configMgr)
-	tierMgr := edge.NewTierManagerWithOptions(h.hubHTTP.URL, h.rdb, types.DefaultHubUpdatesChannel, "", nil, edge.TierManagerOptions{
+	tierMgr := edge.NewTierManager(h.hubHTTP.URL, h.rdb, edge.TierManagerOptions{
 		NATSURL:  h.natsURL,
 		NATSSubj: types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
 	})
-	rateDefaults := configMgr.Get().Runtime.Effective().Edge
-	rateMgr := edge.NewRateManagerWithOptions(h.rdb, edge.RateManagerOptions{LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
-	h.edgeRateMgr = rateMgr
-	h.edgeRateAll = append(h.edgeRateAll, rateMgr)
-
 	leaseClient, err := edge.NewGRPCQuotaLeaseClient(h.hubGRPCListener.Addr().String(), "hub-server", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, h.mtlsFiles.CAPath)
 	if err != nil {
 		h.t.Fatalf("new lease client: %v", err)
 	}
-	rateMgr.SetLeaseClient(leaseClient)
+	policy := configMgr.Get().Runtime.Effective().Edge
+	lease := limiter.NewLease(leaseClient, limiter.LeaseOptions{LeaseSize: policy.RateLeaseSize, LowWaterPct: policy.RateLowWaterPct})
+	h.edgeLeases = append(h.edgeLeases, lease)
 
-	sink := &redisAnalyticsSink{rdb: h.rdb, key: h.analyticsKey}
-	es := edge.NewEdgeServer(configMgr, tierMgr, rateMgr, sink, h.rdb)
+	es := edge.NewServer(edge.Deps{
+		Config:    configMgr,
+		Tiers:     tierMgr,
+		Limiter:   lease,
+		Analytics: &redisAnalyticsSink{rdb: h.rdb, key: h.analyticsKey},
+		Redis:     h.rdb,
+	}, edge.Options{})
 	es.StartBackgroundWorkers(h.ctx)
-	h.edgeHTTP = httptest.NewServer(es)
-	h.edgeHTTPAll = append(h.edgeHTTPAll, h.edgeHTTP)
-}
-
-func (h *integrationHarness) startAdditionalEdge(configPath string) {
-	configMgr, err := edge.NewConfigManagerWithFallback(h.hubHTTP.URL, "", nil, configPath)
-	if err != nil {
-		h.t.Fatalf("new secondary edge config manager: %v", err)
+	srv := httptest.NewServer(es)
+	if h.edgeHTTP == nil {
+		h.edgeHTTP = srv
 	}
-	configMgr.StartConfigReloadSubscriber(h.ctx, h.rdb, types.DefaultConfigReloadChannel)
-	h.subscribeConfigReloadNATS(configMgr)
-	tierMgr := edge.NewTierManagerWithOptions(h.hubHTTP.URL, h.rdb, types.DefaultHubUpdatesChannel, "", nil, edge.TierManagerOptions{
-		NATSURL:  h.natsURL,
-		NATSSubj: types.DefaultRuntimePolicy().Hub.TierUpdatesSubject,
-	})
-	rateDefaults := configMgr.Get().Runtime.Effective().Edge
-	rateMgr := edge.NewRateManagerWithOptions(h.rdb, edge.RateManagerOptions{LeaseSize: rateDefaults.RateLeaseSize, LowWaterPct: rateDefaults.RateLowWaterPct})
-	h.edgeRateAll = append(h.edgeRateAll, rateMgr)
-
-	leaseClient, err := edge.NewGRPCQuotaLeaseClient(h.hubGRPCListener.Addr().String(), "hub-server", h.mtlsFiles.EdgeCertPath, h.mtlsFiles.EdgeKeyPath, h.mtlsFiles.CAPath)
-	if err != nil {
-		h.t.Fatalf("new secondary lease client: %v", err)
-	}
-	rateMgr.SetLeaseClient(leaseClient)
-
-	sink := &redisAnalyticsSink{rdb: h.rdb, key: h.analyticsKey}
-	es := edge.NewEdgeServer(configMgr, tierMgr, rateMgr, sink, h.rdb)
-	es.StartBackgroundWorkers(h.ctx)
-	h.edgeHTTPAll = append(h.edgeHTTPAll, httptest.NewServer(es))
+	h.edgeHTTPAll = append(h.edgeHTTPAll, srv)
 }
 
 func (h *integrationHarness) waitReady(url string) {
@@ -506,10 +482,16 @@ func (h *integrationHarness) setLeaseClient(client edge.QuotaLeaseRequester) {
 
 func (h *integrationHarness) setLeaseClientAt(index int, client edge.QuotaLeaseRequester) {
 	h.t.Helper()
-	if index < 0 || index >= len(h.edgeRateAll) {
-		h.t.Fatalf("edge rate manager index out of range: %d", index)
+	if index < 0 || index >= len(h.edgeLeases) {
+		h.t.Fatalf("edge index out of range: %d", index)
 	}
-	h.edgeRateAll[index].SetLeaseClient(client)
+	h.edgeLeases[index].SetClient(client)
+}
+
+// leaseHolding reports the tokens edge 0 holds for a key of v1/auth-api and
+// when its lease expires.
+func (h *integrationHarness) leaseHolding(apiKey string) (int64, time.Time) {
+	return h.edgeLeases[0].Holding("v1", "auth-api", apiKey)
 }
 
 // requireWindowHeadroom waits, if needed, until at least d remains in the
