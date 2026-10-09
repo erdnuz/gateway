@@ -14,9 +14,12 @@ linters:
         - (*encoding/json.Encoder).Encode
         - io.WriteString
   exclusions:
+    presets: [std-error-handling, common-false-positives]
     paths:
       - packages/common/types/.*\.pb\.go
     rules:
+      - linters: [staticcheck]
+        text: "QF1001" # De Morgan rewrites: a negated conjunction often reads closer to the rule
       - path: _test\.go
         linters: [errcheck, bodyclose]
 formatters:

@@ -349,13 +349,13 @@ func runtimeFromInternal(rp types.RuntimePolicy) Runtime {
 	}
 	var r Runtime
 	r.Hub = HubRuntime{
-		APIKeyPattern:      str(rp.Hub.APIKeyPattern, d.Hub.APIKeyPattern),
-		CORSHeaders:        strs(rp.Hub.CORSAllowedHeaders, d.Hub.CORSAllowedHeaders),
-		CORSMethods:        strs(rp.Hub.CORSAllowedMethods, d.Hub.CORSAllowedMethods),
-		CORSMaxAge:         dur(rp.Hub.CORSPreflightMaxAge, d.Hub.CORSPreflightMaxAge),
-		ReadTimeout:        dur(rp.Hub.HTTPReadTimeout, d.Hub.HTTPReadTimeout),
-		WriteTimeout:       dur(rp.Hub.HTTPWriteTimeout, d.Hub.HTTPWriteTimeout),
-		ShutdownTimeout:    dur(rp.Hub.HTTPShutdownTimeout, d.Hub.HTTPShutdownTimeout),
+		APIKeyPattern:   str(rp.Hub.APIKeyPattern, d.Hub.APIKeyPattern),
+		CORSHeaders:     strs(rp.Hub.CORSAllowedHeaders, d.Hub.CORSAllowedHeaders),
+		CORSMethods:     strs(rp.Hub.CORSAllowedMethods, d.Hub.CORSAllowedMethods),
+		CORSMaxAge:      dur(rp.Hub.CORSPreflightMaxAge, d.Hub.CORSPreflightMaxAge),
+		ReadTimeout:     dur(rp.Hub.HTTPReadTimeout, d.Hub.HTTPReadTimeout),
+		WriteTimeout:    dur(rp.Hub.HTTPWriteTimeout, d.Hub.HTTPWriteTimeout),
+		ShutdownTimeout: dur(rp.Hub.HTTPShutdownTimeout, d.Hub.HTTPShutdownTimeout),
 	}
 	r.Edge = EdgeRuntime{
 		LeaseSize:               num(rp.Edge.RateLeaseSize, d.Edge.RateLeaseSize),

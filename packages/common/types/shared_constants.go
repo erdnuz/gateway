@@ -1,5 +1,5 @@
 package types
 
 const (
-	DefaultAnalyticsKey        = "rate-analytics"
+	DefaultAnalyticsKey = "rate-analytics"
 )

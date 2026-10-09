@@ -97,16 +97,6 @@ func (s *cacheShard[V]) evictOne(now int64) {
 	delete(s.entries, victim)
 }
 
-func (c *ttlCache[V]) delete(key string) {
-	s := c.shard(key)
-	s.mu.Lock()
-	if e, ok := s.entries[key]; ok {
-		s.cost -= e.cost
-		delete(s.entries, key)
-	}
-	s.mu.Unlock()
-}
-
 // deleteFunc removes every entry whose key matches.
 func (c *ttlCache[V]) deleteFunc(match func(key string) bool) {
 	for i := range c.shards {

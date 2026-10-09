@@ -21,7 +21,7 @@ type request struct {
 	prefix  *types.PrefixConfig
 	pool    *pool
 	target  *target // the replica the current attempt uses
-	key     string // SHA-256 of the caller's API key (keys.Hash)
+	key     string  // SHA-256 of the caller's API key (keys.Hash)
 	tier    *types.TierConfig
 	entry   *types.AnalyticsEntry // nil when analytics is off
 

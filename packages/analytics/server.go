@@ -1325,35 +1325,6 @@ func microsecondsToMilliseconds(us float64) float64 {
 	return us / 1000.0
 }
 
-func meanMicroseconds(data []int64) float64 {
-	if len(data) == 0 {
-		return 0
-	}
-	var sum int64
-	for _, v := range data {
-		sum += v
-	}
-	return float64(sum) / float64(len(data))
-}
-
-func percentileMicroseconds(data []int64, p float64) float64 {
-	if len(data) == 0 {
-		return 0
-	}
-	sorted := append([]int64(nil), data...)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i] < sorted[j]
-	})
-	rank := p / 100 * float64(len(sorted)-1)
-	lo := int(rank)
-	hi := lo + 1
-	if hi >= len(sorted) {
-		return float64(sorted[lo])
-	}
-	frac := rank - float64(lo)
-	return float64(sorted[lo])*(1-frac) + float64(sorted[hi])*frac
-}
-
 func parseIntWithBounds(raw string, def, min, max int64) int64 {
 	if raw == "" {
 		return def

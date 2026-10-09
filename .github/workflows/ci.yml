@@ -27,7 +27,8 @@ jobs:
       - run: go vet ./...
       - run: go vet -tags integration ./testing/integration/
       - uses: golangci/golangci-lint-action@v8
-        with: { version: v2.4 }
+        # goinstall: the prebuilt binaries lag Go releases and refuse a newer go.mod.
+        with: { version: v2.14.0, install-mode: goinstall }
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       - name: Generated code is current

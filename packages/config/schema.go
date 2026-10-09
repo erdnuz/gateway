@@ -142,13 +142,13 @@ type Runtime struct {
 
 // HubRuntime tunes the hub.
 type HubRuntime struct {
-	APIKeyPattern      string   `yaml:"api_key_pattern,omitempty" desc:"Regular expression every API key must match. Default ^[A-Za-z0-9_]{3,128}$."`
-	CORSHeaders        []string `yaml:"cors_headers,omitempty" desc:"Headers allowed on cross-origin hub API calls."`
-	CORSMethods        []string `yaml:"cors_methods,omitempty" desc:"Methods allowed on cross-origin hub API calls."`
-	CORSMaxAge         Duration `yaml:"cors_max_age,omitempty" desc:"Preflight cache time for the hub API. Default 5m."`
-	ReadTimeout        Duration `yaml:"read_timeout,omitempty" desc:"HTTP read timeout. Default 5s."`
-	WriteTimeout       Duration `yaml:"write_timeout,omitempty" desc:"HTTP write timeout. Default 10s."`
-	ShutdownTimeout    Duration `yaml:"shutdown_timeout,omitempty" desc:"Graceful shutdown limit. Default 15s."`
+	APIKeyPattern   string   `yaml:"api_key_pattern,omitempty" desc:"Regular expression every API key must match. Default ^[A-Za-z0-9_]{3,128}$."`
+	CORSHeaders     []string `yaml:"cors_headers,omitempty" desc:"Headers allowed on cross-origin hub API calls."`
+	CORSMethods     []string `yaml:"cors_methods,omitempty" desc:"Methods allowed on cross-origin hub API calls."`
+	CORSMaxAge      Duration `yaml:"cors_max_age,omitempty" desc:"Preflight cache time for the hub API. Default 5m."`
+	ReadTimeout     Duration `yaml:"read_timeout,omitempty" desc:"HTTP read timeout. Default 5s."`
+	WriteTimeout    Duration `yaml:"write_timeout,omitempty" desc:"HTTP write timeout. Default 10s."`
+	ShutdownTimeout Duration `yaml:"shutdown_timeout,omitempty" desc:"Graceful shutdown limit. Default 15s."`
 }
 
 // EdgeRuntime tunes edges.

@@ -53,11 +53,22 @@ func NewControlPlane(cfg ConfigRegistry, tiers TierStore, rdb *redis.Client) *Co
 }
 
 // Run relays changes published by any hub to this hub's watchers until ctx
-// ends.
+// ends, resubscribing if the subscription is ever closed underneath it.
 func (c *ControlPlane) Run(ctx context.Context) {
 	if c.rdb == nil {
 		return
 	}
+	for ctx.Err() == nil {
+		c.relay(ctx)
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+			slog.Warn("control channel subscription closed; resubscribing")
+		}
+	}
+}
+
+func (c *ControlPlane) relay(ctx context.Context) {
 	sub := c.rdb.Subscribe(ctx, controlChannel)
 	defer sub.Close()
 	msgs := sub.Channel()
@@ -65,7 +76,10 @@ func (c *ControlPlane) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-msgs:
+		case msg, ok := <-msgs:
+			if !ok {
+				return
+			}
 			var m controlMessage
 			if err := json.Unmarshal([]byte(msg.Payload), &m); err != nil {
 				slog.Warn("ignoring malformed control message", "err", err)

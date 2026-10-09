@@ -120,17 +120,6 @@
               "description": "Largest cacheable response. Default 1048576.",
               "type": "integer"
             },
-            "hub_timeout": {
-              "description": "Timeout for hub API calls. Default 5s.",
-              "examples": [
-                "500ms",
-                "30s",
-                "5m",
-                "1h"
-              ],
-              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
-              "type": "string"
-            },
             "idle_timeout": {
               "description": "Client keep-alive timeout. Default 60s.",
               "examples": [
@@ -234,36 +223,6 @@
               },
               "type": "array"
             },
-            "queue_retries": {
-              "description": "Publish retries per tier update. Default 1.",
-              "type": "integer"
-            },
-            "queue_retry_backoff": {
-              "description": "Pause between publish retries. Default 10ms.",
-              "examples": [
-                "500ms",
-                "30s",
-                "5m",
-                "1h"
-              ],
-              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
-              "type": "string"
-            },
-            "queue_submit_timeout": {
-              "description": "Wait for queue space before dropping an update. Default 25ms.",
-              "examples": [
-                "500ms",
-                "30s",
-                "5m",
-                "1h"
-              ],
-              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
-              "type": "string"
-            },
-            "queue_workers": {
-              "description": "Workers publishing tier updates. Default 2.",
-              "type": "integer"
-            },
             "read_timeout": {
               "description": "HTTP read timeout. Default 5s.",
               "examples": [
@@ -284,10 +243,6 @@
                 "1h"
               ],
               "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
-              "type": "string"
-            },
-            "tier_updates_subject": {
-              "description": "NATS subject for tier changes. Default tier.updates.",
               "type": "string"
             },
             "write_timeout": {
@@ -327,6 +282,51 @@
             },
             "type": "object"
           },
+          "auth": {
+            "additionalProperties": false,
+            "description": "How callers are identified. Default: an API key in X-API-Key.",
+            "properties": {
+              "jwt": {
+                "additionalProperties": false,
+                "description": "JWT verification, for type jwt.",
+                "properties": {
+                  "audience": {
+                    "description": "Required aud claim.",
+                    "type": "string"
+                  },
+                  "issuer": {
+                    "description": "Required iss claim.",
+                    "type": "string"
+                  },
+                  "jwks_url": {
+                    "description": "URL of the issuer's JSON Web Key Set.",
+                    "type": "string"
+                  },
+                  "tier_claim": {
+                    "description": "Claim naming the caller's tier. Without it (or when absent) limits.default_tier applies.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "jwks_url"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "description": "api_key (X-API-Key, tiers assigned on the hub), jwt (bearer token, tier from a claim) or none (callers limited by client IP).",
+                "enum": [
+                  "api_key",
+                  "jwt",
+                  "none"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
           "cache": {
             "additionalProperties": false,
             "description": "Response caching for GET requests.",
@@ -349,6 +349,32 @@
             },
             "required": [
               "ttl"
+            ],
+            "type": "object"
+          },
+          "circuit_breaker": {
+            "additionalProperties": false,
+            "description": "Stop sending to an upstream after consecutive failures. Default with several upstreams: 5 failures, 10s cooldown.",
+            "properties": {
+              "cooldown": {
+                "description": "How long an ejected upstream rests before it is tried again.",
+                "examples": [
+                  "500ms",
+                  "30s",
+                  "5m",
+                  "1h"
+                ],
+                "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                "type": "string"
+              },
+              "failures": {
+                "description": "Consecutive failures (connection errors or 5xx) that eject an upstream.",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "failures",
+              "cooldown"
             ],
             "type": "object"
           },
@@ -427,6 +453,10 @@
                 "description": "Tokens an edge takes from the hub per lease. Default runtime.edge.lease_size.",
                 "type": "integer"
               },
+              "max_concurrent": {
+                "description": "Requests one caller may have in flight on one edge. Default unlimited.",
+                "type": "integer"
+              },
               "tiers": {
                 "additionalProperties": {
                   "additionalProperties": false,
@@ -486,10 +516,29 @@
             ],
             "type": "object"
           },
+          "load_balancing": {
+            "description": "How requests spread over upstreams. Default round_robin.",
+            "enum": [
+              "round_robin",
+              "least_requests"
+            ],
+            "type": "string"
+          },
           "match": {
             "additionalProperties": false,
             "description": "Which requests this service handles.",
             "properties": {
+              "host": {
+                "description": "Required Host header (without port). Default: any.",
+                "type": "string"
+              },
+              "methods": {
+                "description": "Allowed methods; others get 405. Default: any.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "path_prefix": {
                 "description": "Two path segments, /\u003cgroup\u003e/\u003cservice\u003e, e.g. /v1/orders. Services sharing the first segment share a quota window.",
                 "type": "string"
@@ -499,6 +548,10 @@
               "path_prefix"
             ],
             "type": "object"
+          },
+          "max_request_body": {
+            "description": "Largest request body in bytes. Default 10485760.",
+            "type": "integer"
           },
           "name": {
             "description": "Unique service name, used in analytics and errors.",
@@ -588,15 +641,32 @@
             "description": "Remove match.path_prefix before forwarding. Default true.",
             "type": "boolean"
           },
-          "upstream": {
-            "description": "Base URL of the upstream, e.g. http://orders:8080. A path here is prepended to forwarded paths.",
+          "timeout": {
+            "description": "Limit for the whole upstream exchange, retries included. Default runtime.edge.upstream_timeout per attempt.",
+            "examples": [
+              "500ms",
+              "30s",
+              "5m",
+              "1h"
+            ],
+            "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
             "type": "string"
+          },
+          "upstream": {
+            "description": "Base URL of the upstream, e.g. http://orders:8080. A path here is prepended to forwarded paths. Use upstreams for several replicas.",
+            "type": "string"
+          },
+          "upstreams": {
+            "description": "Replicas of the upstream, load balanced. They must share one base path. Use instead of upstream.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
           "name",
           "match",
-          "upstream",
           "limits"
         ],
         "type": "object"

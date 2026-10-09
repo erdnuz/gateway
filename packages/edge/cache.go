@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"hash/fnv"
 	"net/http"
 	"strconv"
@@ -139,7 +140,7 @@ func (r redisResponses) Get(ctx context.Context, key string) ([]byte, bool, erro
 	ctx, cancel := context.WithTimeout(ctx, cacheRedisTimeout)
 	defer cancel()
 	v, err := r.rdb.Get(ctx, key).Bytes()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return nil, false, nil
 	}
 	return v, err == nil, err

@@ -285,7 +285,7 @@ func (l *Lease) fetch(ctx context.Context, req Request, c *leaseCounter, windowE
 func classify(err error) error {
 	switch status.Code(err) {
 	case codes.InvalidArgument, codes.NotFound, codes.PermissionDenied:
-		return fmt.Errorf("%w: %v", ErrRejected, err)
+		return fmt.Errorf("%w: %w", ErrRejected, err)
 	}
-	return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	return fmt.Errorf("%w: %w", ErrUnavailable, err)
 }

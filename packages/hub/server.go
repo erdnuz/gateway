@@ -31,8 +31,6 @@ type corsPolicy struct {
 	maxAgeValue       string
 }
 
-const hubReadyRedisTimeout = 200 * time.Millisecond
-
 func newCORSPolicy(origins map[string]struct{}, allowedHeaders, allowedMethods []string, maxAge time.Duration) *corsPolicy {
 	if origins == nil {
 		origins = map[string]struct{}{}
@@ -67,7 +65,6 @@ type HubServer struct {
 	apiKeyPattern     atomic.Pointer[regexp.Regexp]
 	readyHealthy      atomic.Bool
 	pendingDependency atomic.Value
-	readyProbeStarted atomic.Bool
 }
 
 type configFileLoader interface {
@@ -195,32 +192,6 @@ func (s *HubServer) SetAPIKeyPattern(pattern string) error {
 	}
 	s.apiKeyPattern.Store(re)
 	return nil
-}
-
-func (s *HubServer) startReadinessProbe(ctx context.Context) {
-	if s.rdb == nil {
-		s.readyHealthy.Store(true)
-		return
-	}
-	if !s.readyProbeStarted.CompareAndSwap(false, true) {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			probeCtx, cancel := context.WithTimeout(ctx, hubReadyRedisTimeout)
-			err := s.rdb.Ping(probeCtx).Err()
-			cancel()
-			s.readyHealthy.Store(err == nil)
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
 }
 
 func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {

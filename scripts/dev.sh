@@ -95,9 +95,9 @@ case "${task}" in
     ;;
   lint)
     # golangci-lint (config: .golangci.yml) also checks gofmt.
-    docker run --rm -v "$(pwd -W 2>/dev/null || pwd)":/src -w /src \
-      -v gate-gomod:/go/pkg/mod -v gate-lintcache:/root/.cache \
-      golangci/golangci-lint:v2.4.0 golangci-lint run ./...
+    # Built with the module's Go version: prebuilt images lag Go releases.
+    GO_DOCKER_ARGS="-v gate-lintcache:/root/.cache/golangci-lint" \
+      go_ run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...
     ;;
   certs)
     bash deploy/gen-dev-certs.sh deploy/certs hub,localhost

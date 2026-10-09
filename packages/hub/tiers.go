@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -45,7 +46,7 @@ func (tm *TierManager) GetTier(ctx context.Context, prefixID, apiKey string) (st
 	redisCtx, cancel := withHubTierTimeout(ctx)
 	defer cancel()
 	val, err := tm.rdb.Get(redisCtx, tm.getCacheKey(prefixID, apiKey)).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return "", nil
 	}
 	if err != nil {
