@@ -80,7 +80,7 @@ func DefaultRuntimePolicy() RuntimePolicy {
 			CORSAllowedHeaders:  []string{"Authorization", "Content-Type", "X-API-Key"},
 			CORSAllowedMethods:  []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 			CORSPreflightMaxAge: 5 * time.Minute,
-			APIKeyPattern:       "^[A-Za-z0-9]{3,128}$",
+			APIKeyPattern:       "^[A-Za-z0-9_]{3,128}$",
 			HTTPReadTimeout:     5 * time.Second,
 			HTTPWriteTimeout:    10 * time.Second,
 			HTTPShutdownTimeout: 15 * time.Second,

@@ -7,9 +7,12 @@ import (
 
 	"gateway/packages/common/httpx"
 	"gateway/packages/common/types"
+	"gateway/packages/keys"
 )
 
 // authenticate resolves the caller's API key to a tier of the routed service.
+// The key is hashed here, on arrival: tier lookups, leases, cache keys and
+// logs past this point only ever see the hash.
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := stateOf(r)
@@ -22,9 +25,10 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			httpx.WriteProblem(w, r, http.StatusUnauthorized, "invalid_api_key", "")
 			return
 		}
-		tierID, err := s.resolveTier(r.Context(), st, key)
+		id := keys.Hash(key)
+		tierID, err := s.resolveTier(r.Context(), st, id)
 		if err != nil {
-			httpx.Logger(r.Context()).Warn("tier lookup failed", "scope", st.scope, "key", httpx.RedactKey(key), "err", err)
+			httpx.Logger(r.Context()).Warn("tier lookup failed", "scope", st.scope, "key", keys.Short(id), "err", err)
 			httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "tier_lookup_failed", "the key's tier could not be resolved; retry shortly")
 			return
 		}
@@ -37,7 +41,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 			httpx.WriteProblem(w, r, http.StatusForbidden, "tier_not_allowed", "the key's tier has no access to this service")
 			return
 		}
-		st.key, st.tier = key, tier
+		st.key, st.tier = id, tier
 		if st.entry != nil {
 			st.entry.Tier = tierID
 		}

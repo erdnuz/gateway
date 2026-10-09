@@ -19,7 +19,7 @@ type request struct {
 	svc     *types.ServiceConfig
 	prefix  *types.PrefixConfig
 	target  *url.URL
-	key     string
+	key     string // SHA-256 of the caller's API key (keys.Hash)
 	tier    *types.TierConfig
 	entry   *types.AnalyticsEntry // nil when analytics is off
 

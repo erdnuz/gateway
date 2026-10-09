@@ -1,11 +1,10 @@
 // Package httpx holds the HTTP conventions every Gate service shares: RFC 9457
-// problem responses, request IDs, and log-safe API key fingerprints.
+// problem responses and request IDs.
 package httpx
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -110,12 +109,6 @@ func newRequestID() string {
 	var b [12]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
-}
-
-// RedactKey returns a log-safe fingerprint of an API key.
-func RedactKey(apiKey string) string {
-	sum := sha256.Sum256([]byte(apiKey))
-	return "sha256:" + hex.EncodeToString(sum[:6])
 }
 
 // BearerToken returns the token of an "Authorization: Bearer" header.

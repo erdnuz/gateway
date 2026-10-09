@@ -37,6 +37,7 @@ type Config struct {
 	GRPCAddr   string // edge-facing gRPC (leases, control plane)
 	ConfigPath string
 	AuthToken  string
+	ReadToken  string // optional read-only admin token
 
 	RedisAddr         string
 	EnforceNoEviction bool
@@ -58,6 +59,7 @@ func FromEnv() Config {
 		GRPCAddr:           appkit.ListenAddr(config.String("HUB_GRPC_PORT", "9090")),
 		ConfigPath:         strings.TrimSpace(config.String("CONFIG_FILE_PATH", "")),
 		AuthToken:          strings.TrimSpace(config.String("HUB_AUTH_TOKEN", "")),
+		ReadToken:          strings.TrimSpace(config.String("HUB_READ_TOKEN", "")),
 		RedisAddr:          config.String("REDIS_ADDR", "localhost:6379"),
 		EnforceNoEviction:  config.Bool("HUB_ENFORCE_REDIS_NOEVICTION", true),
 		EdgeOrigins:        appkit.SplitCSV(config.String("HUB_EDGE_ALLOWED_ORIGINS", "")),
@@ -147,6 +149,7 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	telemetry.ServeMetrics(ctx, cfg.MetricsAddr)
 
 	server := hub.NewHubServer(h.rdb, cfgManager, tierStore, control, cfg.AuthToken)
+	server.SetReadToken(cfg.ReadToken)
 	server.SetCORSAllowedOrigins(cfg.EdgeOrigins)
 	server.SetCORSPreflightPolicy(policy.CORSAllowedHeaders, policy.CORSAllowedMethods, policy.CORSPreflightMaxAge)
 	if err := server.SetAPIKeyPattern(policy.APIKeyPattern); err != nil {

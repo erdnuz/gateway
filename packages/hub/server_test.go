@@ -206,9 +206,8 @@ func TestServiceConfiguration(t *testing.T) {
 
 // --- HTTP Handler Integration Tests ---
 
-// newTestHubServer builds a HubServer backed by an in-memory Redis instance.
-// It skips MongoDB-dependent components (TierManager) so tests remain
-// fully self-contained. The returned cleanup func must be deferred.
+// newTestHubServer builds a HubServer over miniredis with an in-memory tier
+// store and a control plane. The returned cleanup func must be deferred.
 func newTestHubServer(t *testing.T) (*HubServer, func()) {
 	t.Helper()
 
@@ -234,10 +233,8 @@ func newTestHubServer(t *testing.T) (*HubServer, func()) {
 	cfgMgr := &ConfigManager{}
 	cfgMgr.active.Store(cfg)
 
-	hs := &HubServer{
-		rdb:        rdb,
-		cfgManager: cfgMgr,
-	}
+	tiers := NewInMemoryTierStore()
+	hs := NewHubServer(rdb, cfgMgr, tiers, NewControlPlane(cfgMgr, tiers, nil), "")
 
 	cleanup := func() {
 		_ = rdb.Close()

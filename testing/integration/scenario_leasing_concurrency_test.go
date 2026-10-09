@@ -10,6 +10,7 @@ import (
 
 	"gateway/packages/common/types"
 	"gateway/packages/edge"
+	"gateway/packages/keys"
 )
 
 // delayedGrantLeaseClient returns configured grants and can delay specific calls
@@ -133,7 +134,7 @@ func TestIntegration_TCON2MultiEdgeGlobalDrain(t *testing.T) {
 			resp, err := clients[idx].RequestQuotaLease(h.ctx, &types.QuotaLeaseRequest{
 				Prefix:          "v1",
 				ServiceId:       "auth-api",
-				ApiKey:          "kcon2",
+				ApiKey:          keys.Hash("kcon2"),
 				RequestedTokens: requestTokens,
 			})
 			if err != nil {

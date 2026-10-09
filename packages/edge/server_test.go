@@ -17,6 +17,7 @@ import (
 
 	"gateway/packages/common/httpx"
 	"gateway/packages/common/types"
+	"gateway/packages/keys"
 	"gateway/packages/limiter"
 
 	"google.golang.org/grpc/codes"
@@ -109,12 +110,13 @@ func newFixture(t testing.TB, upstream http.HandlerFunc, configure func(*types.S
 		configure(&svc)
 	}
 	cm := NewConfigManager(&types.GatewayConfig{Prefixes: []types.PrefixConfig{{Prefix: "v1", QuotaPeriod: time.Hour, Services: []types.ServiceConfig{svc}}}})
-	tiers := NewTierCache(func(_ context.Context, _, key string) (string, error) {
-		tier, ok := f.keys[key]
-		if !ok {
-			return "", errors.New("hub unreachable")
+	tiers := NewTierCache(func(_ context.Context, _, hash string) (string, error) {
+		for raw, tier := range f.keys { // the edge sends hashes, never raw keys
+			if keys.Hash(raw) == hash {
+				return tier, nil
+			}
 		}
-		return tier, nil
+		return "", errors.New("hub unreachable")
 	})
 	var o Options
 	if len(opts) > 0 {

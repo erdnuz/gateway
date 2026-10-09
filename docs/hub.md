@@ -22,9 +22,16 @@ another hub are validated and adopted, so all hubs serve the same config.
 
 ## Admin HTTP API (`PORT`)
 
-Every endpoint except `/healthz` and `/readyz` needs
-`Authorization: Bearer $HUB_AUTH_TOKEN`. Errors are RFC 9457 problem
-responses.
+Every endpoint except `/healthz` and `/readyz` needs a bearer token:
+`HUB_AUTH_TOKEN` may do anything, and the optional `HUB_READ_TOKEN` may only
+read (GET). Errors are RFC 9457 problem responses. The full contract is
+[api/openapi/hub.yaml](../api/openapi/hub.yaml), and `gate ctl` wraps it:
+`keys create|list|set-tier|rotate|revoke`, `status`, `audit` and
+`config diff|apply`.
+
+Keys are stored by SHA-256 hash only: `gk_<id>_<secret>` is shown once when
+it is issued or rotated, and edges hash every key on arrival, so the hub, its
+Redis and the edge-hub protocol never see a usable key.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -33,7 +40,10 @@ responses.
 | `GET /config` | the compiled config (analytics reads it) |
 | `POST /config-reload` | reload from `CONFIG_FILE_PATH` (empty body) or apply a v2 document (body) |
 | `POST /config-reload/dry-run` | validate and analyse a reload without applying it |
-| `GET\|POST\|DELETE /tiers/{group}/{api_key}` | read, assign (`{"tier_id": "pro"}`) or revoke a key's tier |
+| `POST /v2/keys`, `GET /v2/keys[/{id}]` | issue a key (the secret is returned once) and list keys |
+| `PATCH /v2/keys/{id}`, `POST /v2/keys/{id}/rotate`, `DELETE /v2/keys/{id}` | change tier or labels, replace the secret, revoke |
+| `GET /v2/audit` | recent administrative changes (Redis stream `hub:audit`, shared by hubs) |
+| `GET\|POST\|DELETE /tiers/{group}/{api_key}` | assign (`{"tier_id": "pro"}`), read or revoke the tier of an operator-chosen key |
 
 A reload or tier change takes effect on every edge within one Redis
 publish and one stream send. The load test's `propagation` scenario
@@ -47,8 +57,10 @@ response-cache scopes edges will drop) and `analysis.warnings`.
 
 | Key | Holds |
 | --- | --- |
-| `lease-used:{group}:{service}:{key}:{window}` | tokens granted in a window; one Lua script grants atomically, and the key expires after two windows |
-| `hub:tier:{group}:{key}` | a key's tier |
+| `lease-used:{group}:{service}:{sha256(key)}:{window}` | tokens granted in a window; one Lua script grants atomically, and the key expires after two windows |
+| `hub:tier:{group}:{sha256(key)}` | a key's tier |
+| `hub:key:{id}`, set `hub:keys` | issued keys' metadata (owner, name, tier, hash) |
+| stream `hub:audit` | administrative changes, capped at about 10,000 entries |
 | channel `gate:control` | config and tier changes, shared between hubs |
 
 Redis must use `maxmemory-policy noeviction`: an evicted ledger key would

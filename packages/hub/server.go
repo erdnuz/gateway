@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"gateway/packages/common/httpx"
 	"gateway/packages/common/types"
+	"gateway/packages/keys"
 	"io"
 	"net/http"
 	"regexp"
@@ -58,8 +59,10 @@ type HubServer struct {
 	rdb               *redis.Client
 	cfgManager        ConfigRegistry
 	tierManager       TierStore
-	authToken         string
+	authToken         string        // admin: every endpoint
+	readToken         string        // read-only: GET endpoints
 	control           *ControlPlane // nil: changes are not pushed to edges
+	v2                *http.ServeMux
 	corsPolicy        atomic.Pointer[corsPolicy]
 	apiKeyPattern     atomic.Pointer[regexp.Regexp]
 	readyHealthy      atomic.Bool
@@ -91,6 +94,7 @@ func NewHubServer(rdb *redis.Client, cfg ConfigRegistry, tierStore TierStore, co
 		authToken:   authToken,
 		control:     control,
 	}
+	server.v2 = server.keyRoutes()
 	server.readyHealthy.Store(false)
 	server.corsPolicy.Store(newCORSPolicy(
 		map[string]struct{}{},
@@ -102,6 +106,9 @@ func NewHubServer(rdb *redis.Client, cfg ConfigRegistry, tierStore TierStore, co
 	server.pendingDependency.Store("redis")
 	return server
 }
+
+// SetReadToken enables a second bearer token that may only read.
+func (s *HubServer) SetReadToken(token string) { s.readToken = token }
 
 func (s *HubServer) SetStartupReady(ready bool) {
 	s.readyHealthy.Store(ready)
@@ -241,10 +248,17 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.authorize(r) {
-		httpx.Error(w, r, http.StatusUnauthorized, "unauthorized")
+	role, ok := s.authorize(r)
+	if !ok {
+		httpx.Error(w, r, http.StatusUnauthorized, "send a hub token as Authorization: Bearer <token>")
 		return
 	}
+	if role == "read-only" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpx.WriteProblem(w, r, http.StatusForbidden, "read_only_token", "this token may only read")
+		return
+	}
+	r = r.WithContext(context.WithValue(ctx, roleKey{}, role))
+	ctx = r.Context()
 
 	switch parts[0] {
 	case "config":
@@ -259,6 +273,8 @@ func (s *HubServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleStatus(w, r)
 	case "tiers":
 		s.handleTiers(w, r, ctx, parts[1:])
+	case "v2":
+		s.v2.ServeHTTP(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -360,6 +376,7 @@ func (s *HubServer) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 	if s.control != nil {
 		s.control.PublishConfig(s.cfgManager.Snapshot(), analysis.Invalidations.ResponseCache)
 	}
+	s.audit(r, "config.reload", mode, strings.Join(analysis.ChangedSections, ","))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -447,10 +464,12 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 		httpx.Error(w, r, http.StatusBadRequest, "invalid prefix or api key")
 		return
 	}
+	// Operator-chosen keys are stored and pushed by hash, like issued keys.
+	hash := keys.Hash(apiKey)
 
 	switch r.Method {
 	case http.MethodGet:
-		tier, err := s.tierManager.GetTier(ctx, prefix, apiKey)
+		tier, err := s.tierManager.GetTier(ctx, prefix, hash)
 		if err != nil {
 			s.writeInternalError(w, r, "handleTiers.GetTier", err)
 			return
@@ -473,21 +492,19 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 			return
 		}
 
-		if err := s.tierManager.SetTier(ctx, prefix, apiKey, req.TierID); err != nil {
+		if err := s.assign(ctx, prefix, hash, req.TierID); err != nil {
 			s.writeInternalError(w, r, "handleTiers.SetTier", err)
 			return
 		}
-
-		s.publishTier(prefix, apiKey, req.TierID)
+		s.audit(r, "tier.set", prefix+"/"+keys.Short(hash), "tier="+req.TierID)
 		w.WriteHeader(http.StatusOK)
 
 	case http.MethodDelete:
-		if err := s.tierManager.DeleteTier(ctx, prefix, apiKey); err != nil {
+		if err := s.assign(ctx, prefix, hash, ""); err != nil {
 			s.writeInternalError(w, r, "handleTiers.DeleteTier", err)
 			return
 		}
-
-		s.publishTier(prefix, apiKey, "") // revoked
+		s.audit(r, "tier.revoke", prefix+"/"+keys.Short(hash), "")
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -500,15 +517,24 @@ func (s *HubServer) writeInternalError(w http.ResponseWriter, r *http.Request, o
 	httpx.Error(w, r, http.StatusInternalServerError, "internal server error")
 }
 
-// authorize checks the bearer token in constant time. An empty authToken
-// disables auth; `gate hub` refuses to start without HUB_AUTH_TOKEN, so that
-// only happens for embedded/test servers.
-func (s *HubServer) authorize(r *http.Request) bool {
+// authorize checks the bearer token in constant time and returns its role:
+// "admin" or "read-only". An empty authToken disables auth; `gate hub`
+// refuses to start without HUB_AUTH_TOKEN, so that only happens for
+// embedded/test servers.
+func (s *HubServer) authorize(r *http.Request) (string, bool) {
 	if s.authToken == "" {
-		return true
+		return "admin", true
 	}
-	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return ok && subtle.ConstantTimeCompare([]byte(got), []byte(s.authToken)) == 1
+	got, ok := httpx.BearerToken(r)
+	switch {
+	case !ok:
+		return "", false
+	case subtle.ConstantTimeCompare([]byte(got), []byte(s.authToken)) == 1:
+		return "admin", true
+	case s.readToken != "" && subtle.ConstantTimeCompare([]byte(got), []byte(s.readToken)) == 1:
+		return "read-only", true
+	}
+	return "", false
 }
 
 // tierDefinedInPrefix reports whether any service under prefix defines tierID

@@ -4,6 +4,7 @@
 //	gate hub|edge|analytics  run one component (configured by environment)
 //	gate echo                demo upstream that echoes requests
 //	gate config ...          validate, migrate or describe config files
+//	gate ctl ...             administer a running hub (keys, status, audit)
 package main
 
 import (
@@ -43,6 +44,7 @@ Commands:
   analytics           run analytics + dashboard    (configured by CLICKHOUSE_DSN, HUB_ADDR, NATS_* env)
   echo                run a demo upstream that echoes each request as JSON
   config ...          validate, migrate (v1 to v2) or print the schema of config files
+  ctl ...             administer a running hub: keys, status, audit log, config rollout
   version             print the version
 
 Run "gate <command> -h" for command flags.
@@ -87,6 +89,8 @@ func run(args []string) error {
 		return runEcho(ctx, rest)
 	case "config":
 		return runConfig(rest)
+	case "ctl":
+		return runCtl(rest)
 	case "version", "--version":
 		fmt.Println("gate", version)
 		return nil

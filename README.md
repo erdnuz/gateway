@@ -55,17 +55,35 @@ No Go toolchain? `make dev` runs the same thing in a container.
 make demo    # or: bash scripts/dev.sh demo   (where make is unavailable)
 ```
 
-This runs hub, edge, analytics, Redis, NATS, ClickHouse and an echo upstream
-from [deploy/compose.yaml](deploy/compose.yaml). Edges lease quota from the
-hub over mTLS gRPC, with certificates generated on first start. A traffic
+This runs hub, edge, Redis, an echo upstream, analytics (NATS, ClickHouse)
+and observability (Prometheus, Grafana, Jaeger) from
+[deploy/compose.yaml](deploy/compose.yaml). Each edge holds one mTLS gRPC
+connection to the hub, with certificates generated on first start. A traffic
 generator sends steady load across tiers, including one key that keeps
 exceeding its quota.
 
 | URL | What |
 | --- | --- |
 | <http://localhost:8080/v1/echo/hello> | the gateway (`X-API-Key: demopro1`) |
-| <http://localhost:8081> | hub API (`Authorization: Bearer gate-local-token`) |
+| <http://localhost:8081> | hub admin API (`Authorization: Bearer gate-local-token`) |
+| <http://localhost:3000> | Grafana: requests, 429s per tier, hub work per request |
 | <http://localhost:8091> | analytics dashboard |
+
+### 3. Issue, use and revoke a key
+
+`gate` is the binary from `make build` (`bin/gate`), or `go run ./cmd/gate`.
+
+```bash
+export GATE_HUB=http://localhost:8081 GATE_TOKEN=gate-local-token
+gate ctl keys create -group v1 -tier pro -owner alice   # prints gk_<id>_<secret> once
+curl -H "X-API-Key: gk_..." http://localhost:8080/v1/echo/hello
+gate ctl keys revoke <id>                                # every edge rejects it within a second
+gate ctl audit
+```
+
+Hubs store only the SHA-256 of a key. Edges hash the key as a request
+arrives, so the raw key never leaves the edge process: it is not in Redis,
+the quota ledger, logs or metrics.
 
 `make up` starts the same stack without demo traffic. `make down` stops it,
 and `make clean` also removes its volumes.

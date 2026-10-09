@@ -11,6 +11,7 @@ import (
 	"gateway/packages/common/httpx"
 	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
+	"gateway/packages/keys"
 	"gateway/packages/limiter"
 )
 
@@ -43,7 +44,7 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			if !errors.Is(err, limiter.ErrUnavailable) || rateErrLog.allow() {
-				httpx.Logger(r.Context()).Warn("rate limit check failed", "scope", st.scope, "service", st.service, "key", httpx.RedactKey(st.key), "err", err)
+				httpx.Logger(r.Context()).Warn("rate limit check failed", "scope", st.scope, "service", st.service, "key", keys.Short(st.key), "err", err)
 			}
 			safety := st.svc.SafetyTier
 			if safety == nil || !st.svc.Failure.EffectiveHubPolicy().AllowOnRateServiceError {

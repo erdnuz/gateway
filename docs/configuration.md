@@ -20,7 +20,8 @@ only when an OTLP endpoint is set. See [observability](observability.md).
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CONFIG_FILE_PATH` | required | gateway config file |
-| `HUB_AUTH_TOKEN` | required | bearer token for the admin HTTP API |
+| `HUB_AUTH_TOKEN` | required | admin bearer token for the HTTP API |
+| `HUB_READ_TOKEN` | none | optional bearer token that may only read (GET) |
 | `PORT` | `8080` | admin HTTP API |
 | `HUB_GRPC_PORT` | `9090` | edge-facing gRPC: quota leases and the control-plane stream |
 | `HUB_TLS_CERT_FILE`, `HUB_TLS_KEY_FILE`, `HUB_TLS_CA_FILE` | required unless gRPC listens on loopback | gRPC server cert and client CA (mTLS) |

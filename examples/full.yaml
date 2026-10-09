@@ -53,7 +53,7 @@ services:
 
 runtime:                                 # all optional
   hub:
-    api_key_pattern: "^[A-Za-z0-9]{3,128}$"
+    api_key_pattern: "^[A-Za-z0-9_]{3,128}$"
   edge:
     lease_size: 100
     lease_low_water_pct: 20              # renew when 20% of a lease is left

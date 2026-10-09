@@ -1,0 +1,228 @@
+openapi: 3.1.0
+info:
+  title: Gate hub admin API
+  version: "2"
+  description: |
+    Administers a Gate hub: API keys, tiers, config rollout and the audit log.
+    Edges do not use this API; they talk to the hub over gRPC
+    (api/proto/quota_lease.proto).
+
+    Authenticate with `Authorization: Bearer <token>`. HUB_AUTH_TOKEN may do
+    anything; HUB_READ_TOKEN may only use GET. Errors are RFC 9457 problem
+    documents with a stable `code`.
+servers:
+  - url: http://localhost:8081
+security:
+  - bearer: []
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      security: []
+      responses:
+        "200": { description: The process is up. }
+  /readyz:
+    get:
+      summary: Readiness (Redis reachable, with noeviction)
+      security: []
+      responses:
+        "200": { description: Ready. }
+        "503": { description: Waiting for a dependency. }
+  /status:
+    get:
+      summary: Readiness and the number of edges connected to this hub
+      responses:
+        "200":
+          description: Status.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ready: { type: boolean }
+                  edges_connected: { type: integer }
+
+  /v2/keys:
+    get:
+      summary: List issued keys
+      parameters:
+        - { name: group, in: query, schema: { type: string }, description: Only keys of this route group. }
+      responses:
+        "200":
+          description: Keys (never their secrets).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys: { type: array, items: { $ref: "#/components/schemas/Key" } }
+    post:
+      summary: Issue a key
+      description: The response is the only time the secret is returned. Hubs store only its SHA-256 hash.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group, tier]
+              properties:
+                group: { type: string, description: "Route group: the first path segment, e.g. v1." }
+                tier: { type: string }
+                owner: { type: string }
+                name: { type: string }
+      responses:
+        "201": { $ref: "#/components/responses/Issued" }
+        "400": { $ref: "#/components/responses/Problem" }
+
+  /v2/keys/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Get a key
+      responses:
+        "200": { description: The key., content: { application/json: { schema: { $ref: "#/components/schemas/Key" } } } }
+        "404": { $ref: "#/components/responses/Problem" }
+    patch:
+      summary: Change a key's tier or labels
+      description: A tier change reaches every edge over its watch stream.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tier: { type: string }
+                owner: { type: string }
+                name: { type: string }
+      responses:
+        "200": { description: The updated key., content: { application/json: { schema: { $ref: "#/components/schemas/Key" } } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+    delete:
+      summary: Revoke a key on every edge
+      responses:
+        "204": { description: Revoked. }
+        "404": { $ref: "#/components/responses/Problem" }
+
+  /v2/keys/{id}/rotate:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    post:
+      summary: Replace a key's secret
+      description: The old secret stops working on every edge.
+      responses:
+        "200": { $ref: "#/components/responses/Issued" }
+        "404": { $ref: "#/components/responses/Problem" }
+
+  /v2/audit:
+    get:
+      summary: Recent administrative changes, newest first
+      parameters:
+        - { name: count, in: query, schema: { type: integer, default: 50, maximum: 1000 } }
+      responses:
+        "200":
+          description: Audit entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
+
+  /tiers/{group}/{key}:
+    parameters:
+      - { name: group, in: path, required: true, schema: { type: string } }
+      - { name: key, in: path, required: true, schema: { type: string }, description: An operator-chosen key; the hub stores its hash. }
+    get:
+      summary: A key's tier ("" when unknown)
+      responses:
+        "200": { description: Tier., content: { application/json: { schema: { type: object, properties: { tier: { type: string } } } } } }
+    post:
+      summary: Assign a tier to an operator-chosen key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [tier_id], properties: { tier_id: { type: string } } }
+      responses:
+        "200": { description: Assigned. }
+        "400": { $ref: "#/components/responses/Problem" }
+    delete:
+      summary: Revoke an operator-chosen key
+      responses:
+        "204": { description: Revoked. }
+
+  /config:
+    get:
+      summary: The compiled gateway config
+      responses:
+        "200": { description: Config (JSON). }
+  /config-reload:
+    post:
+      summary: Reload and roll out the config
+      description: An empty body reloads CONFIG_FILE_PATH; a body is a version 2 config document (YAML or JSON).
+      requestBody:
+        content:
+          application/yaml: { schema: { type: string } }
+      responses:
+        "204": { description: Applied and pushed to every edge. }
+        "400": { $ref: "#/components/responses/Problem" }
+  /config-reload/dry-run:
+    post:
+      summary: Validate a reload and report what it would change
+      requestBody:
+        content:
+          application/yaml: { schema: { type: string } }
+      responses:
+        "200": { description: Analysis (changed sections, cache invalidations, warnings). }
+        "400": { $ref: "#/components/responses/Problem" }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+  schemas:
+    Key:
+      type: object
+      properties:
+        id: { type: string }
+        group: { type: string }
+        tier: { type: string }
+        owner: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        rotated_at: { type: string, format: date-time }
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: string }
+        time: { type: string, format: date-time }
+        actor: { type: string, enum: [admin, read-only] }
+        action: { type: string, examples: [key.create, key.rotate, tier.set, config.reload] }
+        target: { type: string }
+        detail: { type: string }
+        request_id: { type: string }
+    Problem:
+      type: object
+      properties:
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        request_id: { type: string }
+  responses:
+    Issued:
+      description: The key and its secret (shown once).
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              key: { $ref: "#/components/schemas/Key" }
+              secret: { type: string, examples: [gk_3f9a1c2b7d4e_9b1c...] }
+    Problem:
+      description: An RFC 9457 problem.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }

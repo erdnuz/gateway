@@ -13,6 +13,7 @@ import (
 	"gateway/packages/edge"
 	"gateway/packages/config"
 	"gateway/packages/hub"
+	"gateway/packages/keys"
 	"gateway/packages/limiter"
 	"io"
 	"net"
@@ -371,7 +372,8 @@ func (h *integrationHarness) waitReady(url string) {
 
 func (h *integrationHarness) setTier(prefix, apiKey, tierID string) {
 	h.t.Helper()
-	if err := h.hubTierStore.SetTier(h.ctx, prefix, apiKey, tierID); err != nil {
+	// The hub stores tiers by key hash, as edges look them up.
+	if err := h.hubTierStore.SetTier(h.ctx, prefix, keys.Hash(apiKey), tierID); err != nil {
 		h.t.Fatalf("set tier: %v", err)
 	}
 }
@@ -515,7 +517,7 @@ func (h *integrationHarness) setLeaseClientAt(index int, client limiter.LeaseCli
 // leaseHolding reports the tokens edge 0 holds for a key of v1/auth-api and
 // when its lease expires.
 func (h *integrationHarness) leaseHolding(apiKey string) (int64, time.Time) {
-	return h.edgeLeases[0].Holding("v1", "auth-api", apiKey)
+	return h.edgeLeases[0].Holding("v1", "auth-api", keys.Hash(apiKey))
 }
 
 // requireWindowHeadroom waits, if needed, until at least d remains in the

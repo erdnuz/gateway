@@ -206,7 +206,7 @@
           "description": "Hub tuning.",
           "properties": {
             "api_key_pattern": {
-              "description": "Regular expression every API key must match. Default ^[A-Za-z0-9]{3,128}$.",
+              "description": "Regular expression every API key must match. Default ^[A-Za-z0-9_]{3,128}$.",
               "type": "string"
             },
             "cors_headers": {
