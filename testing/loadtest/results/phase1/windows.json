@@ -2,56 +2,30 @@
   "scenario": "windows",
   "pass": true,
   "checks": [
-    "PASS: window 179143429 admitted 1001 (want 800..1004)",
-    "PASS: window 179143430 admitted 999 (want 800..1004)",
-    "PASS: window 179143431 admitted 1001 (want 800..1004)",
-    "PASS: window 179143432 admitted 1001 (want 800..1004)"
+    "PASS: window 179145489 admitted 1000 (want 800..1004)",
+    "PASS: window 179145490 admitted 1001 (want 800..1004)",
+    "PASS: window 179145491 admitted 1000 (want 800..1004)",
+    "PASS: window 179145492 admitted 1000 (want 800..1004)"
   ],
   "data": {
     "offered_rps": 200,
     "windows": [
       {
-        "window": 179143429,
-        "sent": 1992,
-        "admitted": 1001,
+        "window": 179145489,
+        "sent": 1990,
+        "admitted": 1000,
         "admitted_per_edge": [
           500,
-          501
+          500
         ],
         "statuses": {
-          "200": 1001,
-          "429": 991
+          "200": 1000,
+          "429": 990
         }
       },
       {
-        "window": 179143430,
-        "sent": 1999,
-        "admitted": 999,
-        "admitted_per_edge": [
-          500,
-          499
-        ],
-        "statuses": {
-          "200": 999,
-          "429": 1000
-        }
-      },
-      {
-        "window": 179143431,
+        "window": 179145490,
         "sent": 2001,
-        "admitted": 1001,
-        "admitted_per_edge": [
-          500,
-          501
-        ],
-        "statuses": {
-          "200": 1001,
-          "429": 1000
-        }
-      },
-      {
-        "window": 179143432,
-        "sent": 2000,
         "admitted": 1001,
         "admitted_per_edge": [
           501,
@@ -59,19 +33,45 @@
         ],
         "statuses": {
           "200": 1001,
-          "429": 999
+          "429": 1000
         }
       },
       {
-        "window": 179143433,
-        "sent": 8,
-        "admitted": 8,
+        "window": 179145491,
+        "sent": 2000,
+        "admitted": 1000,
         "admitted_per_edge": [
-          4,
-          4
+          500,
+          500
         ],
         "statuses": {
-          "200": 8
+          "200": 1000,
+          "429": 1000
+        }
+      },
+      {
+        "window": 179145492,
+        "sent": 2000,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          500,
+          500
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 1000
+        }
+      },
+      {
+        "window": 179145493,
+        "sent": 9,
+        "admitted": 9,
+        "admitted_per_edge": [
+          4,
+          5
+        ],
+        "statuses": {
+          "200": 9
         }
       }
     ]
