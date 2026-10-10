@@ -173,6 +173,7 @@ func TestSettle_RefundsTheLedgerOnce(t *testing.T) {
 	m, _ := decide.Resolve(cfg, "ingress", desc[0].Entries)
 	ref := ledger.Ref{Scope: decide.Scope, Service: "ingress", Limit: m.LimitID, Subject: m.Subject}
 	spec := ledger.Spec{Limit: 10, Window: time.Hour}
+	time.Sleep(50 * time.Millisecond) // let any background lease renewal land first
 	before := mem.Used(ref, spec)
 	for i := 0; i < 2; i++ { // a retried settle applies once
 		if err := d.Settle(ctx, out.Reservation, 3); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -68,6 +69,9 @@ func (m *Mem) Grant(_ context.Context, ref Ref, spec Spec, args GrantArgs) (Gran
 		reset = (wid+1)*in.win - now
 		expires = reset
 		key = winKey(in.key, wid)
+		if in.allocBase >= 0 {
+			in.limit = in.allocBase + m.getInt(in.key+":alloc:"+strconv.FormatInt(wid, 10), 0)
+		}
 		used := m.getInt(key, 0)
 		if in.algo == SlidingWindow {
 			prev := m.getInt(winKey(in.key, wid-1), 0)

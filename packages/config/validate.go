@@ -357,6 +357,32 @@ func (p *parser) validateV3Limits(path string, l Limits, tiers []string) {
 		}
 		p.validateBudget(ap, a.Algorithm, a.Requests, a.Rate, a.Burst)
 	}
+	if g := l.Global; g != nil {
+		var sum float64
+		for name, f := range g.Floors {
+			if !nameRe.MatchString(name) {
+				p.at(path+".global.floors."+name, "region name %q must be lowercase letters, digits and dashes", name)
+			}
+			if f < 0 || f > 1 {
+				p.at(path+".global.floors."+name, "must be between 0 and 1")
+			}
+			sum += f
+		}
+		if len(g.Floors) == 0 {
+			p.at(path+".global.floors", "list every region, e.g. {eu-west: 0.3, us-east: 0.3}")
+		}
+		if sum > 1 {
+			p.at(path+".global.floors", "shares sum to %.2f; they must sum to at most 1", sum)
+		}
+		for _, name := range tiers {
+			if a := orDefault(l.Tiers[name].Algorithm, l.Algorithm); a != "" && a != "fixed_window" {
+				p.at(path+".tiers."+name+".algorithm", "global quotas support fixed_window only")
+			}
+		}
+		if l.Org != nil {
+			p.at(path+".org", "an org budget cannot be combined with global (multi-region) quotas")
+		}
+	}
 	if c := l.Cost; c != nil {
 		if strings.TrimSpace(c.ActualHeader) == "" {
 			p.at(path+".cost.actual_header", "is required: the response header (or trailer) carrying the actual cost")

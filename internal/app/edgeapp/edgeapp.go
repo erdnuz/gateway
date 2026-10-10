@@ -46,6 +46,12 @@ type Config struct {
 	RedisAddr  string
 	CacheBytes int64
 
+	// Limiter is lease (default): quota leased from the hub. redis-counter
+	// counts every request in LimiterRedis instead, the central-counter
+	// baseline the benchmark compares against.
+	Limiter      string
+	LimiterRedis string
+
 	LeaseSize        int64   // 0: runtime.edge.rate_lease_size
 	LeaseLowWaterPct float64 // 0: runtime.edge.rate_low_water_pct
 
@@ -72,6 +78,8 @@ func FromEnv() Config {
 		TLSCAFile:           strings.TrimSpace(config.String("EDGE_TLS_CA_FILE", "")),
 		RedisAddr:           strings.TrimSpace(config.String("REDIS_ADDR", "")),
 		CacheBytes:          config.Int64("EDGE_CACHE_BYTES", defaultCacheBytes),
+		Limiter:             strings.TrimSpace(config.String("EDGE_LIMITER", "lease")),
+		LimiterRedis:        strings.TrimSpace(config.String("EDGE_LIMITER_REDIS", "")),
 		LeaseSize:           config.Int64("EDGE_LEASE_SIZE", 0),
 		LeaseLowWaterPct:    float64(config.Int("EDGE_LEASE_LOW_WATER_PERCENT", 0)),
 		AnalyticsEnabled:    config.Bool("GATE_ANALYTICS_ENABLED", true),
@@ -162,6 +170,16 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 	}
 	lease := limiter.NewLease(limiter.NewBatcher(hub), limiter.LeaseOptions{LeaseSize: cfg.LeaseSize, LowWaterPct: cfg.LeaseLowWaterPct, EdgeID: edgeID})
 	e.lease = lease
+	var lim limiter.Limiter = lease
+	if cfg.Limiter == "redis-counter" {
+		if cfg.LimiterRedis == "" {
+			return nil, errors.New("EDGE_LIMITER=redis-counter needs EDGE_LIMITER_REDIS")
+		}
+		crdb := redis.NewClient(&redis.Options{Addr: cfg.LimiterRedis, PoolSize: 256})
+		e.closers = append(e.closers, func() { _ = crdb.Close() })
+		lim = limiter.NewRedisCounter(crdb)
+		slog.Warn("EDGE_LIMITER=redis-counter: every request is counted in Redis (benchmark baseline)")
+	}
 
 	responses := edge.NewMemoryResponses(cfg.CacheBytes)
 	if cfg.RedisAddr != "" {
@@ -181,7 +199,7 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 	server := edge.NewServer(edge.Deps{
 		Config:    edge.NewConfigManager(bootstrap),
 		Tiers:     edge.NewTierCache(hub.ResolveKey),
-		Limiter:   lease,
+		Limiter:   lim,
 		Analytics: sink,
 		Responses: responses,
 	}, edge.Options{EdgeID: edgeID, AdminToken: cfg.AdminToken})

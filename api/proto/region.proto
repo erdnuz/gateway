@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+// Hub-to-hub protocol between regions. Each region's ledger enforces its
+// allocation of a global quota; a region that runs short borrows unused
+// allocation from its peers. The lender debits itself before it answers, so
+// a lost reply leaves quota unused but never lets the regions together
+// exceed the global quota.
+package gate.region.v1;
+
+option go_package = "gateway/packages/common/types;types";
+
+message BorrowRequest {
+  string prefix = 1;
+  string service_id = 2;
+  string api_key = 3; // the subject (a hash)
+  string limit_id = 4;
+  string tier_id = 5;
+  int64 window_id = 6; // the window the borrower is short in
+  int64 want = 7;
+  string transfer_id = 8; // a retried Borrow with the same ID lends once
+  string from_region = 9;
+}
+
+message BorrowResponse {
+  int64 given = 1;
+}
+
+service RegionPeer {
+  rpc Borrow(BorrowRequest) returns (BorrowResponse);
+}

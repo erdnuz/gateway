@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +98,19 @@ func main() {
 		"outage":       scenarioOutage,
 		"outage-check": scenarioOutageCheck,
 		"demo":         scenarioDemo,
+		// v3: smarter leasing, algorithms, multi-limit, post-hoc cost, the
+		// decision service (v3.go).
+		"endgame":    scenarioEndgame,
+		"drain-warm": scenarioDrainWarm,
+		"drain":      scenarioDrain,
+		"manykeys":   scenarioManyKeys,
+		"algorithms": scenarioAlgorithms,
+		"multilimit": scenarioMultiLimit,
+		"llm":        scenarioLLM,
+		"rls":        scenarioRLS,
+		// The comparative benchmark (testing/bench, bench.go).
+		"bench-setup": scenarioBenchSetup,
+		"bench":       scenarioBench,
 	}
 	fn, ok := run[scenario]
 	if !ok {
@@ -129,6 +143,8 @@ type sample struct {
 	status int // 0 = transport error
 	sentAt time.Time
 	lat    time.Duration
+	win    int64 // the hub window charged (Gate-Window), 0 when unknown
+	usage  int64 // cost the upstream reported (X-Usage-Total-Tokens), -1 when none
 }
 
 func (o options) url(edge int, service string) string {
@@ -136,19 +152,32 @@ func (o options) url(edge int, service string) string {
 }
 
 func do(ctx context.Context, url, apiKey string) (int, time.Duration) {
+	r := doFull(ctx, url, apiKey)
+	return r.status, r.lat
+}
+
+// doFull is do with the response's Gate-Window and usage headers.
+func doFull(ctx context.Context, url, apiKey string) sample {
 	start := time.Now()
+	s := sample{sentAt: start, usage: -1}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, 0
+		return s
 	}
 	req.Header.Set("X-API-Key", apiKey)
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, time.Since(start)
+		s.lat = time.Since(start)
+		return s
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	return resp.StatusCode, time.Since(start)
+	s.status, s.lat = resp.StatusCode, time.Since(start)
+	s.win, _ = strconv.ParseInt(resp.Header.Get("Gate-Window"), 10, 64)
+	if u, err := strconv.ParseInt(resp.Header.Get("X-Usage-Total-Tokens"), 10, 64); err == nil {
+		s.usage = u
+	}
+	return s
 }
 
 func (o options) hubCall(method, path string, body any) (int, error) {
@@ -183,8 +212,10 @@ func (o options) hubCall(method, path string, body any) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func (o options) setTier(apiKey, tier string) error {
-	code, err := o.hubCall(http.MethodPost, fmt.Sprintf("/tiers/%s/%s", o.prefix, apiKey), map[string]string{"tier_id": tier})
+func (o options) setTier(apiKey, tier string) error { return o.setTierIn(o.prefix, apiKey, tier) }
+
+func (o options) setTierIn(prefix, apiKey, tier string) error {
+	code, err := o.hubCall(http.MethodPost, fmt.Sprintf("/tiers/%s/%s", prefix, apiKey), map[string]string{"tier_id": tier})
 	if err != nil {
 		return err
 	}
@@ -211,9 +242,9 @@ func openLoop(o options, service string, keyFn func(i int) string, rps int, d ti
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sent := time.Now()
-			code, lat := do(context.Background(), o.url(i, service), keyFn(i))
-			out[i] = sample{edge: i % len(o.edges), status: code, sentAt: sent, lat: lat}
+			s := doFull(context.Background(), o.url(i, service), keyFn(i))
+			s.edge = i % len(o.edges)
+			out[i] = s
 		}(i)
 	}
 	wg.Wait()
@@ -313,7 +344,12 @@ type windowStat struct {
 func perWindow(o options, samples []sample) []windowStat {
 	byID := map[int64]*windowStat{}
 	for _, s := range samples {
-		id := o.windowID(s.sentAt)
+		// Attribute each request to the hub window its quota came from when
+		// the edge says (exact), else to the window it was sent in.
+		id := s.win
+		if id == 0 {
+			id = o.windowID(s.sentAt)
+		}
 		ws, ok := byID[id]
 		if !ok {
 			ws = &windowStat{Window: id, PerEdge: make([]int, len(o.edges)), Statuses: map[string]int{}}
@@ -348,6 +384,13 @@ func scenarioSetup(o options) *report {
 	assign := map[string]string{
 		"winkey0": "pro", "carry0": "pro", "iso0": "pro", "out0": "pro", "victim0": "pro",
 		"prop0": "pro", "prop1": "pro", "hot0": "bulk",
+		"end0": "pro", "slide0": "sliding", "bucket0": "bucket", "llm0": "pro",
+	}
+	for i := 0; i < 10; i++ {
+		assign[fmt.Sprintf("multi%d", i)] = "pro"
+	}
+	for i := 0; i < 5000; i++ {
+		assign[fmt.Sprintf("many%d", i)] = "bulk"
 	}
 	for i := 0; i < 1000; i++ {
 		assign[fmt.Sprintf("bulk%d", i)] = "bulk"
@@ -372,6 +415,9 @@ func scenarioSetup(o options) *report {
 		}(k, t)
 	}
 	wg.Wait()
+	if firstErr == nil {
+		firstErr = o.setTierIn(drainPrefix, "drain0", "pro")
+	}
 	if firstErr != nil {
 		log.Fatalf("setup failed: %v", firstErr)
 	}
@@ -390,15 +436,15 @@ func scenarioWindows(o options) *report {
 	r.Data["offered_rps"] = rps
 	r.Data["windows"] = ws
 	tol := o.lease * int64(len(o.edges))
-	fmt.Fprintf(&r.markdown, "Offered %d rps (2x quota) on one key, round-robin over %d edges. Expect admitted per window in [Q-%d, Q+%d], Q=%d.\n\n", rps, len(o.edges), tol, 2*len(o.edges), o.quota)
+	fmt.Fprintf(&r.markdown, "Offered %d rps (2x quota) on one key, round-robin over %d edges. Requests are attributed to the hub window that charged them (Gate-Window). Expect admitted per window in [Q-%d, Q], Q=%d.\n\n", rps, len(o.edges), tol, o.quota)
 	windowTable(&r.markdown, ws)
 	for _, w := range ws {
 		if w.Sent < rps*int(o.period/time.Second)*9/10 {
 			continue // partial window at the tail
 		}
 		a := int64(w.Admitted)
-		r.check(a >= o.quota-tol && a <= o.quota+int64(2*len(o.edges)),
-			"window %d admitted %d (want %d..%d)", w.Window, a, o.quota-tol, o.quota+int64(2*len(o.edges)))
+		r.check(a >= o.quota-tol && a <= o.quota,
+			"window %d admitted %d (want %d..%d)", w.Window, a, o.quota-tol, o.quota)
 	}
 	return r
 }
@@ -416,11 +462,11 @@ func scenarioCarryover(o options) *report {
 	ws := perWindow(o, flood)
 	r.Data["warm_statuses"] = statusCounts(warm)
 	r.Data["flood"] = ws
-	fmt.Fprintf(&r.markdown, "Window N: 10 rps for 2s (each edge leases %d, uses ~10). Window N+1: %d rps. Expect admitted in N+1 <= Q+%d.\n\n", o.lease, rps, 2*len(o.edges))
+	fmt.Fprintf(&r.markdown, "Window N: 10 rps for 2s (each edge leases up to %d, uses ~10). Window N+1: %d rps. Expect admitted in N+1 <= Q.\n\n", o.lease, rps)
 	windowTable(&r.markdown, ws)
 	if len(ws) > 0 {
 		a := int64(ws[0].Admitted)
-		r.check(a <= o.quota+int64(2*len(o.edges)), "window N+1 admitted %d (limit %d)", a, o.quota)
+		r.check(a <= o.quota, "window N+1 admitted %d (limit %d)", a, o.quota)
 		r.check(a >= o.quota-o.lease*int64(len(o.edges)), "window N+1 admitted %d is not starved (>= %d)", a, o.quota-o.lease*int64(len(o.edges)))
 	}
 	return r
@@ -668,7 +714,7 @@ func scenarioOutageCheck(o options) *report {
 	if len(ws) > 0 {
 		a := int64(ws[0].Admitted)
 		tol := o.lease * int64(len(o.edges))
-		r.check(a >= o.quota-tol && a <= o.quota+int64(2*len(o.edges)), "recovered window admitted %d (want %d..%d)", a, o.quota-tol, o.quota+int64(2*len(o.edges)))
+		r.check(a >= o.quota-tol && a <= o.quota, "recovered window admitted %d (want %d..%d)", a, o.quota-tol, o.quota)
 	}
 	return r
 }

@@ -222,3 +222,49 @@ func TestReturnCreditsCurrentWindowOnce(t *testing.T) {
 		t.Fatalf("stale return touched the new window: used %d", used)
 	}
 }
+
+// TestConformanceRegional keeps regional grants, Lend and Credit identical
+// between Mem and the Lua.
+func TestConformanceRegional(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	red := NewRedis(rdb)
+	clock := time.UnixMilli(1_760_000_000_321)
+	mem := NewMem()
+	mem.Now = func() time.Time { return clock }
+	mr.SetTime(clock)
+	spec := Spec{Algo: FixedWindow, Limit: 100, Window: 2 * time.Second}
+	rng := rand.New(rand.NewPCG(7, 8))
+	ctx := context.Background()
+	for i := 0; i < 2000; i++ {
+		clock = clock.Add(time.Duration(rng.IntN(50)) * time.Millisecond)
+		mr.SetTime(clock)
+		ref := Ref{Scope: "v1", Service: "svc", Subject: fmt.Sprintf("k%d", rng.IntN(2))}
+		wid := WindowOf(spec, clock) - int64(rng.IntN(2)) // sometimes a past window
+		id := fmt.Sprintf("t%d", rng.IntN(300))
+		switch rng.IntN(3) {
+		case 0:
+			args := GrantArgs{Requested: int64(1 + rng.IntN(20)), Regional: true, AllocBase: int64(rng.IntN(60))}
+			a, err1 := mem.Grant(ctx, ref, spec, args)
+			b, err2 := red.Grant(ctx, ref, spec, args)
+			if err1 != nil || err2 != nil || a != b {
+				t.Fatalf("op %d grant: mem %+v %v, redis %+v %v", i, a, err1, b, err2)
+			}
+		case 1:
+			base, want, margin := int64(rng.IntN(60)), int64(1+rng.IntN(30)), int64(rng.IntN(10))
+			a, err1 := mem.Lend(ctx, ref, spec, base, wid, want, margin, id)
+			b, err2 := red.Lend(ctx, ref, spec, base, wid, want, margin, id)
+			if err1 != nil || err2 != nil || a != b {
+				t.Fatalf("op %d lend: mem %d %v, redis %d %v", i, a, err1, b, err2)
+			}
+		default:
+			amount := int64(1 + rng.IntN(30))
+			a, err1 := mem.Credit(ctx, ref, spec, wid, amount, id)
+			b, err2 := red.Credit(ctx, ref, spec, wid, amount, id)
+			if err1 != nil || err2 != nil || a != b {
+				t.Fatalf("op %d credit: mem %v %v, redis %v %v", i, a, err1, b, err2)
+			}
+		}
+	}
+}

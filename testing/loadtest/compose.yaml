@@ -77,6 +77,38 @@ services:
       <<: *edge-env
       EDGE_ID: edge-2
 
+  # The decision service (gate limiter), two replicas over the same hub.
+  limiter-1: &limiter
+    image: gate-lt
+    command: ["limiter"]
+    cpus: 1.0
+    depends_on:
+      hub-server:
+        condition: service_healthy
+    environment: &limiter-env
+      PORT: ":8080"
+      LIMITER_GRPC_PORT: ":8081"
+      LIMITER_ID: limiter-1
+      LIMITER_SECRET: loadtest-secret
+      HUB_GRPC_ADDR: hub-server:9090
+      HUB_GRPC_SERVER_NAME: hub-server
+      LIMITER_TLS_CERT_FILE: /certs/edge/tls.crt
+      LIMITER_TLS_KEY_FILE: /certs/edge/tls.key
+      LIMITER_TLS_CA_FILE: /certs/ca/ca.crt
+    volumes:
+      - ${LT_CERT_DIR}/edge:/certs/edge:ro
+      - ${LT_CERT_DIR}/ca:/certs/ca:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  limiter-2:
+    <<: *limiter
+    environment:
+      <<: *limiter-env
+      LIMITER_ID: limiter-2
+
   # Minimal origin ("ok") so measurements reflect gateway overhead only.
   upstream:
     build:

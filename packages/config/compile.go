@@ -202,6 +202,9 @@ func compileLimits(svc *types.ServiceConfig, l Limits) {
 		}
 		svc.Limits = append(svc.Limits, spec)
 	}
+	if g := l.Global; g != nil {
+		svc.Global = &types.GlobalLimit{Floors: g.Floors}
+	}
 	if c := l.Cost; c != nil {
 		svc.Cost = &types.CostPolicy{Estimate: c.Estimate, EstimateHeader: c.EstimateHeader, ActualHeader: c.ActualHeader, OnMissing: c.OnMissing, MaxDebt: c.MaxDebt}
 	}
@@ -408,6 +411,9 @@ func limitsFromInternal(l *Limits, svc types.ServiceConfig) {
 			a.Mode = "shadow"
 		}
 		l.Also = append(l.Also, a)
+	}
+	if g := svc.Global; g != nil {
+		l.Global = &Global{Floors: g.Floors}
 	}
 	if c := svc.Cost; c != nil {
 		l.Cost = &Cost{Estimate: c.Estimate, EstimateHeader: c.EstimateHeader, ActualHeader: c.ActualHeader, OnMissing: c.OnMissing, MaxDebt: c.MaxDebt}

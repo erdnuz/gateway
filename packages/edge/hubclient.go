@@ -29,6 +29,11 @@ type HubClient struct {
 	control types.ControlPlaneClient
 }
 
+// hubServiceConfig balances calls across every address the target
+// resolves to: with HUB_GRPC_ADDR=dns:///hub:9090 and several hub replicas,
+// lease RPCs spread over all of them while the watch stream stays on one.
+const hubServiceConfig = `{"loadBalancingConfig": [{"round_robin": {}}]}`
+
 // DialHub connects to a hub. A nil tlsCfg means plaintext, which only gate
 // dev uses, on loopback.
 func DialHub(addr string, tlsCfg *tls.Config) (*HubClient, error) {
@@ -38,6 +43,7 @@ func DialHub(addr string, tlsCfg *tls.Config) (*HubClient, error) {
 	}
 	opts := append([]grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultServiceConfig(hubServiceConfig),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             5 * time.Second,

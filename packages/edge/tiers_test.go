@@ -82,7 +82,8 @@ func TestTierCache_StaleFallback(t *testing.T) {
 	if tier, ok := tc.Stale("v1", "k", time.Hour); !ok || tier != "pro" {
 		t.Fatalf("Stale = %q, %v", tier, ok)
 	}
-	if _, ok := tc.Stale("v1", "k", time.Nanosecond); ok {
+	time.Sleep(5 * time.Millisecond) // Windows clocks are too coarse for a 1ns age
+	if _, ok := tc.Stale("v1", "k", time.Millisecond); ok {
 		t.Fatal("Stale ignored maxAge")
 	}
 }

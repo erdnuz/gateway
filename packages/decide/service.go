@@ -32,6 +32,7 @@ type Status struct {
 	Limit        int64         `json:"limit_value,omitempty"`
 	Remaining    int64         `json:"remaining"`
 	ResetIn      time.Duration `json:"-"`
+	Window       int64         `json:"window,omitempty"` // the hub window charged
 	Spec         types.LimitSpec
 }
 
@@ -112,7 +113,7 @@ func (d *Decider) check(ctx context.Context, domain string, descs []Descriptor, 
 	for j, r := range res.Results {
 		st := &out.Statuses[index[j]]
 		st.Allowed = r.Allowed || checks[j].Shadow
-		st.Limit, st.Remaining = r.Limit, r.Remaining
+		st.Limit, st.Remaining, st.Window = r.Limit, r.Remaining, r.Window
 		if !r.ResetAt.IsZero() {
 			st.ResetIn = max(time.Until(r.ResetAt), 0)
 		}

@@ -24,6 +24,7 @@ type grantInput struct {
 	parentKey string
 	plimit    int64
 	pwin      int64
+	allocBase int64 // -1: not a regional allocation
 }
 
 func windowMs(s Spec) int64 { return max(s.Window, time.Second).Milliseconds() }
@@ -35,15 +36,22 @@ func prepare(ref Ref, spec Spec, args GrantArgs) (grantInput, error) {
 		return grantInput{}, err
 	}
 	in := grantInput{
-		algo:     spec.Algo.Or(),
-		key:      ref.Key(spec.Algo),
-		limit:    spec.Limit,
-		win:      windowMs(spec),
-		rate:     spec.Rate,
-		target:   args.target(),
-		edge:     args.EdgeID,
-		activeMs: max(2*args.Horizon, 2*time.Second).Milliseconds(),
-		ttl:      time.Second.Milliseconds(),
+		algo:      spec.Algo.Or(),
+		key:       ref.Key(spec.Algo),
+		limit:     spec.Limit,
+		win:       windowMs(spec),
+		rate:      spec.Rate,
+		target:    args.target(),
+		edge:      args.EdgeID,
+		activeMs:  max(2*args.Horizon, 2*time.Second).Milliseconds(),
+		ttl:       time.Second.Milliseconds(),
+		allocBase: -1,
+	}
+	if args.Regional {
+		if spec.Algo.Or() != FixedWindow || args.AllocBase < 0 {
+			return grantInput{}, ErrBadSpec
+		}
+		in.allocBase = args.AllocBase
 	}
 	if args.Horizon > 0 {
 		in.ttl = args.Horizon.Milliseconds()

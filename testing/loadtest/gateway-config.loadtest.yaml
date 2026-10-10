@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../../schema/gate.schema.json
-# Load-test config: two services under /lt with a 10s window, so several
-# windows fit in one scenario. Unknown keys are rejected (no default tier).
+# Load-test config: services under /lt with a 10s window, so several windows
+# fit in one scenario. Unknown keys are rejected (no default tier).
 version: 2
 services:
   - &svc
@@ -18,6 +18,63 @@ services:
   - <<: *svc
     name: svc2
     match: { path_prefix: /lt/svc2 }
+
+  # The algorithms: a sliding window and a token bucket.
+  - name: algo
+    match: { path_prefix: /lt/algo }
+    upstream: http://upstream:9000
+    limits:
+      window: 10s
+      lease_size: 100
+      tiers:
+        sliding: { requests: 1000, algorithm: sliding_window }
+        bucket:  { algorithm: token_bucket, rate: 50/s, burst: 100 }
+    analytics: { enabled: false }
+
+  # A per-client-address limit on top of the tier.
+  - name: multi
+    match: { path_prefix: /lt/multi }
+    upstream: http://upstream:9000
+    limits:
+      window: 10s
+      lease_size: 100
+      tiers:
+        pro: { requests: 1000 }
+      also:
+        - { name: per-ip, per: client_ip, requests: 300 }
+    analytics: { enabled: false }
+
+  # Post-hoc cost: tokens per window, settled from the upstream's report.
+  - name: llm
+    match: { path_prefix: /lt/llm }
+    upstream: http://upstream:9000
+    limits:
+      window: 10s
+      lease_size: 100
+      tiers:
+        pro: { requests: 5000 }
+      cost: { estimate: 50, actual_header: X-Usage-Total-Tokens, max_debt: 200 }
+    analytics: { enabled: false }
+
+  # Lease return on drain: fixed 400-token leases in a 30s window.
+  - name: fixed
+    match: { path_prefix: /ld/fixed }
+    upstream: http://upstream:9000
+    limits:
+      window: 30s
+      lease_size: 400
+      leasing: { mode: fixed }
+      tiers:
+        pro: { requests: 1000 }
+    analytics: { enabled: false }
+
+# For the gate limiter replicas (the rls scenario).
+descriptors:
+  - domain: lt
+    entries:
+      - key: user
+        limit: { requests: 500, window: 10s }
+
 runtime:
   edge:
     upstream_max_idle_conns: 512

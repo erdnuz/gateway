@@ -11,6 +11,7 @@ import (
 	"gateway/packages/common/types"
 	"gateway/packages/decide"
 	"gateway/packages/ledger"
+	"gateway/packages/region"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -29,7 +30,13 @@ type QuotaLeaseServer struct {
 	ledger    ledger.Ledger
 	cfgStore  ConfigRegistry
 	tierStore TierStore
+	region    *region.Node // nil: a single-region deployment
 }
+
+// SetRegion makes this hub one region of a multi-region deployment:
+// services with global quotas grant from this region's allocation, and
+// quotas that run out are reported to node, which borrows from peers.
+func (s *QuotaLeaseServer) SetRegion(node *region.Node) { s.region = node }
 
 func NewQuotaLeaseServer(l ledger.Ledger, cfgStore ConfigRegistry, tierStore TierStore) *QuotaLeaseServer {
 	return &QuotaLeaseServer{ledger: l, cfgStore: cfgStore, tierStore: tierStore}
@@ -51,7 +58,18 @@ func (s *QuotaLeaseServer) RequestQuotaLease(ctx context.Context, req *types.Quo
 		telemetry.LeaseGrants.WithLabelValues("error").Inc()
 		return nil, err
 	}
+	s.noteStarved(req, l, g)
 	return grantResponse(l, g), nil
+}
+
+// noteStarved reports a regional quota that ran out to the region node.
+func (s *QuotaLeaseServer) noteStarved(req *types.QuotaLeaseRequest, l lease, g ledger.Grant) {
+	if s.region == nil || !l.item.Args.Regional || g.Granted > 0 {
+		return
+	}
+	s.region.Starved(region.Need{Ref: l.item.Ref, Spec: l.item.Spec, Window: g.WindowID, Request: &types.BorrowRequest{
+		Prefix: req.Prefix, ServiceId: req.ServiceId, ApiKey: req.ApiKey, LimitId: req.LimitId, TierId: req.TierId,
+	}})
 }
 
 // RequestQuotaLeases answers a batch in one ledger round trip per shard.
@@ -74,6 +92,7 @@ func (s *QuotaLeaseServer) RequestQuotaLeases(ctx context.Context, in *types.Quo
 			out.Results[index[j]] = errorResult(r.Err)
 			continue
 		}
+		s.noteStarved(in.GetRequests()[index[j]], leases[j], r.Grant)
 		out.Results[index[j]] = &types.QuotaLeaseResult{Response: grantResponse(leases[j], r.Grant)}
 	}
 	return out, nil
@@ -191,6 +210,10 @@ func (s *QuotaLeaseServer) resolve(ctx context.Context, prefix, service, subject
 		Rate:   tierCfg.Rate,
 	}
 	l.limit = int64(tierCfg.Quota)
+	if g := svcCfg.Global; g != nil && s.region != nil {
+		l.item.Args.Regional = true
+		l.item.Args.AllocBase = region.Base(l.limit, g.Floors, s.region.Name, subject)
+	}
 	if o := svcCfg.Org; o != nil && org != "" {
 		l.item.Ref.Parent = orgID(org)
 		window := o.Window
@@ -216,6 +239,39 @@ func (s *QuotaLeaseServer) resolveDescriptor(domain, subject, limitID string) (l
 		Args: ledger.GrantArgs{Horizon: types.DefaultLeaseHorizon, MinGrant: types.DefaultLeaseMin},
 	}}
 	return l, nil
+}
+
+// RegionServer lends this region's unused allocation to peer regions.
+type RegionServer struct {
+	types.UnimplementedRegionPeerServer
+	Leases *QuotaLeaseServer
+}
+
+// Borrow lends up to want of this region's allocation for the window the
+// peer is short in, keeping what this region is on pace to use itself. The
+// allocation is debited before the answer is sent.
+func (r *RegionServer) Borrow(ctx context.Context, in *types.BorrowRequest) (*types.BorrowResponse, error) {
+	s := r.Leases
+	alloc, ok := s.ledger.(ledger.Allocator)
+	if !ok || s.region == nil {
+		return nil, status.Error(codes.FailedPrecondition, "this hub is not part of a multi-region deployment")
+	}
+	if in.GetTransferId() == "" || in.GetWant() <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "transfer_id and want are required")
+	}
+	l, err := s.resolve(ctx, in.GetPrefix(), in.GetServiceId(), in.GetApiKey(), in.GetLimitId(), in.GetTierId(), "")
+	if err != nil {
+		return nil, err
+	}
+	if !l.item.Args.Regional {
+		return nil, status.Error(codes.FailedPrecondition, "the quota is not global")
+	}
+	given, err := alloc.Lend(ctx, l.item.Ref, l.item.Spec, l.item.Args.AllocBase, in.GetWindowId(), in.GetWant(), 0, in.GetTransferId())
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	telemetry.RegionTokensLent.Add(float64(given))
+	return &types.BorrowResponse{Given: given}, nil
 }
 
 func grantResponse(l lease, g ledger.Grant) *types.QuotaLeaseResponse {

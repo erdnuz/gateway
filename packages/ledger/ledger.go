@@ -129,6 +129,11 @@ type GrantArgs struct {
 	MaxGrant     int64
 	// Parent, when non-nil, is the enclosing quota's spec (Ref.Parent).
 	Parent *Spec
+	// Regional, when set, makes the quota this region's allocation of a
+	// global one: AllocBase plus whatever peers lent it this window (see
+	// Lend and Credit). Fixed windows only.
+	Regional  bool
+	AllocBase int64
 }
 
 // Grant is the ledger's answer.

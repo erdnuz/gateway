@@ -52,6 +52,7 @@ type checkStatus struct {
 	LimitValue   int64  `json:"limit_value,omitempty"`
 	Remaining    int64  `json:"remaining"`
 	ResetMs      int64  `json:"reset_ms,omitempty"`
+	Window       int64  `json:"window,omitempty"`
 }
 
 type checkResponse struct {
@@ -82,7 +83,7 @@ func (d *Decider) httpCheck(w http.ResponseWriter, r *http.Request) {
 	resp := checkResponse{Allowed: out.Allowed, Reservation: out.Reservation, Statuses: make([]checkStatus, len(out.Statuses))}
 	for i, st := range out.Statuses {
 		resp.Statuses[i] = checkStatus{Limit: st.LimitID, Matched: st.Matched, Allowed: st.Allowed, ShadowDenied: st.ShadowDenied,
-			LimitValue: st.Limit, Remaining: max(st.Remaining, 0), ResetMs: st.ResetIn.Milliseconds()}
+			LimitValue: st.Limit, Remaining: max(st.Remaining, 0), ResetMs: st.ResetIn.Milliseconds(), Window: st.Window}
 	}
 	if !out.Allowed {
 		resp.RetryAfterMs = max(out.RetryAfter.Milliseconds(), 1)

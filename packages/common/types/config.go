@@ -154,6 +154,16 @@ type ServiceConfig struct {
 	Cost *CostPolicy `json:"cost,omitempty"`
 	// Lease tunes how the hub sizes grants for this service.
 	Lease LeasePolicy `json:"lease,omitempty"`
+	// Global, when set, makes the tier quotas global across regions: each
+	// region enforces its allocation and borrows from the others.
+	Global *GlobalLimit `json:"global,omitempty"`
+}
+
+// GlobalLimit splits a service's quotas between regions.
+type GlobalLimit struct {
+	// Floors are each region's guaranteed share (0..1, summing to at most
+	// 1); the rest of each key's quota belongs to its home region.
+	Floors map[string]float64 `json:"floors"`
 }
 
 // LimitSpec is one additional limit on a service.

@@ -22,12 +22,15 @@ import (
 	"gateway/packages/common/ready"
 	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
+	"gateway/packages/edge"
 	"gateway/packages/hub"
 	"gateway/packages/ledger"
+	"gateway/packages/region"
 
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -54,6 +57,14 @@ type Config struct {
 	TLSKeyFile         string
 	TLSCAFile          string
 	GRPCClientAuthMode string
+
+	// Region names this hub's region in a multi-region deployment; peers
+	// are the other regions' hubs (name=address), reached over mTLS with
+	// this hub's certificate. Services with limits.global split their
+	// quotas between the regions.
+	Region           string
+	RegionPeers      map[string]string
+	RegionServerName string // TLS server name the peers' certificates carry
 }
 
 // FromEnv reads the hub configuration from environment variables.
@@ -73,7 +84,21 @@ func FromEnv() Config {
 		TLSKeyFile:         strings.TrimSpace(config.String("HUB_TLS_KEY_FILE", "")),
 		TLSCAFile:          strings.TrimSpace(config.String("HUB_TLS_CA_FILE", "")),
 		GRPCClientAuthMode: strings.TrimSpace(config.String("HUB_GRPC_CLIENT_AUTH_MODE", "require-and-verify")),
+		Region:             strings.TrimSpace(config.String("HUB_REGION", "")),
+		RegionPeers:        parsePeers(config.String("HUB_REGION_PEERS", "")),
+		RegionServerName:   strings.TrimSpace(config.String("HUB_REGION_SERVER_NAME", "hub-server")),
 	}
+}
+
+// parsePeers reads "eu=hub.eu:9090,us=hub.us:9090".
+func parsePeers(v string) map[string]string {
+	out := map[string]string{}
+	for _, p := range appkit.SplitCSV(v) {
+		if name, addr, ok := strings.Cut(p, "="); ok && name != "" && addr != "" {
+			out[strings.TrimSpace(name)] = strings.TrimSpace(addr)
+		}
+	}
+	return out
 }
 
 func (c Config) plaintext() bool {
@@ -139,6 +164,13 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 		}
 	}()
 
+	go func() {
+		mctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := hub.MigrateKeyLayout(mctx, h.rdb); err != nil {
+			slog.Warn("migrating key records to the Cluster layout failed; retried on the next start", "err", err)
+		}
+	}()
 	tierStore := hub.NewTierManager(h.rdb)
 	control := hub.NewControlPlane(cfgManager, tierStore, h.rdb)
 	go control.Run(ctx)
@@ -158,7 +190,17 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	if h.grpcServer, err = newGRPCServer(cfg); err != nil {
 		return nil, err
 	}
-	types.RegisterQuotaLeaseServiceServer(h.grpcServer, hub.NewQuotaLeaseServer(ledger.NewRedis(h.rdb), cfgManager, tierStore))
+	leases := hub.NewQuotaLeaseServer(ledger.NewRedis(h.rdb), cfgManager, tierStore)
+	types.RegisterQuotaLeaseServiceServer(h.grpcServer, leases)
+	if cfg.Region != "" {
+		node, err := startRegion(ctx, cfg, ledger.NewRedis(h.rdb))
+		if err != nil {
+			return nil, err
+		}
+		leases.SetRegion(node)
+		types.RegisterRegionPeerServer(h.grpcServer, &hub.RegionServer{Leases: leases})
+		slog.Info("hub region", "region", cfg.Region, "peers", len(cfg.RegionPeers))
+	}
 	types.RegisterControlPlaneServer(h.grpcServer, control)
 	if h.grpcLn, err = net.Listen("tcp", cfg.GRPCAddr); err != nil {
 		return nil, fmt.Errorf("grpc listen %s: %w", cfg.GRPCAddr, err)
@@ -213,6 +255,38 @@ func watchReadiness(ctx context.Context, cfg Config, server *hub.HubServer, rdb 
 			server.SetPendingDependency("redis")
 		}
 	})
+}
+
+// startRegion connects to the peer regions' hubs and starts rebalancing.
+func startRegion(ctx context.Context, cfg Config, l *ledger.Redis) (*region.Node, error) {
+	node := &region.Node{Name: cfg.Region, Ledger: l, Peers: map[string]region.Peer{}}
+	creds := insecure.NewCredentials()
+	if !cfg.plaintext() {
+		tlsCfg, err := edge.ClientTLS(cfg.RegionServerName, cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("region peer TLS: %w", err)
+		}
+		creds = credentials.NewTLS(tlsCfg)
+	}
+	for name, addr := range cfg.RegionPeers {
+		if name == cfg.Region {
+			continue
+		}
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(creds))
+		if err != nil {
+			return nil, fmt.Errorf("region peer %s: %w", name, err)
+		}
+		go func() { <-ctx.Done(); _ = conn.Close() }()
+		node.Peers[name] = peerClient{types.NewRegionPeerClient(conn)}
+	}
+	go node.Run(ctx)
+	return node, nil
+}
+
+type peerClient struct{ c types.RegionPeerClient }
+
+func (p peerClient) Borrow(ctx context.Context, in *types.BorrowRequest) (*types.BorrowResponse, error) {
+	return p.c.Borrow(ctx, in)
 }
 
 // newRedis connects to one Redis, or to a Redis Cluster when REDIS_ADDRS

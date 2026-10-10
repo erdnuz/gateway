@@ -672,6 +672,23 @@
                 "description": "Tier used for a key whose tier cannot be looked up while the hub is unreachable (after any cached tier).",
                 "type": "string"
               },
+              "global": {
+                "additionalProperties": false,
+                "description": "Make the tier quotas global across regions (hubs started with HUB_REGION): each region enforces its share and borrows unused quota from the others, never exceeding the global quota. Fixed windows only.",
+                "properties": {
+                  "floors": {
+                    "additionalProperties": {
+                      "type": "number"
+                    },
+                    "description": "Each region's guaranteed share of every quota, 0 to 1 (e.g. {eu-west: 0.3, us-east: 0.3}). The rest of each key's quota belongs to its home region, chosen by hashing; shares move between regions with demand.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "floors"
+                ],
+                "type": "object"
+              },
               "lease_size": {
                 "description": "Tokens an edge asks the hub for per lease (the first lease for a key, or every lease with leasing.mode fixed). Default runtime.edge.lease_size.",
                 "type": "integer"

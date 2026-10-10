@@ -103,6 +103,21 @@ var (
 		Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256},
 	})
 
+	RegionTransfers = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_hub_region_transfers_total",
+		Help: "Attempts to borrow allocation from a peer region: credited, refused (nothing to spare), unreachable, late (window ended), lost.",
+	}, []string{"peer", "result"})
+
+	RegionTokensBorrowed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_region_tokens_borrowed_total",
+		Help: "Global-quota allocation this region borrowed from its peers.",
+	})
+
+	RegionTokensLent = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_region_tokens_lent_total",
+		Help: "Global-quota allocation this region lent to its peers.",
+	})
+
 	TokensReturned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "gate_hub_tokens_returned_total",
 		Help: "Unspent tokens edges gave back on drain or idle eviction, so leaving edges strand no quota.",

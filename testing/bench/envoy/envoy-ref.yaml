@@ -1,0 +1,52 @@
+# Envoy in front of the upstream, asking a rate-limit service for every
+# request with one descriptor: (key, <X-API-Key>). envoy-ref.yaml points at
+# envoyproxy/ratelimit, envoy-gate.yaml at gate limiter; nothing else differs.
+static_resources:
+  listeners:
+    - name: ingress
+      address: { socket_address: { address: 0.0.0.0, port_value: 8080 } }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress
+                route_config:
+                  virtual_hosts:
+                    - name: all
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: upstream
+                            rate_limits:
+                              - actions:
+                                  - request_headers: { header_name: x-api-key, descriptor_key: key }
+                http_filters:
+                  - name: envoy.filters.http.ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+                      domain: bench
+                      failure_mode_deny: false
+                      timeout: 1s
+                      rate_limit_service:
+                        transport_api_version: V3
+                        grpc_service: { envoy_grpc: { cluster_name: rls } }
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: upstream
+      type: STRICT_DNS
+      load_assignment:
+        cluster_name: upstream
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: upstream, port_value: 9000 } } } }] }]
+    - name: rls
+      type: STRICT_DNS
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config: { http2_protocol_options: {} }
+      load_assignment:
+        cluster_name: rls
+        endpoints: [{ lb_endpoints: [{ endpoint: { address: { socket_address: { address: ratelimit, port_value: 8081 } } } }] }]

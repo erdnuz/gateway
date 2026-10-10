@@ -1,0 +1,7 @@
+# envoyproxy/ratelimit: the same limit as Gate's, 500 per second per API key.
+domain: bench
+descriptors:
+  - key: key
+    rate_limit:
+      unit: second
+      requests_per_unit: 500

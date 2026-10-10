@@ -89,6 +89,7 @@ func TestT_CFG_01_OrphanFieldRegistry(t *testing.T) {
 		"runtime.edge",
 		"runtime.analytics",
 		"prefixes",
+		"descriptors",
 	}
 
 	var orphans []string
@@ -153,6 +154,10 @@ func collectJSONLeafPaths(t reflect.Type, prefix string, out map[string]struct{}
 			ft = ft.Elem()
 		}
 		if ft.Kind() == reflect.Struct && ft.PkgPath() != "time" {
+			if ft == t { // a recursive type (descriptor entries nest)
+				out[next] = struct{}{}
+				continue
+			}
 			collectJSONLeafPaths(ft, next, out)
 			continue
 		}

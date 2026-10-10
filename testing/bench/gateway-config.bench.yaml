@@ -1,0 +1,22 @@
+# yaml-language-server: $schema=../../schema/gate.schema.json
+# Benchmark limits: every API key may make 500 requests per second, through
+# a Gate edge (service bench) or through Envoy asking gate limiter (domain
+# bench, keyed by the X-API-Key header).
+version: 2
+services:
+  - name: bench
+    match: { path_prefix: /b/bench }
+    upstream: http://upstream:9000
+    limits:
+      window: 1s
+      tiers:
+        pro: { requests: 500 }
+    analytics: { enabled: false }
+descriptors:
+  - domain: bench
+    entries:
+      - key: key
+        limit: { requests: 500, window: 1s }
+runtime:
+  edge:
+    upstream_max_idle_conns: 512

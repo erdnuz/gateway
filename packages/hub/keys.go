@@ -35,14 +35,48 @@ type keyRecordJSON struct {
 	Hash string `json:"hash"`
 }
 
+// Key records share one Redis Cluster hash tag, so creating or deleting a
+// key (record plus index) is one transaction on one shard.
 const (
-	keyIndex    = "hub:keys"
-	keyRecordNS = "hub:key:"
-	auditStream = "hub:audit"
-	auditMaxLen = 10000
+	keyIndex    = "hub:{keys}"
+	keyRecordNS = "hub:{keys}:"
+	// The layout before hash tags, migrated by MigrateKeyLayout.
+	legacyKeyIndex    = "hub:keys"
+	legacyKeyRecordNS = "hub:key:"
+	auditStream       = "hub:audit"
+	auditMaxLen       = 10000
 )
 
 var errNoKey = errors.New("no such key")
+
+// MigrateKeyLayout moves key records written before the Cluster-ready
+// layout to it. It is idempotent and a no-op on a fresh Redis.
+func MigrateKeyLayout(ctx context.Context, rdb redis.UniversalClient) error {
+	ids, err := rdb.SMembers(ctx, legacyKeyIndex).Result()
+	if err != nil || len(ids) == 0 {
+		return err
+	}
+	for _, id := range ids {
+		b, err := rdb.Get(ctx, legacyKeyRecordNS+id).Bytes()
+		if errors.Is(err, redis.Nil) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
+			p.Set(ctx, keyRecordNS+id, b, 0)
+			p.SAdd(ctx, keyIndex, id)
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := rdb.Del(ctx, legacyKeyRecordNS+id).Err(); err != nil {
+			return err
+		}
+	}
+	return rdb.Del(ctx, legacyKeyIndex).Err()
+}
 
 func (s *HubServer) loadKey(ctx context.Context, id string) (*KeyRecord, error) {
 	b, err := s.rdb.Get(ctx, keyRecordNS+id).Bytes()

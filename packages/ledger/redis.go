@@ -13,7 +13,7 @@ import (
 // so they live on the same Cluster slot.
 //
 // KEYS: base[, parent base]
-// ARGV: algo, limit, window_ms, rate, target, edge, active_ms, ttl_ms, parent_limit, parent_window_ms
+// ARGV: algo, limit, window_ms, rate, target, edge, active_ms, ttl_ms, parent_limit, parent_window_ms, alloc_base
 var grantLua = redis.NewScript(`
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
@@ -39,6 +39,9 @@ else
   reset = (wid + 1) * win - now
   expires = reset
   key = KEYS[1] .. ':' .. wid
+  if tonumber(ARGV[11]) >= 0 then
+    limit = tonumber(ARGV[11]) + tonumber(redis.call('GET', KEYS[1] .. ':alloc:' .. wid) or 0)
+  end
   local used = tonumber(redis.call('GET', key) or 0)
   if algo == 'sliding_window' then
     local prev = tonumber(redis.call('GET', KEYS[1] .. ':' .. (wid - 1)) or 0)
@@ -170,7 +173,7 @@ func (in grantInput) keys() []string {
 func (in grantInput) argv() []any {
 	return []any{
 		string(in.algo), in.limit, in.win, strconv.FormatFloat(in.rate, 'g', -1, 64),
-		in.target, in.edge, in.activeMs, in.ttl, in.plimit, in.pwin,
+		in.target, in.edge, in.activeMs, in.ttl, in.plimit, in.pwin, in.allocBase,
 	}
 }
 

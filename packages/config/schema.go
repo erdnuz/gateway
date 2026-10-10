@@ -115,6 +115,7 @@ type Limits struct {
 	Leasing   *Leasing     `yaml:"leasing,omitempty" desc:"How the hub sizes the grants it leases to edges. Default adaptive: each grant covers what the asking edge spends in 2s."`
 	Org       *OrgLimit    `yaml:"org,omitempty" desc:"A budget shared by every key with the same owner (API keys) or the same org claim (JWT), on top of each key's tier."`
 	Also      []ExtraLimit `yaml:"also,omitempty" desc:"Further limits every request must also fit: per key, per client IP, or across the whole service."`
+	Global    *Global      `yaml:"global,omitempty" desc:"Make the tier quotas global across regions (hubs started with HUB_REGION): each region enforces its share and borrows unused quota from the others, never exceeding the global quota. Fixed windows only."`
 	Cost      *Cost        `yaml:"cost,omitempty" desc:"Charge what each request actually cost, as the upstream reports it after the response (e.g. LLM tokens), instead of a fixed cost per method."`
 }
 
@@ -125,6 +126,11 @@ type Tier struct {
 	Algorithm string           `yaml:"algorithm,omitempty" desc:"Overrides limits.algorithm for this tier." enum:"fixed_window,sliding_window,token_bucket"`
 	Rate      Rate             `yaml:"rate,omitempty" desc:"token_bucket: refill rate, e.g. 20/s or 1200/m."`
 	Burst     uint32           `yaml:"burst,omitempty" desc:"token_bucket: the most cost admitted at once (the bucket's size)."`
+}
+
+// Global splits quotas between regions.
+type Global struct {
+	Floors map[string]float64 `yaml:"floors" desc:"Each region's guaranteed share of every quota, 0 to 1 (e.g. {eu-west: 0.3, us-east: 0.3}). The rest of each key's quota belongs to its home region, chosen by hashing; shares move between regions with demand."`
 }
 
 // Leasing tunes grant sizing.

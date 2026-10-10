@@ -80,6 +80,11 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 			httpx.WriteProblem(w, r, http.StatusTooManyRequests, "rate_limited", detail)
 			return
 		}
+		// The hub window the caller's quota was charged to: lets clients and
+		// load tests attribute requests to windows exactly.
+		if win := res.Results[0].Window; win > 0 {
+			w.Header().Set("Gate-Window", strconv.FormatInt(win, 10))
+		}
 		if st.entry != nil && res.Binding.Limit > 0 {
 			used := res.Binding.Limit - res.Binding.Remaining
 			st.entry.LimitUsed = uint64(max(used, 0))
