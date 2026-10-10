@@ -122,6 +122,84 @@ type ServiceConfig struct {
 	Host          string        `json:"host,omitempty"`           // required Host; empty = any
 	Timeout       time.Duration `json:"timeout,omitempty"`        // whole upstream exchange, retries included
 	MaxBodyBytes  int64         `json:"max_body_bytes,omitempty"` // request body limit; 0 = edge default
+
+	// Limits are enforced on top of the caller's tier; a request must fit
+	// every one of them.
+	Limits []LimitSpec `json:"limits,omitempty"`
+	// Org, when set, is a budget shared by every key of one owner.
+	Org *OrgLimit `json:"org,omitempty"`
+	// Shadow evaluates the tier limit without enforcing it.
+	Shadow bool `json:"shadow,omitempty"`
+	// Cost, when set, charges the actual cost reported by the upstream
+	// instead of a fixed cost per method.
+	Cost *CostPolicy `json:"cost,omitempty"`
+	// Lease tunes how the hub sizes grants for this service.
+	Lease LeasePolicy `json:"lease,omitempty"`
+}
+
+// LimitSpec is one additional limit on a service.
+type LimitSpec struct {
+	ID        string        `json:"id"`
+	Per       string        `json:"per"` // key (default), client_ip or service
+	Algorithm string        `json:"algorithm,omitempty"`
+	Quota     int64         `json:"quota"` // per window, or the bucket's burst
+	Window    time.Duration `json:"window,omitempty"`
+	Rate      float64       `json:"rate,omitempty"` // token bucket: per second
+	Shadow    bool          `json:"shadow,omitempty"`
+}
+
+// Limit subjects.
+const (
+	PerKey      = "key"
+	PerClientIP = "client_ip"
+	PerService  = "service"
+)
+
+// ServiceSubject is the subject of a service-wide limit.
+const ServiceSubject = "_service"
+
+// OrgLimit is a budget shared by every key with the same owner.
+type OrgLimit struct {
+	Quota  int64         `json:"quota"`
+	Window time.Duration `json:"window"`
+	Claim  string        `json:"claim,omitempty"` // JWT claim naming the org
+}
+
+// CostPolicy charges what a request actually cost, as the upstream reports
+// it, after the response: the edge reserves an estimate up front and settles
+// the difference.
+type CostPolicy struct {
+	Estimate       int64  `json:"estimate,omitempty"`
+	EstimateHeader string `json:"estimate_header,omitempty"`
+	ActualHeader   string `json:"actual_header"`
+	OnMissing      string `json:"on_missing,omitempty"` // estimate (default) or refund
+	MaxDebt        int64  `json:"max_debt,omitempty"`
+}
+
+// LeasePolicy tunes grant sizing. Adaptive (the default) sizes each grant to
+// what the asking edge spends over Horizon; fixed grants the lease size.
+type LeasePolicy struct {
+	Mode    string        `json:"mode,omitempty"` // adaptive (default) or fixed
+	Horizon time.Duration `json:"horizon,omitempty"`
+	Min     int64         `json:"min,omitempty"`
+	Max     int64         `json:"max,omitempty"`
+}
+
+// Default adaptive leasing.
+const (
+	DefaultLeaseHorizon = 2 * time.Second
+	DefaultLeaseMin     = 1
+)
+
+// Adaptive reports whether grants follow demand.
+func (p LeasePolicy) Adaptive() bool { return p.Mode != "fixed" }
+
+// EffectiveHorizon is the horizon with its default.
+func (p LeasePolicy) EffectiveHorizon() time.Duration {
+	if p.Horizon > 0 {
+		return p.Horizon
+	}
+	return DefaultLeaseHorizon
 }
 
 // CircuitBreakerConfig ejects an upstream target after consecutive failures.

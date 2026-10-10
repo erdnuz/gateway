@@ -34,7 +34,20 @@ type QuotaLeaseRequest struct {
 	// tier_id is the tier the edge resolved. The hub trusts it only for
 	// services whose callers are not API keys (jwt, none); for API keys it
 	// uses its own record.
-	TierId        string `protobuf:"bytes,5,opt,name=tier_id,json=tierId,proto3" json:"tier_id,omitempty"`
+	TierId string `protobuf:"bytes,5,opt,name=tier_id,json=tierId,proto3" json:"tier_id,omitempty"`
+	// limit_id names the limit: empty is the caller's tier limit, anything
+	// else one of the service's additional limits. The hub resolves the quota
+	// itself; an edge never sends one.
+	LimitId string `protobuf:"bytes,6,opt,name=limit_id,json=limitId,proto3" json:"limit_id,omitempty"`
+	// edge_id identifies the edge, so the hub can split the last of a quota
+	// fairly between the edges actively spending it.
+	EdgeId string `protobuf:"bytes,7,opt,name=edge_id,json=edgeId,proto3" json:"edge_id,omitempty"`
+	// observed_rate is the cost per second this edge has been spending on the
+	// quota; the hub sizes adaptive grants from it.
+	ObservedRate float64 `protobuf:"fixed64,8,opt,name=observed_rate,json=observedRate,proto3" json:"observed_rate,omitempty"`
+	// org is the caller's organisation as the edge resolved it (a JWT claim).
+	// Like tier_id, the hub trusts it only for services without API keys.
+	Org           string `protobuf:"bytes,9,opt,name=org,proto3" json:"org,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -104,6 +117,34 @@ func (x *QuotaLeaseRequest) GetTierId() string {
 	return ""
 }
 
+func (x *QuotaLeaseRequest) GetLimitId() string {
+	if x != nil {
+		return x.LimitId
+	}
+	return ""
+}
+
+func (x *QuotaLeaseRequest) GetEdgeId() string {
+	if x != nil {
+		return x.EdgeId
+	}
+	return ""
+}
+
+func (x *QuotaLeaseRequest) GetObservedRate() float64 {
+	if x != nil {
+		return x.ObservedRate
+	}
+	return 0
+}
+
+func (x *QuotaLeaseRequest) GetOrg() string {
+	if x != nil {
+		return x.Org
+	}
+	return ""
+}
+
 type QuotaLeaseResponse struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	GrantedTokens   int64                  `protobuf:"varint,1,opt,name=granted_tokens,json=grantedTokens,proto3" json:"granted_tokens,omitempty"`
@@ -114,9 +155,18 @@ type QuotaLeaseResponse struct {
 	WaitingForCapacity bool `protobuf:"varint,4,opt,name=waiting_for_capacity,json=waitingForCapacity,proto3" json:"waiting_for_capacity,omitempty"`
 	// retry_after_ms is the Hub's hint for when the Edge should retry the lease
 	// request. Only set when waiting_for_capacity is true.
-	RetryAfterMs  int64 `protobuf:"varint,5,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RetryAfterMs int64 `protobuf:"varint,5,opt,name=retry_after_ms,json=retryAfterMs,proto3" json:"retry_after_ms,omitempty"`
+	// The hub's clock defines windows. window_id names the window the tokens
+	// belong to; expires_in_ms and reset_in_ms are measured from when the hub
+	// made the grant, so they hold whatever the edge's clock says.
+	WindowId       int64 `protobuf:"varint,6,opt,name=window_id,json=windowId,proto3" json:"window_id,omitempty"`
+	ExpiresInMs    int64 `protobuf:"varint,7,opt,name=expires_in_ms,json=expiresInMs,proto3" json:"expires_in_ms,omitempty"` // the tokens' remaining lifetime
+	ResetInMs      int64 `protobuf:"varint,8,opt,name=reset_in_ms,json=resetInMs,proto3" json:"reset_in_ms,omitempty"`       // until the quota is whole again
+	ActiveEdges    int64 `protobuf:"varint,9,opt,name=active_edges,json=activeEdges,proto3" json:"active_edges,omitempty"`   // edges sharing the quota right now
+	ParentWindowId int64 `protobuf:"varint,10,opt,name=parent_window_id,json=parentWindowId,proto3" json:"parent_window_id,omitempty"`
+	Limit          int64 `protobuf:"varint,11,opt,name=limit,proto3" json:"limit,omitempty"` // the quota the hub enforced
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *QuotaLeaseResponse) Reset() {
@@ -184,6 +234,405 @@ func (x *QuotaLeaseResponse) GetRetryAfterMs() int64 {
 	return 0
 }
 
+func (x *QuotaLeaseResponse) GetWindowId() int64 {
+	if x != nil {
+		return x.WindowId
+	}
+	return 0
+}
+
+func (x *QuotaLeaseResponse) GetExpiresInMs() int64 {
+	if x != nil {
+		return x.ExpiresInMs
+	}
+	return 0
+}
+
+func (x *QuotaLeaseResponse) GetResetInMs() int64 {
+	if x != nil {
+		return x.ResetInMs
+	}
+	return 0
+}
+
+func (x *QuotaLeaseResponse) GetActiveEdges() int64 {
+	if x != nil {
+		return x.ActiveEdges
+	}
+	return 0
+}
+
+func (x *QuotaLeaseResponse) GetParentWindowId() int64 {
+	if x != nil {
+		return x.ParentWindowId
+	}
+	return 0
+}
+
+func (x *QuotaLeaseResponse) GetLimit() int64 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+// A batch of lease requests answered in one round trip. Results are in
+// request order; a failed item carries a gRPC status code and message.
+type QuotaLeaseBatchRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Requests      []*QuotaLeaseRequest   `protobuf:"bytes,1,rep,name=requests,proto3" json:"requests,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QuotaLeaseBatchRequest) Reset() {
+	*x = QuotaLeaseBatchRequest{}
+	mi := &file_api_proto_quota_lease_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuotaLeaseBatchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuotaLeaseBatchRequest) ProtoMessage() {}
+
+func (x *QuotaLeaseBatchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_quota_lease_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuotaLeaseBatchRequest.ProtoReflect.Descriptor instead.
+func (*QuotaLeaseBatchRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *QuotaLeaseBatchRequest) GetRequests() []*QuotaLeaseRequest {
+	if x != nil {
+		return x.Requests
+	}
+	return nil
+}
+
+type QuotaLeaseResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Response      *QuotaLeaseResponse    `protobuf:"bytes,1,opt,name=response,proto3" json:"response,omitempty"`
+	Code          int32                  `protobuf:"varint,2,opt,name=code,proto3" json:"code,omitempty"` // google.rpc.Code; 0 is OK
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QuotaLeaseResult) Reset() {
+	*x = QuotaLeaseResult{}
+	mi := &file_api_proto_quota_lease_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuotaLeaseResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuotaLeaseResult) ProtoMessage() {}
+
+func (x *QuotaLeaseResult) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_quota_lease_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuotaLeaseResult.ProtoReflect.Descriptor instead.
+func (*QuotaLeaseResult) Descriptor() ([]byte, []int) {
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *QuotaLeaseResult) GetResponse() *QuotaLeaseResponse {
+	if x != nil {
+		return x.Response
+	}
+	return nil
+}
+
+func (x *QuotaLeaseResult) GetCode() int32 {
+	if x != nil {
+		return x.Code
+	}
+	return 0
+}
+
+func (x *QuotaLeaseResult) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type QuotaLeaseBatchResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Results       []*QuotaLeaseResult    `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QuotaLeaseBatchResponse) Reset() {
+	*x = QuotaLeaseBatchResponse{}
+	mi := &file_api_proto_quota_lease_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QuotaLeaseBatchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QuotaLeaseBatchResponse) ProtoMessage() {}
+
+func (x *QuotaLeaseBatchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_quota_lease_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QuotaLeaseBatchResponse.ProtoReflect.Descriptor instead.
+func (*QuotaLeaseBatchResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *QuotaLeaseBatchResponse) GetResults() []*QuotaLeaseResult {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
+// LeaseReturn gives unspent tokens back to the window they were granted in.
+// Negative tokens settle debt from post-hoc costs.
+type LeaseReturn struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Prefix         string                 `protobuf:"bytes,1,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	ServiceId      string                 `protobuf:"bytes,2,opt,name=service_id,json=serviceId,proto3" json:"service_id,omitempty"`
+	ApiKey         string                 `protobuf:"bytes,3,opt,name=api_key,json=apiKey,proto3" json:"api_key,omitempty"`
+	LimitId        string                 `protobuf:"bytes,4,opt,name=limit_id,json=limitId,proto3" json:"limit_id,omitempty"`
+	TierId         string                 `protobuf:"bytes,5,opt,name=tier_id,json=tierId,proto3" json:"tier_id,omitempty"`
+	Org            string                 `protobuf:"bytes,6,opt,name=org,proto3" json:"org,omitempty"`
+	WindowId       int64                  `protobuf:"varint,7,opt,name=window_id,json=windowId,proto3" json:"window_id,omitempty"`
+	ParentWindowId int64                  `protobuf:"varint,8,opt,name=parent_window_id,json=parentWindowId,proto3" json:"parent_window_id,omitempty"`
+	Tokens         int64                  `protobuf:"varint,9,opt,name=tokens,proto3" json:"tokens,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *LeaseReturn) Reset() {
+	*x = LeaseReturn{}
+	mi := &file_api_proto_quota_lease_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LeaseReturn) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaseReturn) ProtoMessage() {}
+
+func (x *LeaseReturn) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_quota_lease_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaseReturn.ProtoReflect.Descriptor instead.
+func (*LeaseReturn) Descriptor() ([]byte, []int) {
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *LeaseReturn) GetPrefix() string {
+	if x != nil {
+		return x.Prefix
+	}
+	return ""
+}
+
+func (x *LeaseReturn) GetServiceId() string {
+	if x != nil {
+		return x.ServiceId
+	}
+	return ""
+}
+
+func (x *LeaseReturn) GetApiKey() string {
+	if x != nil {
+		return x.ApiKey
+	}
+	return ""
+}
+
+func (x *LeaseReturn) GetLimitId() string {
+	if x != nil {
+		return x.LimitId
+	}
+	return ""
+}
+
+func (x *LeaseReturn) GetTierId() string {
+	if x != nil {
+		return x.TierId
+	}
+	return ""
+}
+
+func (x *LeaseReturn) GetOrg() string {
+	if x != nil {
+		return x.Org
+	}
+	return ""
+}
+
+func (x *LeaseReturn) GetWindowId() int64 {
+	if x != nil {
+		return x.WindowId
+	}
+	return 0
+}
+
+func (x *LeaseReturn) GetParentWindowId() int64 {
+	if x != nil {
+		return x.ParentWindowId
+	}
+	return 0
+}
+
+func (x *LeaseReturn) GetTokens() int64 {
+	if x != nil {
+		return x.Tokens
+	}
+	return 0
+}
+
+type ReturnLeasesRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	EdgeId string                 `protobuf:"bytes,1,opt,name=edge_id,json=edgeId,proto3" json:"edge_id,omitempty"`
+	// dedupe makes a retried call apply once.
+	Dedupe        string         `protobuf:"bytes,2,opt,name=dedupe,proto3" json:"dedupe,omitempty"`
+	Returns       []*LeaseReturn `protobuf:"bytes,3,rep,name=returns,proto3" json:"returns,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReturnLeasesRequest) Reset() {
+	*x = ReturnLeasesRequest{}
+	mi := &file_api_proto_quota_lease_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReturnLeasesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReturnLeasesRequest) ProtoMessage() {}
+
+func (x *ReturnLeasesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_quota_lease_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReturnLeasesRequest.ProtoReflect.Descriptor instead.
+func (*ReturnLeasesRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ReturnLeasesRequest) GetEdgeId() string {
+	if x != nil {
+		return x.EdgeId
+	}
+	return ""
+}
+
+func (x *ReturnLeasesRequest) GetDedupe() string {
+	if x != nil {
+		return x.Dedupe
+	}
+	return ""
+}
+
+func (x *ReturnLeasesRequest) GetReturns() []*LeaseReturn {
+	if x != nil {
+		return x.Returns
+	}
+	return nil
+}
+
+type ReturnLeasesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReturnLeasesResponse) Reset() {
+	*x = ReturnLeasesResponse{}
+	mi := &file_api_proto_quota_lease_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReturnLeasesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReturnLeasesResponse) ProtoMessage() {}
+
+func (x *ReturnLeasesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_quota_lease_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReturnLeasesResponse.ProtoReflect.Descriptor instead.
+func (*ReturnLeasesResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{7}
+}
+
 type WatchRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	EdgeId        string                 `protobuf:"bytes,1,opt,name=edge_id,json=edgeId,proto3" json:"edge_id,omitempty"`
@@ -193,7 +642,7 @@ type WatchRequest struct {
 
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
-	mi := &file_api_proto_quota_lease_proto_msgTypes[2]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -205,7 +654,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_quota_lease_proto_msgTypes[2]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -218,7 +667,7 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{2}
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WatchRequest) GetEdgeId() string {
@@ -244,7 +693,7 @@ type ControlEvent struct {
 
 func (x *ControlEvent) Reset() {
 	*x = ControlEvent{}
-	mi := &file_api_proto_quota_lease_proto_msgTypes[3]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -256,7 +705,7 @@ func (x *ControlEvent) String() string {
 func (*ControlEvent) ProtoMessage() {}
 
 func (x *ControlEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_quota_lease_proto_msgTypes[3]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -269,7 +718,7 @@ func (x *ControlEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlEvent.ProtoReflect.Descriptor instead.
 func (*ControlEvent) Descriptor() ([]byte, []int) {
-	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ControlEvent) GetEvent() isControlEvent_Event {
@@ -329,7 +778,7 @@ type ConfigSnapshot struct {
 
 func (x *ConfigSnapshot) Reset() {
 	*x = ConfigSnapshot{}
-	mi := &file_api_proto_quota_lease_proto_msgTypes[4]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -341,7 +790,7 @@ func (x *ConfigSnapshot) String() string {
 func (*ConfigSnapshot) ProtoMessage() {}
 
 func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_quota_lease_proto_msgTypes[4]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -354,7 +803,7 @@ func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigSnapshot.ProtoReflect.Descriptor instead.
 func (*ConfigSnapshot) Descriptor() ([]byte, []int) {
-	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{4}
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ConfigSnapshot) GetConfigJson() []byte {
@@ -388,7 +837,7 @@ type CacheScope struct {
 
 func (x *CacheScope) Reset() {
 	*x = CacheScope{}
-	mi := &file_api_proto_quota_lease_proto_msgTypes[5]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -400,7 +849,7 @@ func (x *CacheScope) String() string {
 func (*CacheScope) ProtoMessage() {}
 
 func (x *CacheScope) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_quota_lease_proto_msgTypes[5]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -413,7 +862,7 @@ func (x *CacheScope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CacheScope.ProtoReflect.Descriptor instead.
 func (*CacheScope) Descriptor() ([]byte, []int) {
-	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{5}
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *CacheScope) GetPrefix() string {
@@ -442,7 +891,7 @@ type TierChange struct {
 
 func (x *TierChange) Reset() {
 	*x = TierChange{}
-	mi := &file_api_proto_quota_lease_proto_msgTypes[6]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -454,7 +903,7 @@ func (x *TierChange) String() string {
 func (*TierChange) ProtoMessage() {}
 
 func (x *TierChange) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_quota_lease_proto_msgTypes[6]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -467,7 +916,7 @@ func (x *TierChange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TierChange.ProtoReflect.Descriptor instead.
 func (*TierChange) Descriptor() ([]byte, []int) {
-	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{6}
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *TierChange) GetPrefix() string {
@@ -501,7 +950,7 @@ type ResolveKeyRequest struct {
 
 func (x *ResolveKeyRequest) Reset() {
 	*x = ResolveKeyRequest{}
-	mi := &file_api_proto_quota_lease_proto_msgTypes[7]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -513,7 +962,7 @@ func (x *ResolveKeyRequest) String() string {
 func (*ResolveKeyRequest) ProtoMessage() {}
 
 func (x *ResolveKeyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_quota_lease_proto_msgTypes[7]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -526,7 +975,7 @@ func (x *ResolveKeyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveKeyRequest.ProtoReflect.Descriptor instead.
 func (*ResolveKeyRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{7}
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ResolveKeyRequest) GetPrefix() string {
@@ -546,13 +995,14 @@ func (x *ResolveKeyRequest) GetApiKey() string {
 type ResolveKeyResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TierId        string                 `protobuf:"bytes,1,opt,name=tier_id,json=tierId,proto3" json:"tier_id,omitempty"` // empty: the key is unknown
+	Org           string                 `protobuf:"bytes,2,opt,name=org,proto3" json:"org,omitempty"`                     // the key's organisation, if it has one
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ResolveKeyResponse) Reset() {
 	*x = ResolveKeyResponse{}
-	mi := &file_api_proto_quota_lease_proto_msgTypes[8]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -564,7 +1014,7 @@ func (x *ResolveKeyResponse) String() string {
 func (*ResolveKeyResponse) ProtoMessage() {}
 
 func (x *ResolveKeyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_quota_lease_proto_msgTypes[8]
+	mi := &file_api_proto_quota_lease_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -577,7 +1027,7 @@ func (x *ResolveKeyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveKeyResponse.ProtoReflect.Descriptor instead.
 func (*ResolveKeyResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{8}
+	return file_api_proto_quota_lease_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ResolveKeyResponse) GetTierId() string {
@@ -587,24 +1037,66 @@ func (x *ResolveKeyResponse) GetTierId() string {
 	return ""
 }
 
+func (x *ResolveKeyResponse) GetOrg() string {
+	if x != nil {
+		return x.Org
+	}
+	return ""
+}
+
 var File_api_proto_quota_lease_proto protoreflect.FileDescriptor
 
 const file_api_proto_quota_lease_proto_rawDesc = "" +
 	"\n" +
-	"\x1bapi/proto/quota_lease.proto\x12\rgate.quota.v1\"\xa7\x01\n" +
+	"\x1bapi/proto/quota_lease.proto\x12\rgate.quota.v1\"\x92\x02\n" +
 	"\x11QuotaLeaseRequest\x12\x16\n" +
 	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x02 \x01(\tR\tserviceId\x12\x17\n" +
 	"\aapi_key\x18\x03 \x01(\tR\x06apiKey\x12)\n" +
 	"\x10requested_tokens\x18\x04 \x01(\x03R\x0frequestedTokens\x12\x17\n" +
-	"\atier_id\x18\x05 \x01(\tR\x06tierId\"\xea\x01\n" +
+	"\atier_id\x18\x05 \x01(\tR\x06tierId\x12\x19\n" +
+	"\blimit_id\x18\x06 \x01(\tR\alimitId\x12\x17\n" +
+	"\aedge_id\x18\a \x01(\tR\x06edgeId\x12#\n" +
+	"\robserved_rate\x18\b \x01(\x01R\fobservedRate\x12\x10\n" +
+	"\x03org\x18\t \x01(\tR\x03org\"\xae\x03\n" +
 	"\x12QuotaLeaseResponse\x12%\n" +
 	"\x0egranted_tokens\x18\x01 \x01(\x03R\rgrantedTokens\x12*\n" +
 	"\x11lease_ttl_seconds\x18\x02 \x01(\x03R\x0fleaseTtlSeconds\x12)\n" +
 	"\x10remaining_global\x18\x03 \x01(\x03R\x0fremainingGlobal\x120\n" +
 	"\x14waiting_for_capacity\x18\x04 \x01(\bR\x12waitingForCapacity\x12$\n" +
-	"\x0eretry_after_ms\x18\x05 \x01(\x03R\fretryAfterMs\"'\n" +
+	"\x0eretry_after_ms\x18\x05 \x01(\x03R\fretryAfterMs\x12\x1b\n" +
+	"\twindow_id\x18\x06 \x01(\x03R\bwindowId\x12\"\n" +
+	"\rexpires_in_ms\x18\a \x01(\x03R\vexpiresInMs\x12\x1e\n" +
+	"\vreset_in_ms\x18\b \x01(\x03R\tresetInMs\x12!\n" +
+	"\factive_edges\x18\t \x01(\x03R\vactiveEdges\x12(\n" +
+	"\x10parent_window_id\x18\n" +
+	" \x01(\x03R\x0eparentWindowId\x12\x14\n" +
+	"\x05limit\x18\v \x01(\x03R\x05limit\"V\n" +
+	"\x16QuotaLeaseBatchRequest\x12<\n" +
+	"\brequests\x18\x01 \x03(\v2 .gate.quota.v1.QuotaLeaseRequestR\brequests\"\x7f\n" +
+	"\x10QuotaLeaseResult\x12=\n" +
+	"\bresponse\x18\x01 \x01(\v2!.gate.quota.v1.QuotaLeaseResponseR\bresponse\x12\x12\n" +
+	"\x04code\x18\x02 \x01(\x05R\x04code\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"T\n" +
+	"\x17QuotaLeaseBatchResponse\x129\n" +
+	"\aresults\x18\x01 \x03(\v2\x1f.gate.quota.v1.QuotaLeaseResultR\aresults\"\x82\x02\n" +
+	"\vLeaseReturn\x12\x16\n" +
+	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x1d\n" +
+	"\n" +
+	"service_id\x18\x02 \x01(\tR\tserviceId\x12\x17\n" +
+	"\aapi_key\x18\x03 \x01(\tR\x06apiKey\x12\x19\n" +
+	"\blimit_id\x18\x04 \x01(\tR\alimitId\x12\x17\n" +
+	"\atier_id\x18\x05 \x01(\tR\x06tierId\x12\x10\n" +
+	"\x03org\x18\x06 \x01(\tR\x03org\x12\x1b\n" +
+	"\twindow_id\x18\a \x01(\x03R\bwindowId\x12(\n" +
+	"\x10parent_window_id\x18\b \x01(\x03R\x0eparentWindowId\x12\x16\n" +
+	"\x06tokens\x18\t \x01(\x03R\x06tokens\"|\n" +
+	"\x13ReturnLeasesRequest\x12\x17\n" +
+	"\aedge_id\x18\x01 \x01(\tR\x06edgeId\x12\x16\n" +
+	"\x06dedupe\x18\x02 \x01(\tR\x06dedupe\x124\n" +
+	"\areturns\x18\x03 \x03(\v2\x1a.gate.quota.v1.LeaseReturnR\areturns\"\x16\n" +
+	"\x14ReturnLeasesResponse\"'\n" +
 	"\fWatchRequest\x12\x17\n" +
 	"\aedge_id\x18\x01 \x01(\tR\x06edgeId\"\x81\x01\n" +
 	"\fControlEvent\x127\n" +
@@ -631,11 +1123,14 @@ const file_api_proto_quota_lease_proto_rawDesc = "" +
 	"\atier_id\x18\x03 \x01(\tR\x06tierId\"D\n" +
 	"\x11ResolveKeyRequest\x12\x16\n" +
 	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x17\n" +
-	"\aapi_key\x18\x02 \x01(\tR\x06apiKey\"-\n" +
+	"\aapi_key\x18\x02 \x01(\tR\x06apiKey\"?\n" +
 	"\x12ResolveKeyResponse\x12\x17\n" +
-	"\atier_id\x18\x01 \x01(\tR\x06tierId2m\n" +
+	"\atier_id\x18\x01 \x01(\tR\x06tierId\x12\x10\n" +
+	"\x03org\x18\x02 \x01(\tR\x03org2\xab\x02\n" +
 	"\x11QuotaLeaseService\x12X\n" +
-	"\x11RequestQuotaLease\x12 .gate.quota.v1.QuotaLeaseRequest\x1a!.gate.quota.v1.QuotaLeaseResponse2\xa6\x01\n" +
+	"\x11RequestQuotaLease\x12 .gate.quota.v1.QuotaLeaseRequest\x1a!.gate.quota.v1.QuotaLeaseResponse\x12c\n" +
+	"\x12RequestQuotaLeases\x12%.gate.quota.v1.QuotaLeaseBatchRequest\x1a&.gate.quota.v1.QuotaLeaseBatchResponse\x12W\n" +
+	"\fReturnLeases\x12\".gate.quota.v1.ReturnLeasesRequest\x1a#.gate.quota.v1.ReturnLeasesResponse2\xa6\x01\n" +
 	"\fControlPlane\x12C\n" +
 	"\x05Watch\x12\x1b.gate.quota.v1.WatchRequest\x1a\x1b.gate.quota.v1.ControlEvent0\x01\x12Q\n" +
 	"\n" +
@@ -653,33 +1148,47 @@ func file_api_proto_quota_lease_proto_rawDescGZIP() []byte {
 	return file_api_proto_quota_lease_proto_rawDescData
 }
 
-var file_api_proto_quota_lease_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_api_proto_quota_lease_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_api_proto_quota_lease_proto_goTypes = []any{
-	(*QuotaLeaseRequest)(nil),  // 0: gate.quota.v1.QuotaLeaseRequest
-	(*QuotaLeaseResponse)(nil), // 1: gate.quota.v1.QuotaLeaseResponse
-	(*WatchRequest)(nil),       // 2: gate.quota.v1.WatchRequest
-	(*ControlEvent)(nil),       // 3: gate.quota.v1.ControlEvent
-	(*ConfigSnapshot)(nil),     // 4: gate.quota.v1.ConfigSnapshot
-	(*CacheScope)(nil),         // 5: gate.quota.v1.CacheScope
-	(*TierChange)(nil),         // 6: gate.quota.v1.TierChange
-	(*ResolveKeyRequest)(nil),  // 7: gate.quota.v1.ResolveKeyRequest
-	(*ResolveKeyResponse)(nil), // 8: gate.quota.v1.ResolveKeyResponse
+	(*QuotaLeaseRequest)(nil),       // 0: gate.quota.v1.QuotaLeaseRequest
+	(*QuotaLeaseResponse)(nil),      // 1: gate.quota.v1.QuotaLeaseResponse
+	(*QuotaLeaseBatchRequest)(nil),  // 2: gate.quota.v1.QuotaLeaseBatchRequest
+	(*QuotaLeaseResult)(nil),        // 3: gate.quota.v1.QuotaLeaseResult
+	(*QuotaLeaseBatchResponse)(nil), // 4: gate.quota.v1.QuotaLeaseBatchResponse
+	(*LeaseReturn)(nil),             // 5: gate.quota.v1.LeaseReturn
+	(*ReturnLeasesRequest)(nil),     // 6: gate.quota.v1.ReturnLeasesRequest
+	(*ReturnLeasesResponse)(nil),    // 7: gate.quota.v1.ReturnLeasesResponse
+	(*WatchRequest)(nil),            // 8: gate.quota.v1.WatchRequest
+	(*ControlEvent)(nil),            // 9: gate.quota.v1.ControlEvent
+	(*ConfigSnapshot)(nil),          // 10: gate.quota.v1.ConfigSnapshot
+	(*CacheScope)(nil),              // 11: gate.quota.v1.CacheScope
+	(*TierChange)(nil),              // 12: gate.quota.v1.TierChange
+	(*ResolveKeyRequest)(nil),       // 13: gate.quota.v1.ResolveKeyRequest
+	(*ResolveKeyResponse)(nil),      // 14: gate.quota.v1.ResolveKeyResponse
 }
 var file_api_proto_quota_lease_proto_depIdxs = []int32{
-	4, // 0: gate.quota.v1.ControlEvent.config:type_name -> gate.quota.v1.ConfigSnapshot
-	6, // 1: gate.quota.v1.ControlEvent.tier:type_name -> gate.quota.v1.TierChange
-	5, // 2: gate.quota.v1.ConfigSnapshot.invalidate:type_name -> gate.quota.v1.CacheScope
-	0, // 3: gate.quota.v1.QuotaLeaseService.RequestQuotaLease:input_type -> gate.quota.v1.QuotaLeaseRequest
-	2, // 4: gate.quota.v1.ControlPlane.Watch:input_type -> gate.quota.v1.WatchRequest
-	7, // 5: gate.quota.v1.ControlPlane.ResolveKey:input_type -> gate.quota.v1.ResolveKeyRequest
-	1, // 6: gate.quota.v1.QuotaLeaseService.RequestQuotaLease:output_type -> gate.quota.v1.QuotaLeaseResponse
-	3, // 7: gate.quota.v1.ControlPlane.Watch:output_type -> gate.quota.v1.ControlEvent
-	8, // 8: gate.quota.v1.ControlPlane.ResolveKey:output_type -> gate.quota.v1.ResolveKeyResponse
-	6, // [6:9] is the sub-list for method output_type
-	3, // [3:6] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	0,  // 0: gate.quota.v1.QuotaLeaseBatchRequest.requests:type_name -> gate.quota.v1.QuotaLeaseRequest
+	1,  // 1: gate.quota.v1.QuotaLeaseResult.response:type_name -> gate.quota.v1.QuotaLeaseResponse
+	3,  // 2: gate.quota.v1.QuotaLeaseBatchResponse.results:type_name -> gate.quota.v1.QuotaLeaseResult
+	5,  // 3: gate.quota.v1.ReturnLeasesRequest.returns:type_name -> gate.quota.v1.LeaseReturn
+	10, // 4: gate.quota.v1.ControlEvent.config:type_name -> gate.quota.v1.ConfigSnapshot
+	12, // 5: gate.quota.v1.ControlEvent.tier:type_name -> gate.quota.v1.TierChange
+	11, // 6: gate.quota.v1.ConfigSnapshot.invalidate:type_name -> gate.quota.v1.CacheScope
+	0,  // 7: gate.quota.v1.QuotaLeaseService.RequestQuotaLease:input_type -> gate.quota.v1.QuotaLeaseRequest
+	2,  // 8: gate.quota.v1.QuotaLeaseService.RequestQuotaLeases:input_type -> gate.quota.v1.QuotaLeaseBatchRequest
+	6,  // 9: gate.quota.v1.QuotaLeaseService.ReturnLeases:input_type -> gate.quota.v1.ReturnLeasesRequest
+	8,  // 10: gate.quota.v1.ControlPlane.Watch:input_type -> gate.quota.v1.WatchRequest
+	13, // 11: gate.quota.v1.ControlPlane.ResolveKey:input_type -> gate.quota.v1.ResolveKeyRequest
+	1,  // 12: gate.quota.v1.QuotaLeaseService.RequestQuotaLease:output_type -> gate.quota.v1.QuotaLeaseResponse
+	4,  // 13: gate.quota.v1.QuotaLeaseService.RequestQuotaLeases:output_type -> gate.quota.v1.QuotaLeaseBatchResponse
+	7,  // 14: gate.quota.v1.QuotaLeaseService.ReturnLeases:output_type -> gate.quota.v1.ReturnLeasesResponse
+	9,  // 15: gate.quota.v1.ControlPlane.Watch:output_type -> gate.quota.v1.ControlEvent
+	14, // 16: gate.quota.v1.ControlPlane.ResolveKey:output_type -> gate.quota.v1.ResolveKeyResponse
+	12, // [12:17] is the sub-list for method output_type
+	7,  // [7:12] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_quota_lease_proto_init() }
@@ -687,7 +1196,7 @@ func file_api_proto_quota_lease_proto_init() {
 	if File_api_proto_quota_lease_proto != nil {
 		return
 	}
-	file_api_proto_quota_lease_proto_msgTypes[3].OneofWrappers = []any{
+	file_api_proto_quota_lease_proto_msgTypes[9].OneofWrappers = []any{
 		(*ControlEvent_Config)(nil),
 		(*ControlEvent_Tier)(nil),
 	}
@@ -697,7 +1206,7 @@ func file_api_proto_quota_lease_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_quota_lease_proto_rawDesc), len(file_api_proto_quota_lease_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

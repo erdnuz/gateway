@@ -16,6 +16,19 @@ message QuotaLeaseRequest {
   // services whose callers are not API keys (jwt, none); for API keys it
   // uses its own record.
   string tier_id = 5;
+  // limit_id names the limit: empty is the caller's tier limit, anything
+  // else one of the service's additional limits. The hub resolves the quota
+  // itself; an edge never sends one.
+  string limit_id = 6;
+  // edge_id identifies the edge, so the hub can split the last of a quota
+  // fairly between the edges actively spending it.
+  string edge_id = 7;
+  // observed_rate is the cost per second this edge has been spending on the
+  // quota; the hub sizes adaptive grants from it.
+  double observed_rate = 8;
+  // org is the caller's organisation as the edge resolved it (a JWT claim).
+  // Like tier_id, the hub trusts it only for services without API keys.
+  string org = 9;
 }
 
 message QuotaLeaseResponse {
@@ -28,10 +41,60 @@ message QuotaLeaseResponse {
   // retry_after_ms is the Hub's hint for when the Edge should retry the lease
   // request. Only set when waiting_for_capacity is true.
   int64 retry_after_ms = 5;
+  // The hub's clock defines windows. window_id names the window the tokens
+  // belong to; expires_in_ms and reset_in_ms are measured from when the hub
+  // made the grant, so they hold whatever the edge's clock says.
+  int64 window_id = 6;
+  int64 expires_in_ms = 7; // the tokens' remaining lifetime
+  int64 reset_in_ms = 8;   // until the quota is whole again
+  int64 active_edges = 9;  // edges sharing the quota right now
+  int64 parent_window_id = 10;
+  int64 limit = 11;        // the quota the hub enforced
 }
+
+// A batch of lease requests answered in one round trip. Results are in
+// request order; a failed item carries a gRPC status code and message.
+message QuotaLeaseBatchRequest {
+  repeated QuotaLeaseRequest requests = 1;
+}
+
+message QuotaLeaseResult {
+  QuotaLeaseResponse response = 1;
+  int32 code = 2; // google.rpc.Code; 0 is OK
+  string message = 3;
+}
+
+message QuotaLeaseBatchResponse {
+  repeated QuotaLeaseResult results = 1;
+}
+
+// LeaseReturn gives unspent tokens back to the window they were granted in.
+// Negative tokens settle debt from post-hoc costs.
+message LeaseReturn {
+  string prefix = 1;
+  string service_id = 2;
+  string api_key = 3;
+  string limit_id = 4;
+  string tier_id = 5;
+  string org = 6;
+  int64 window_id = 7;
+  int64 parent_window_id = 8;
+  int64 tokens = 9;
+}
+
+message ReturnLeasesRequest {
+  string edge_id = 1;
+  // dedupe makes a retried call apply once.
+  string dedupe = 2;
+  repeated LeaseReturn returns = 3;
+}
+
+message ReturnLeasesResponse {}
 
 service QuotaLeaseService {
   rpc RequestQuotaLease(QuotaLeaseRequest) returns (QuotaLeaseResponse);
+  rpc RequestQuotaLeases(QuotaLeaseBatchRequest) returns (QuotaLeaseBatchResponse);
+  rpc ReturnLeases(ReturnLeasesRequest) returns (ReturnLeasesResponse);
 }
 
 message WatchRequest {
@@ -78,6 +141,7 @@ message ResolveKeyRequest {
 
 message ResolveKeyResponse {
   string tier_id = 1; // empty: the key is unknown
+  string org = 2;     // the key's organisation, if it has one
 }
 
 service ControlPlane {

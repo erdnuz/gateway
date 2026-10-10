@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gateway/packages/common/types"
+
+	"gopkg.in/yaml.v3"
 )
 
 const basic = `
@@ -335,5 +337,109 @@ services:
 		if !got[path] {
 			t.Errorf("no problem reported at %s (got %v)", path, got)
 		}
+	}
+}
+
+func TestCompile_V3Limits(t *testing.T) {
+	cfg, err := Load("../../examples/limits.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	search := cfg.Prefixes[0].Services[0]
+	tiers := map[string]types.TierConfig{}
+	for _, tc := range search.Tiers {
+		tiers[tc.TierID] = tc
+	}
+	if tiers["free"].Algorithm != "" || tiers["pro"].Algorithm != "sliding_window" {
+		t.Fatalf("tier algorithms: %+v", tiers)
+	}
+	if b := tiers["burst"]; b.Algorithm != "token_bucket" || b.Quota != 200 || b.Rate != 20 {
+		t.Fatalf("token bucket tier: %+v", b)
+	}
+	if search.Org == nil || search.Org.Quota != 20000 {
+		t.Fatalf("org: %+v", search.Org)
+	}
+	if len(search.Limits) != 2 || search.Limits[0].Per != types.PerClientIP || search.Limits[0].Quota != 600 {
+		t.Fatalf("limits: %+v", search.Limits)
+	}
+	if g := search.Limits[1]; g.Per != types.PerService || !g.Shadow || g.Rate != 2000 || g.Quota != 4000 {
+		t.Fatalf("upstream guard: %+v", g)
+	}
+	if !search.Lease.Adaptive() || search.Lease.EffectiveHorizon() != 2*time.Second {
+		t.Fatalf("leasing: %+v", search.Lease)
+	}
+	chat := cfg.Prefixes[0].Services[1]
+	if c := chat.Cost; c == nil || c.ActualHeader != "X-Usage-Total-Tokens" || c.Estimate != 1000 || c.MaxDebt != 8000 {
+		t.Fatalf("cost: %+v", chat.Cost)
+	}
+	out, err := Marshal(FromInternal(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := ParseAndCompile(out, "roundtrip")
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !reflect.DeepEqual(again.Prefixes, cfg.Prefixes) {
+		t.Fatalf("round trip changed limits:\n%s", out)
+	}
+}
+
+func TestParse_V3LimitProblems(t *testing.T) {
+	doc := `version: 2
+services:
+  - name: orders
+    match: { path_prefix: /v1/orders }
+    upstream: http://orders
+    limits:
+      window: 1m
+      mode: dry
+      tiers:
+        a: { algorithm: token_bucket, requests: 5 }
+        b: { requests: 5, rate: 2/s }
+      also:
+        - { name: a, per: user, requests: 1 }
+        - { name: x, algorithm: token_bucket, rate: 3, burst: 1 }
+      cost: { estimate: 5 }
+`
+	got := map[string]bool{}
+	for _, p := range problems(t, doc) {
+		got[p.Path] = true
+	}
+	for _, path := range []string{
+		"services[0].limits.mode",
+		"services[0].limits.tiers.a.rate",
+		"services[0].limits.tiers.a.burst",
+		"services[0].limits.tiers.a.requests",
+		"services[0].limits.tiers.b",
+		"services[0].limits.also[0].name",
+		"services[0].limits.also[0].per",
+		"services[0].limits.cost.actual_header",
+	} {
+		if !got[path] {
+			t.Errorf("no problem reported at %s (got %v)", path, got)
+		}
+	}
+	// "3" without a unit is a type error with a hint.
+	found := false
+	for _, p := range problems(t, doc) {
+		found = found || strings.Contains(p.Msg, "needs a unit")
+	}
+	if !found {
+		t.Error("a rate without a unit was accepted")
+	}
+}
+
+func TestRate_ParsesUnits(t *testing.T) {
+	for in, want := range map[string]float64{"20/s": 20, "1200/m": 20, "7200/h": 2, "0.5/s": 0.5} {
+		var f struct {
+			R Rate `yaml:"r"`
+		}
+		if err := yaml.Unmarshal([]byte("r: "+in), &f); err != nil || f.R.PerSecond() != want {
+			t.Errorf("%s: %v %v", in, f.R, err)
+		}
+	}
+	if Rate(20).String() != "20/s" || Rate(0.5).String() != "30/m" {
+		t.Errorf("String: %s %s", Rate(20), Rate(0.5))
 	}
 }

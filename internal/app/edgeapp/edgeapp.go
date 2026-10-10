@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,6 +109,7 @@ type Edge struct {
 	httpServer *http.Server
 	ln         net.Listener
 	hub        *edge.HubClient
+	lease      *limiter.Lease
 	closers    []func()
 }
 
@@ -150,7 +154,14 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 
 	// Quota state lives in this process only: edges share nothing but the
 	// hub, so they scale out without coordinating with each other.
-	lease := limiter.NewLease(hub, limiter.LeaseOptions{LeaseSize: cfg.LeaseSize, LowWaterPct: cfg.LeaseLowWaterPct})
+	// Concurrent lease requests share batched RPCs, and the hub splits the
+	// last of a quota between the edges it knows are spending it.
+	edgeID := cfg.EdgeID
+	if edgeID == "" {
+		edgeID = defaultEdgeID()
+	}
+	lease := limiter.NewLease(limiter.NewBatcher(hub), limiter.LeaseOptions{LeaseSize: cfg.LeaseSize, LowWaterPct: cfg.LeaseLowWaterPct, EdgeID: edgeID})
+	e.lease = lease
 
 	responses := edge.NewMemoryResponses(cfg.CacheBytes)
 	if cfg.RedisAddr != "" {
@@ -173,7 +184,7 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 		Limiter:   lease,
 		Analytics: sink,
 		Responses: responses,
-	}, edge.Options{EdgeID: cfg.EdgeID, AdminToken: cfg.AdminToken})
+	}, edge.Options{EdgeID: edgeID, AdminToken: cfg.AdminToken})
 	server.StartBackgroundWorkers(ctx)
 	server.StartReadinessProbe(ctx)
 	if bootstrap == nil {
@@ -204,10 +215,28 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 }
 
 // Shutdown stops accepting requests and waits for in-flight ones.
+//
+// Once no request can be admitted any more, the edge gives its unspent
+// tokens back to the hub, so leaving mid-window strands no quota.
 func (e *Edge) Shutdown(ctx context.Context) error {
 	err := e.httpServer.Shutdown(ctx)
+	if e.lease != nil {
+		if derr := e.lease.Drain(ctx); derr != nil {
+			slog.Warn("returning leases on shutdown failed; they expire with their window", "err", derr)
+		}
+	}
 	e.close()
 	return err
+}
+
+// defaultEdgeID names an edge that was not given EDGE_ID: its hostname (a
+// container ID under Docker) plus a random suffix, unique per process.
+func defaultEdgeID() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "edge"
+	}
+	return host + "-" + strconv.FormatUint(rand.Uint64()%1e6, 36)
 }
 
 func (e *Edge) close() {

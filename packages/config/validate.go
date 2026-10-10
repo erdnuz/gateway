@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 var (
@@ -243,8 +244,9 @@ func (p *parser) validateLimits(path string, l Limits) {
 		if !tierRe.MatchString(name) {
 			p.at(tp, "tier name %q must be letters, digits, dashes or underscores", name)
 		}
-		if t.Requests == 0 {
-			p.at(tp+".requests", "must be greater than 0")
+		p.validateBudget(tp, orDefault(t.Algorithm, l.Algorithm), t.Requests, t.Rate, t.Burst)
+		if t.Algorithm != "" && !algorithms[t.Algorithm] {
+			p.at(tp+".algorithm", "must be fixed_window, sliding_window or token_bucket (got %q)", t.Algorithm)
 		}
 		for m, c := range t.Cost {
 			if !costMethods[m] {
@@ -265,6 +267,105 @@ func (p *parser) validateLimits(path string, l Limits) {
 	}
 	if l.LeaseSize < 0 {
 		p.at(path+".lease_size", "must not be negative")
+	}
+	p.validateV3Limits(path, l, names)
+}
+
+var (
+	algorithms = map[string]bool{"fixed_window": true, "sliding_window": true, "token_bucket": true}
+	modes      = map[string]bool{"": true, "enforce": true, "shadow": true}
+	subjects   = map[string]bool{"": true, "key": true, "client_ip": true, "service": true}
+)
+
+// validateBudget checks a tier's or limit's size for its algorithm: a token
+// bucket has a rate and a burst; the windowed algorithms have requests.
+func (p *parser) validateBudget(path, algo string, requests uint32, rate Rate, burst uint32) {
+	if algo == "token_bucket" {
+		if rate <= 0 {
+			p.at(path+".rate", "is required for token_bucket, e.g. 20/s")
+		}
+		if burst == 0 {
+			p.at(path+".burst", "is required for token_bucket (the most admitted at once)")
+		}
+		if requests != 0 {
+			p.at(path+".requests", "does not apply to token_bucket; use rate and burst")
+		}
+		return
+	}
+	if requests == 0 {
+		p.at(path+".requests", "must be greater than 0")
+	}
+	if rate != 0 || burst != 0 {
+		p.at(path, "rate and burst apply only to algorithm token_bucket")
+	}
+}
+
+func (p *parser) validateV3Limits(path string, l Limits, tiers []string) {
+	if l.Algorithm != "" && !algorithms[l.Algorithm] {
+		p.at(path+".algorithm", "must be fixed_window, sliding_window or token_bucket (got %q)", l.Algorithm)
+	}
+	if !modes[l.Mode] {
+		p.at(path+".mode", "must be enforce or shadow (got %q)", l.Mode)
+	}
+	if lp := l.Leasing; lp != nil {
+		if lp.Mode != "" && lp.Mode != "adaptive" && lp.Mode != "fixed" {
+			p.at(path+".leasing.mode", "must be adaptive or fixed (got %q)", lp.Mode)
+		}
+		if lp.Min < 0 || lp.Max < 0 {
+			p.at(path+".leasing", "min and max must not be negative")
+		}
+		if lp.Max > 0 && lp.Min > lp.Max {
+			p.at(path+".leasing.min", "%d is more than max (%d)", lp.Min, lp.Max)
+		}
+	}
+	if o := l.Org; o != nil {
+		if o.Requests == 0 {
+			p.at(path+".org.requests", "must be greater than 0")
+		}
+		if o.Window != 0 && o.Window < Duration(time.Second) {
+			p.at(path+".org.window", "must be at least 1s")
+		}
+	}
+	seen := map[string]int{}
+	for _, t := range tiers {
+		seen[t] = -1
+	}
+	for i, a := range l.Also {
+		ap := fmt.Sprintf("%s.also[%d]", path, i)
+		if !nameRe.MatchString(a.Name) {
+			p.at(ap+".name", "%q must be lowercase letters, digits and dashes", a.Name)
+		} else if j, dup := seen[a.Name]; dup {
+			if j >= 0 {
+				p.at(ap+".name", "%q is already used by also[%d]", a.Name, j)
+			} else {
+				p.at(ap+".name", "%q is already the name of a tier", a.Name)
+			}
+		}
+		seen[a.Name] = i
+		if !subjects[a.Per] {
+			p.at(ap+".per", "must be key, client_ip or service (got %q)", a.Per)
+		}
+		if a.Algorithm != "" && !algorithms[a.Algorithm] {
+			p.at(ap+".algorithm", "must be fixed_window, sliding_window or token_bucket (got %q)", a.Algorithm)
+		}
+		if !modes[a.Mode] {
+			p.at(ap+".mode", "must be enforce or shadow (got %q)", a.Mode)
+		}
+		if a.Window != 0 && a.Window < Duration(time.Second) {
+			p.at(ap+".window", "must be at least 1s")
+		}
+		p.validateBudget(ap, a.Algorithm, a.Requests, a.Rate, a.Burst)
+	}
+	if c := l.Cost; c != nil {
+		if strings.TrimSpace(c.ActualHeader) == "" {
+			p.at(path+".cost.actual_header", "is required: the response header (or trailer) carrying the actual cost")
+		}
+		if c.OnMissing != "" && c.OnMissing != "estimate" && c.OnMissing != "refund" {
+			p.at(path+".cost.on_missing", "must be estimate or refund (got %q)", c.OnMissing)
+		}
+		if c.Estimate < 0 || c.MaxDebt < 0 {
+			p.at(path+".cost", "estimate and max_debt must not be negative")
+		}
 	}
 }
 

@@ -20,6 +20,13 @@ func schemaFor(t reflect.Type) map[string]any {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	if t == rateType {
+		return map[string]any{
+			"type":     "string",
+			"pattern":  `^[0-9]+(\.[0-9]+)?/(s|m|h)$`,
+			"examples": []string{"20/s", "1200/m", "5000/h"},
+		}
+	}
 	if t == durationType {
 		return map[string]any{
 			"type":     "string",

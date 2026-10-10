@@ -73,13 +73,18 @@ func (s *HubServer) saveKey(ctx context.Context, rec *KeyRecord) error {
 	return err
 }
 
-// assign makes hash resolve to tier on every edge (tier "" revokes it).
-func (s *HubServer) assign(ctx context.Context, group, hash, tier string) error {
+// assign makes hash resolve to tier on every edge (tier "" revokes it) and
+// records its owner (nil leaves it), whose keys share any org budget.
+func (s *HubServer) assign(ctx context.Context, group, hash, tier string, owner *string) error {
 	var err error
 	if tier == "" {
+		owner = new(string)
 		err = s.tierManager.DeleteTier(ctx, group, hash)
 	} else {
 		err = s.tierManager.SetTier(ctx, group, hash, tier)
+	}
+	if owners, ok := s.tierManager.(OwnerStore); ok && err == nil && owner != nil {
+		err = owners.SetOwner(ctx, group, hash, *owner)
 	}
 	if err == nil {
 		s.publishTier(group, hash, tier)
@@ -157,7 +162,7 @@ func (s *HubServer) createKey(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, r, "createKey.save", err)
 		return
 	}
-	if err := s.assign(r.Context(), group, rec.Hash, tier); err != nil {
+	if err := s.assign(r.Context(), group, rec.Hash, tier, &rec.Owner); err != nil {
 		s.writeInternalError(w, r, "createKey.assign", err)
 		return
 	}
@@ -224,6 +229,7 @@ func (s *HubServer) updateKey(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		rec.Name = deref(req.Name)
 	}
+	ownerChanged := req.Owner != nil
 	tierChanged := req.Tier != nil && deref(req.Tier) != rec.Tier
 	if tierChanged {
 		if !s.tierDefinedInPrefix(rec.Group, deref(req.Tier)) {
@@ -236,8 +242,8 @@ func (s *HubServer) updateKey(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, r, "updateKey.save", err)
 		return
 	}
-	if tierChanged {
-		if err := s.assign(r.Context(), rec.Group, rec.Hash, rec.Tier); err != nil {
+	if tierChanged || ownerChanged {
+		if err := s.assign(r.Context(), rec.Group, rec.Hash, rec.Tier, &rec.Owner); err != nil {
 			s.writeInternalError(w, r, "updateKey.assign", err)
 			return
 		}
@@ -261,11 +267,11 @@ func (s *HubServer) rotateKey(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, r, "rotateKey.save", err)
 		return
 	}
-	if err := s.assign(r.Context(), rec.Group, rec.Hash, rec.Tier); err != nil {
+	if err := s.assign(r.Context(), rec.Group, rec.Hash, rec.Tier, &rec.Owner); err != nil {
 		s.writeInternalError(w, r, "rotateKey.assign", err)
 		return
 	}
-	if err := s.assign(r.Context(), rec.Group, oldHash, ""); err != nil {
+	if err := s.assign(r.Context(), rec.Group, oldHash, "", nil); err != nil {
 		s.writeInternalError(w, r, "rotateKey.revoke", err)
 		return
 	}
@@ -278,7 +284,7 @@ func (s *HubServer) deleteKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.assign(r.Context(), rec.Group, rec.Hash, ""); err != nil {
+	if err := s.assign(r.Context(), rec.Group, rec.Hash, "", nil); err != nil {
 		s.writeInternalError(w, r, "deleteKey.revoke", err)
 		return
 	}

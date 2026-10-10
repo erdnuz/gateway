@@ -17,13 +17,14 @@ import (
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		st := stateOf(r)
+		st.clientIP = clientIP(r)
 		var id, tierID string
 		var ok bool
 		switch st.svc.AuthType() {
 		case "jwt":
 			id, tierID, ok = s.bearerToken(w, r, st)
 		case "none":
-			id, tierID, ok = keys.Hash("ip:"+clientIP(r)), defaultTier(st.svc), true
+			id, tierID, ok = keys.Hash("ip:"+st.clientIP), defaultTier(st.svc), true
 		default:
 			id, tierID, ok = s.apiKey(w, r, st)
 		}
@@ -95,6 +96,9 @@ func (s *Server) bearerToken(w http.ResponseWriter, r *http.Request, st *request
 		if t, _ := claims[cfg.TierClaim].(string); t != "" {
 			tier = t
 		}
+	}
+	if o := st.svc.Org; o != nil && o.Claim != "" {
+		st.org, _ = claims[o.Claim].(string)
 	}
 	return keys.Hash("jwt:" + iss + ":" + sub), tier, true
 }

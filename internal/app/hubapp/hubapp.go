@@ -23,6 +23,7 @@ import (
 	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 	"gateway/packages/hub"
+	"gateway/packages/ledger"
 
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
@@ -39,7 +40,10 @@ type Config struct {
 	AuthToken  string
 	ReadToken  string // optional read-only admin token
 
-	RedisAddr         string
+	RedisAddr string
+	// RedisAddrs, when it lists several addresses, selects Redis Cluster:
+	// the ledger's hash tags keep every grant on one shard.
+	RedisAddrs        []string
 	EnforceNoEviction bool
 	EdgeOrigins       []string
 	MetricsAddr       string // Prometheus /metrics; empty disables it
@@ -61,6 +65,7 @@ func FromEnv() Config {
 		AuthToken:          strings.TrimSpace(config.String("HUB_AUTH_TOKEN", "")),
 		ReadToken:          strings.TrimSpace(config.String("HUB_READ_TOKEN", "")),
 		RedisAddr:          config.String("REDIS_ADDR", "localhost:6379"),
+		RedisAddrs:         appkit.SplitCSV(config.String("REDIS_ADDRS", "")),
 		EnforceNoEviction:  config.Bool("HUB_ENFORCE_REDIS_NOEVICTION", true),
 		EdgeOrigins:        appkit.SplitCSV(config.String("HUB_EDGE_ALLOWED_ORIGINS", "")),
 		MetricsAddr:        config.String("METRICS_ADDR", ":9100"),
@@ -105,7 +110,7 @@ type Hub struct {
 	httpLn     net.Listener
 	grpcServer *grpc.Server
 	grpcLn     net.Listener
-	rdb        *redis.Client
+	rdb        redis.UniversalClient
 }
 
 // Addr is the address the admin HTTP API listens on.
@@ -126,15 +131,7 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	}
 	policy := cfgManager.HubPolicy()
 
-	h := &Hub{rdb: redis.NewClient(&redis.Options{
-		Addr:         cfg.RedisAddr,
-		DialTimeout:  200 * time.Millisecond,
-		ReadTimeout:  300 * time.Millisecond,
-		WriteTimeout: 300 * time.Millisecond,
-		PoolTimeout:  500 * time.Millisecond,
-		PoolSize:     64,
-		MinIdleConns: 16,
-	})}
+	h := &Hub{rdb: newRedis(cfg)}
 	ok := false
 	defer func() {
 		if !ok {
@@ -161,7 +158,7 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	if h.grpcServer, err = newGRPCServer(cfg); err != nil {
 		return nil, err
 	}
-	types.RegisterQuotaLeaseServiceServer(h.grpcServer, hub.NewQuotaLeaseServer(h.rdb, cfgManager, tierStore))
+	types.RegisterQuotaLeaseServiceServer(h.grpcServer, hub.NewQuotaLeaseServer(ledger.NewRedis(h.rdb), cfgManager, tierStore))
 	types.RegisterControlPlaneServer(h.grpcServer, control)
 	if h.grpcLn, err = net.Listen("tcp", cfg.GRPCAddr); err != nil {
 		return nil, fmt.Errorf("grpc listen %s: %w", cfg.GRPCAddr, err)
@@ -195,12 +192,12 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 }
 
 // watchReadiness keeps /readyz in step with Redis, the hub's only dependency.
-func watchReadiness(ctx context.Context, cfg Config, server *hub.HubServer, rdb *redis.Client) {
+func watchReadiness(ctx context.Context, cfg Config, server *hub.HubServer, rdb redis.UniversalClient) {
 	ready.NewReadyWatcher("hub", 500*time.Millisecond, 5*time.Second).WatchAll(ctx, []ready.Check{{
 		Name: "redis",
 		URL:  cfg.RedisAddr,
 		Probe: func(probeCtx context.Context) error {
-			if err := rdb.Ping(probeCtx).Err(); err != nil {
+			if err := ping(probeCtx, rdb); err != nil {
 				return err
 			}
 			if cfg.EnforceNoEviction {
@@ -216,6 +213,35 @@ func watchReadiness(ctx context.Context, cfg Config, server *hub.HubServer, rdb 
 			server.SetPendingDependency("redis")
 		}
 	})
+}
+
+// newRedis connects to one Redis, or to a Redis Cluster when REDIS_ADDRS
+// lists several seed nodes.
+func newRedis(cfg Config) redis.UniversalClient {
+	opts := &redis.UniversalOptions{
+		Addrs:        []string{cfg.RedisAddr},
+		DialTimeout:  200 * time.Millisecond,
+		ReadTimeout:  300 * time.Millisecond,
+		WriteTimeout: 300 * time.Millisecond,
+		PoolTimeout:  500 * time.Millisecond,
+		PoolSize:     64,
+		MinIdleConns: 16,
+	}
+	if len(cfg.RedisAddrs) > 0 {
+		opts.Addrs = cfg.RedisAddrs
+	}
+	if len(opts.Addrs) > 1 {
+		return redis.NewClusterClient(opts.Cluster())
+	}
+	return redis.NewClient(opts.Simple())
+}
+
+// ping checks every shard of a cluster, or the one Redis.
+func ping(ctx context.Context, rdb redis.UniversalClient) error {
+	if c, ok := rdb.(*redis.ClusterClient); ok {
+		return c.ForEachShard(ctx, func(ctx context.Context, s *redis.Client) error { return s.Ping(ctx).Err() })
+	}
+	return rdb.Ping(ctx).Err()
 }
 
 // Shutdown stops accepting requests and waits for in-flight ones.
@@ -247,7 +273,10 @@ func Run(ctx context.Context, cfg Config) error {
 
 // checkNoEviction verifies that hub Redis will never evict lease or tier
 // keys. It only checks: server configuration belongs to whoever runs Redis.
-func checkNoEviction(ctx context.Context, rdb *redis.Client) error {
+func checkNoEviction(ctx context.Context, rdb redis.UniversalClient) error {
+	if c, ok := rdb.(*redis.ClusterClient); ok {
+		return c.ForEachMaster(ctx, func(ctx context.Context, m *redis.Client) error { return checkNoEviction(ctx, m) })
+	}
 	res, err := rdb.ConfigGet(ctx, "maxmemory-policy").Result()
 	if err != nil {
 		return fmt.Errorf("config get maxmemory-policy: %w", err)

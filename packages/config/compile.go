@@ -75,15 +75,16 @@ func compileService(s Service) types.ServiceConfig {
 	}
 
 	for _, name := range sortedTierNames(s.Limits.Tiers) {
-		svc.Tiers = append(svc.Tiers, compileTier(name, s.Limits.Tiers[name]))
+		svc.Tiers = append(svc.Tiers, compileTier(name, s.Limits.Tiers[name], s.Limits.Algorithm))
 	}
+	compileLimits(&svc, s.Limits)
 	hubPolicy := types.HubFailurePolicy{TierLookupStrategy: "fail-closed"}
 	if s.Limits.DefaultTier != "" {
 		hubPolicy.TierLookupStrategy = "stale-or-default"
 		hubPolicy.DefaultTier = s.Limits.DefaultTier
 	}
 	if fb := s.Limits.WhenHubUnavailable; fb != nil {
-		safety := compileTier(safetyTierID, Tier{Requests: fb.Allow})
+		safety := compileTier(safetyTierID, Tier{Requests: fb.Allow}, "")
 		svc.SafetyTier = &safety
 		hubPolicy.AllowOnRateServiceError = true
 	}
@@ -140,7 +141,45 @@ func compileService(s Service) types.ServiceConfig {
 	return svc
 }
 
-func compileTier(name string, t Tier) types.TierConfig {
+// compileLimits carries the v3 limit settings: algorithms, shadow mode,
+// leasing, the org budget, additional limits and post-hoc cost.
+func compileLimits(svc *types.ServiceConfig, l Limits) {
+	svc.Shadow = l.Mode == "shadow"
+	if p := l.Leasing; p != nil {
+		svc.Lease = types.LeasePolicy{Mode: p.Mode, Horizon: p.Horizon.D(), Min: p.Min, Max: p.Max}
+	}
+	if o := l.Org; o != nil {
+		svc.Org = &types.OrgLimit{Quota: int64(o.Requests), Window: o.Window.D(), Claim: o.Claim}
+	}
+	for _, a := range l.Also {
+		spec := types.LimitSpec{
+			ID:        a.Name,
+			Per:       orDefault(a.Per, types.PerKey),
+			Algorithm: internalAlgo(a.Algorithm),
+			Quota:     int64(a.Requests),
+			Window:    a.Window.D(),
+			Shadow:    a.Mode == "shadow",
+		}
+		if spec.Algorithm == "token_bucket" {
+			spec.Quota, spec.Rate = int64(a.Burst), a.Rate.PerSecond()
+		}
+		svc.Limits = append(svc.Limits, spec)
+	}
+	if c := l.Cost; c != nil {
+		svc.Cost = &types.CostPolicy{Estimate: c.Estimate, EstimateHeader: c.EstimateHeader, ActualHeader: c.ActualHeader, OnMissing: c.OnMissing, MaxDebt: c.MaxDebt}
+	}
+}
+
+// internalAlgo stores the default algorithm as "", so configs that do not
+// use the others are unchanged on the wire.
+func internalAlgo(a string) string {
+	if a == "fixed_window" {
+		return ""
+	}
+	return a
+}
+
+func compileTier(name string, t Tier, defaultAlgo string) types.TierConfig {
 	cost := func(method string) uint8 {
 		if c, ok := t.Cost[method]; ok {
 			return c
@@ -150,7 +189,7 @@ func compileTier(name string, t Tier) types.TierConfig {
 		}
 		return 1
 	}
-	return types.TierConfig{
+	tc := types.TierConfig{
 		TierID:     name,
 		Quota:      t.Requests,
 		GetCost:    cost(http.MethodGet),
@@ -158,7 +197,12 @@ func compileTier(name string, t Tier) types.TierConfig {
 		PutCost:    cost(http.MethodPut),
 		DeleteCost: cost(http.MethodDelete),
 		OtherCost:  cost("*"),
+		Algorithm:  internalAlgo(orDefault(t.Algorithm, defaultAlgo)),
 	}
+	if tc.Algorithm == "token_bucket" {
+		tc.Quota, tc.Rate = t.Burst, t.Rate.PerSecond()
+	}
+	return tc
 }
 
 func compileRuntime(r Runtime) types.RuntimePolicy {
@@ -257,6 +301,7 @@ func serviceFromInternal(group string, p types.PrefixConfig, svc types.ServiceCo
 	for _, t := range svc.Tiers {
 		s.Limits.Tiers[t.TierID] = tierFromInternal(t)
 	}
+	limitsFromInternal(&s.Limits, svc)
 	hp := svc.Failure.EffectiveHubPolicy()
 	if hp.TierLookupStrategy != "fail-closed" && hp.DefaultTier != "" {
 		s.Limits.DefaultTier = hp.DefaultTier
@@ -301,8 +346,39 @@ func serviceFromInternal(group string, p types.PrefixConfig, svc types.ServiceCo
 	return s
 }
 
+func limitsFromInternal(l *Limits, svc types.ServiceConfig) {
+	if svc.Shadow {
+		l.Mode = "shadow"
+	}
+	if p := svc.Lease; p != (types.LeasePolicy{}) {
+		l.Leasing = &Leasing{Mode: p.Mode, Horizon: Duration(p.Horizon), Min: p.Min, Max: p.Max}
+	}
+	if o := svc.Org; o != nil {
+		l.Org = &OrgLimit{Requests: uint32(o.Quota), Window: Duration(o.Window), Claim: o.Claim}
+	}
+	for _, spec := range svc.Limits {
+		a := ExtraLimit{Name: spec.ID, Algorithm: spec.Algorithm, Requests: uint32(spec.Quota), Window: Duration(spec.Window)}
+		if spec.Per != types.PerKey {
+			a.Per = spec.Per
+		}
+		if spec.Algorithm == "token_bucket" {
+			a.Requests, a.Burst, a.Rate = 0, uint32(spec.Quota), Rate(spec.Rate)
+		}
+		if spec.Shadow {
+			a.Mode = "shadow"
+		}
+		l.Also = append(l.Also, a)
+	}
+	if c := svc.Cost; c != nil {
+		l.Cost = &Cost{Estimate: c.Estimate, EstimateHeader: c.EstimateHeader, ActualHeader: c.ActualHeader, OnMissing: c.OnMissing, MaxDebt: c.MaxDebt}
+	}
+}
+
 func tierFromInternal(t types.TierConfig) Tier {
-	out := Tier{Requests: t.Quota}
+	out := Tier{Requests: t.Quota, Algorithm: t.Algorithm}
+	if t.Algorithm == "token_bucket" {
+		out.Requests, out.Burst, out.Rate = 0, t.Quota, Rate(t.Rate)
+	}
 	add := func(m string, c uint8) {
 		if c > 1 {
 			if out.Cost == nil {

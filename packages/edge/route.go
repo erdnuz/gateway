@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gateway/packages/common/httpx"
@@ -15,17 +16,22 @@ import (
 
 // request is the per-request state the middleware chain fills in.
 type request struct {
-	scope   string // route group: the first path segment
-	service string
-	svc     *types.ServiceConfig
-	prefix  *types.PrefixConfig
-	pool    *pool
-	target  *target // the replica the current attempt uses
-	key     string  // SHA-256 of the caller's API key (keys.Hash)
-	tier    *types.TierConfig
-	entry   *types.AnalyticsEntry // nil when analytics is off
+	scope    string // route group: the first path segment
+	service  string
+	svc      *types.ServiceConfig
+	prefix   *types.PrefixConfig
+	pool     *pool
+	target   *target // the replica the current attempt uses
+	key      string  // SHA-256 of the caller's API key (keys.Hash)
+	tier     *types.TierConfig
+	org      string // the caller's org (a JWT claim; API-key orgs live on the hub)
+	clientIP string
+	entry    *types.AnalyticsEntry // nil when analytics is off
 
 	upstreamFailed bool // the response is a failure-policy fallback
+	// actual is the cost the upstream reported for a post-hoc-costed
+	// service (-1 until it does).
+	actual atomic.Int64
 }
 
 type requestKey struct{}

@@ -127,7 +127,9 @@ func upstreamPath(path string, strip bool) string {
 }
 
 func modifyResponse(resp *http.Response) error {
-	for _, k := range stateOf(resp.Request).svc.Transform.HideHeaders {
+	st := stateOf(resp.Request)
+	captureCost(resp, st)
+	for _, k := range st.svc.Transform.HideHeaders {
 		resp.Header.Del(k)
 	}
 	resp.Header.Del(httpx.HeaderRequestID) // the edge already sent its own

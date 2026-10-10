@@ -23,7 +23,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	QuotaLeaseService_RequestQuotaLease_FullMethodName = "/gate.quota.v1.QuotaLeaseService/RequestQuotaLease"
+	QuotaLeaseService_RequestQuotaLease_FullMethodName  = "/gate.quota.v1.QuotaLeaseService/RequestQuotaLease"
+	QuotaLeaseService_RequestQuotaLeases_FullMethodName = "/gate.quota.v1.QuotaLeaseService/RequestQuotaLeases"
+	QuotaLeaseService_ReturnLeases_FullMethodName       = "/gate.quota.v1.QuotaLeaseService/ReturnLeases"
 )
 
 // QuotaLeaseServiceClient is the client API for QuotaLeaseService service.
@@ -31,6 +33,8 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type QuotaLeaseServiceClient interface {
 	RequestQuotaLease(ctx context.Context, in *QuotaLeaseRequest, opts ...grpc.CallOption) (*QuotaLeaseResponse, error)
+	RequestQuotaLeases(ctx context.Context, in *QuotaLeaseBatchRequest, opts ...grpc.CallOption) (*QuotaLeaseBatchResponse, error)
+	ReturnLeases(ctx context.Context, in *ReturnLeasesRequest, opts ...grpc.CallOption) (*ReturnLeasesResponse, error)
 }
 
 type quotaLeaseServiceClient struct {
@@ -51,11 +55,33 @@ func (c *quotaLeaseServiceClient) RequestQuotaLease(ctx context.Context, in *Quo
 	return out, nil
 }
 
+func (c *quotaLeaseServiceClient) RequestQuotaLeases(ctx context.Context, in *QuotaLeaseBatchRequest, opts ...grpc.CallOption) (*QuotaLeaseBatchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(QuotaLeaseBatchResponse)
+	err := c.cc.Invoke(ctx, QuotaLeaseService_RequestQuotaLeases_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *quotaLeaseServiceClient) ReturnLeases(ctx context.Context, in *ReturnLeasesRequest, opts ...grpc.CallOption) (*ReturnLeasesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReturnLeasesResponse)
+	err := c.cc.Invoke(ctx, QuotaLeaseService_ReturnLeases_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // QuotaLeaseServiceServer is the server API for QuotaLeaseService service.
 // All implementations must embed UnimplementedQuotaLeaseServiceServer
 // for forward compatibility.
 type QuotaLeaseServiceServer interface {
 	RequestQuotaLease(context.Context, *QuotaLeaseRequest) (*QuotaLeaseResponse, error)
+	RequestQuotaLeases(context.Context, *QuotaLeaseBatchRequest) (*QuotaLeaseBatchResponse, error)
+	ReturnLeases(context.Context, *ReturnLeasesRequest) (*ReturnLeasesResponse, error)
 	mustEmbedUnimplementedQuotaLeaseServiceServer()
 }
 
@@ -68,6 +94,12 @@ type UnimplementedQuotaLeaseServiceServer struct{}
 
 func (UnimplementedQuotaLeaseServiceServer) RequestQuotaLease(context.Context, *QuotaLeaseRequest) (*QuotaLeaseResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RequestQuotaLease not implemented")
+}
+func (UnimplementedQuotaLeaseServiceServer) RequestQuotaLeases(context.Context, *QuotaLeaseBatchRequest) (*QuotaLeaseBatchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RequestQuotaLeases not implemented")
+}
+func (UnimplementedQuotaLeaseServiceServer) ReturnLeases(context.Context, *ReturnLeasesRequest) (*ReturnLeasesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReturnLeases not implemented")
 }
 func (UnimplementedQuotaLeaseServiceServer) mustEmbedUnimplementedQuotaLeaseServiceServer() {}
 func (UnimplementedQuotaLeaseServiceServer) testEmbeddedByValue()                           {}
@@ -108,6 +140,42 @@ func _QuotaLeaseService_RequestQuotaLease_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _QuotaLeaseService_RequestQuotaLeases_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(QuotaLeaseBatchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QuotaLeaseServiceServer).RequestQuotaLeases(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QuotaLeaseService_RequestQuotaLeases_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QuotaLeaseServiceServer).RequestQuotaLeases(ctx, req.(*QuotaLeaseBatchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _QuotaLeaseService_ReturnLeases_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReturnLeasesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(QuotaLeaseServiceServer).ReturnLeases(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: QuotaLeaseService_ReturnLeases_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(QuotaLeaseServiceServer).ReturnLeases(ctx, req.(*ReturnLeasesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // QuotaLeaseService_ServiceDesc is the grpc.ServiceDesc for QuotaLeaseService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -118,6 +186,14 @@ var QuotaLeaseService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RequestQuotaLease",
 			Handler:    _QuotaLeaseService_RequestQuotaLease_Handler,
+		},
+		{
+			MethodName: "RequestQuotaLeases",
+			Handler:    _QuotaLeaseService_RequestQuotaLeases_Handler,
+		},
+		{
+			MethodName: "ReturnLeases",
+			Handler:    _QuotaLeaseService_ReturnLeases_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

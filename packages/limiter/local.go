@@ -29,7 +29,16 @@ func (l *Local) Allow(_ context.Context, req Request) (Decision, error) {
 	}
 	d.Allowed = true
 	d.Remaining = req.Limit - used
+	d.adj, d.gen = w, w.id.Load()
 	return d, nil
+}
+
+// adjust re-charges an admitted request; a refund after the window rolled
+// is dropped.
+func (w *window) adjust(gen, delta, _ int64) {
+	if w.id.Load() == gen || delta > 0 {
+		w.consumed.Add(delta)
+	}
 }
 
 // Run evicts idle keys until ctx is done.

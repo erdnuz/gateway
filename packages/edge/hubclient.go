@@ -87,6 +87,24 @@ func (h *HubClient) RequestQuotaLease(ctx context.Context, in *types.QuotaLeaseR
 	return resp, err
 }
 
+// RequestQuotaLeases asks for many leases in one round trip.
+func (h *HubClient) RequestQuotaLeases(ctx context.Context, in *types.QuotaLeaseBatchRequest) (*types.QuotaLeaseBatchResponse, error) {
+	start := time.Now()
+	resp, err := h.leases.RequestQuotaLeases(ctx, in)
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	telemetry.LeaseRPCSeconds.WithLabelValues("batch_" + result).Observe(telemetry.Since(start))
+	telemetry.LeaseBatchSize.Observe(float64(len(in.GetRequests())))
+	return resp, err
+}
+
+// ReturnLeases gives unspent tokens back to the hub.
+func (h *HubClient) ReturnLeases(ctx context.Context, in *types.ReturnLeasesRequest) (*types.ReturnLeasesResponse, error) {
+	return h.leases.ReturnLeases(ctx, in)
+}
+
 // ResolveKey returns a key's tier ("" when the hub does not know the key).
 func (h *HubClient) ResolveKey(ctx context.Context, prefix, apiKey string) (string, error) {
 	resp, err := h.control.ResolveKey(ctx, &types.ResolveKeyRequest{Prefix: prefix, ApiKey: apiKey})

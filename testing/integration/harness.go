@@ -14,6 +14,7 @@ import (
 	"gateway/packages/edge"
 	"gateway/packages/hub"
 	"gateway/packages/keys"
+	"gateway/packages/ledger"
 	"gateway/packages/limiter"
 	"io"
 	"net"
@@ -262,7 +263,7 @@ func (h *integrationHarness) startLeaseGRPCServer(files *mtlsFiles, cfgMgr *hub.
 	}
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool, MinVersion: tls.VersionTLS13}
 	grpcSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsCfg)))
-	types.RegisterQuotaLeaseServiceServer(grpcSrv, hub.NewQuotaLeaseServer(h.rdb, cfgMgr, h.hubTierStore))
+	types.RegisterQuotaLeaseServiceServer(grpcSrv, hub.NewQuotaLeaseServer(ledger.NewRedis(h.rdb), cfgMgr, h.hubTierStore))
 	if h.hubControl != nil {
 		types.RegisterControlPlaneServer(grpcSrv, h.hubControl)
 	}

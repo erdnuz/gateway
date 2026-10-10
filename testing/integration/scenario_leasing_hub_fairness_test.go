@@ -11,6 +11,7 @@ import (
 
 	"gateway/packages/common/types"
 	"gateway/packages/hub"
+	"gateway/packages/ledger"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
@@ -136,7 +137,7 @@ func newHubLeaseServerForIntegrationTest(t *testing.T, quota uint32, period time
 		},
 	}
 	store := newStaticTierStore()
-	server := hub.NewQuotaLeaseServer(rdb, &staticConfigStore{cfg: cfg}, store)
+	server := hub.NewQuotaLeaseServer(ledger.NewRedis(rdb), &staticConfigStore{cfg: cfg}, store)
 	cleanup := func() {
 		_ = rdb.Close()
 		mr.Close()

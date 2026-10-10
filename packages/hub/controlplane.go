@@ -33,8 +33,8 @@ type ControlPlane struct {
 	types.UnimplementedControlPlaneServer
 	cfg    ConfigRegistry
 	tiers  TierStore
-	rdb    *redis.Client // nil: deliver to local watchers only (tests)
-	origin string        // identifies this hub's own messages
+	rdb    redis.UniversalClient // nil: deliver to local watchers only (tests)
+	origin string                // identifies this hub's own messages
 
 	mu       sync.Mutex
 	watchers map[chan *types.ControlEvent]struct{}
@@ -48,7 +48,7 @@ type controlMessage struct {
 	Tier       *types.TierChange               `json:"tier,omitempty"`
 }
 
-func NewControlPlane(cfg ConfigRegistry, tiers TierStore, rdb *redis.Client) *ControlPlane {
+func NewControlPlane(cfg ConfigRegistry, tiers TierStore, rdb redis.UniversalClient) *ControlPlane {
 	return &ControlPlane{cfg: cfg, tiers: tiers, rdb: rdb, origin: newBootID(), watchers: map[chan *types.ControlEvent]struct{}{}}
 }
 

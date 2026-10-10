@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=../schema/gate.schema.json
+# Every kind of limit Gate enforces. All of them are global across edges:
+# quota is leased from the hub's ledger, never counted per edge.
+version: 2
+services:
+  # Algorithms per tier, an org budget pooling one owner's keys, a per-IP
+  # cap, and a service-wide upstream guard tried out in shadow mode first.
+  - name: search
+    match: { path_prefix: /v1/search }
+    upstream: http://search:8080
+    limits:
+      window: 1m
+      tiers:
+        free:  { requests: 60 }                                    # fixed window
+        pro:   { requests: 6000, algorithm: sliding_window }       # no 2x burst at the reset
+        burst: { algorithm: token_bucket, rate: 20/s, burst: 200 } # smooth, with headroom
+      org: { requests: 20000 }          # every key with the same owner, together
+      also:
+        - { name: per-ip, per: client_ip, requests: 600 }
+        - name: upstream-guard
+          per: service
+          algorithm: token_bucket
+          rate: 2000/s
+          burst: 4000
+          mode: shadow                  # report what it would deny; deny nothing
+      leasing: { mode: adaptive, horizon: 2s }
+
+  # LLM tokens per minute: reserve an estimate, charge what the upstream
+  # reports afterwards (a header, or a trailer at the end of a stream).
+  - name: chat
+    match: { path_prefix: /v1/chat }
+    upstream: http://llm:8000
+    limits:
+      window: 1m
+      tiers:
+        free: { requests: 20000 }       # tokens per minute
+        pro:  { requests: 400000 }
+      cost:
+        estimate: 1000
+        estimate_header: X-Max-Tokens
+        actual_header: X-Usage-Total-Tokens
+        on_missing: estimate
+        max_debt: 8000

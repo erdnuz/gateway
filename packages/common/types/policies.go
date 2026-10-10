@@ -288,6 +288,11 @@ type TierConfig struct {
 	PutCost    uint8 `bson:"put_cost" json:"put_cost"`       // Cost per PUT request
 	DeleteCost uint8 `bson:"delete_cost" json:"delete_cost"` // Cost per DELETE request
 	OtherCost  uint8 `bson:"other_cost" json:"other_cost"`   // Cost per other request types
+
+	// Algorithm is fixed_window (default), sliding_window or token_bucket.
+	// For a token bucket Quota is the burst and Rate the refill per second.
+	Algorithm string  `json:"algorithm,omitempty"`
+	Rate      float64 `json:"rate,omitempty"`
 }
 
 // CacheConfig manages Edge-level response caching.
