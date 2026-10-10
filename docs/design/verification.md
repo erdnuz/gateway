@@ -2,7 +2,7 @@
 
 A distributed rate limiter fails in rare interleavings: a reply lost at a
 window boundary, a retried return, an edge whose clock runs ahead. Example
-tests rarely hit them. Gate checks its guarantees four ways, from fastest to
+tests rarely hit them. Gate checks its guarantees five ways, from fastest to
 most realistic.
 
 ## 1. Ledger conformance
@@ -65,13 +65,27 @@ hub), and admissions that blocked on a lease fetch across a window boundary
 were attributed to the wrong window, which led to holding each window's
 tokens in one atomically swapped structure.
 
-## 3. Integration tests (`make test-integration`)
+## 3. Model checking (`make tla`)
+
+The two protocols whose correctness rests on message ordering have TLA+
+specifications in [docs/spec](../spec), checked exhaustively by TLC within
+small bounds:
+
+| Spec | Models | Invariants | States |
+| --- | --- | --- | --- |
+| [LeaseProtocol](../spec/LeaseProtocol.tla) | grants for the ledger's current window, lost and late grant replies, spending only while the token's window is the ledger's, returns that swap the balance out first, retried returns, window rolls | no window admits more than Q; admissions never exceed net grants | 540,412 distinct |
+| [RegionTransfer](../spec/RegionTransfer.tla) | debit-first lending, retries answered with the recorded amount, lost and duplicated replies, replies arriving after a roll | allocations never sum to more than Q; regions together never admit more than Q | 67,320 distinct |
+
+The specs have teeth: removing the borrower's once-per-transfer-ID check
+makes TLC report `AllocationsBounded` violated within six steps.
+
+## 4. Integration tests (`make test-integration`)
 
 Real Redis, NATS and gRPC with mTLS via testcontainers: clock-skew
 resilience, hub fairness, failure isolation, config propagation, startup
 safety.
 
-## 4. Load tests (`make loadtest`)
+## 5. Load tests (`make loadtest`)
 
 A production-shaped Docker stack (hub, Redis, two edges, two decision-service
 replicas) driven by `testing/loadtest/cmd/loadgen`. Window checks use the

@@ -15,3 +15,7 @@ testing/loadtest/results/*/docker-stats.txt
 /bin/
 *.test
 *.out
+
+# TLC trace files (make tla)
+docs/spec/*_TTrace_*
+docs/spec/states/
