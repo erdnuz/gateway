@@ -32,9 +32,10 @@ func (p *parser) validate(f *File) {
 	if f.Version != Version {
 		p.at("version", "must be %d (got %d)", Version, f.Version)
 	}
-	if len(f.Services) == 0 {
-		p.at("services", "at least one service is required")
+	if len(f.Services) == 0 && len(f.Descriptors) == 0 {
+		p.at("services", "at least one service (or a descriptors domain for gate limiter) is required")
 	}
+	p.validateDescriptors(f.Descriptors)
 
 	names := map[string]int{}
 	prefixes := map[string]int{}
@@ -366,6 +367,56 @@ func (p *parser) validateV3Limits(path string, l Limits, tiers []string) {
 		if c.Estimate < 0 || c.MaxDebt < 0 {
 			p.at(path+".cost", "estimate and max_debt must not be negative")
 		}
+	}
+}
+
+func (p *parser) validateDescriptors(ds []DescriptorDomain) {
+	domains := map[string]int{}
+	for i, d := range ds {
+		path := fmt.Sprintf("descriptors[%d]", i)
+		if d.Domain == "" {
+			p.at(path+".domain", "is required")
+		} else if j, dup := domains[d.Domain]; dup {
+			p.at(path+".domain", "%q is already used by descriptors[%d]", d.Domain, j)
+		}
+		domains[d.Domain] = i
+		if len(d.Entries) == 0 {
+			p.at(path+".entries", "list at least one entry, e.g. {key: remote_address, limit: {requests: 100, window: 1s}}")
+		}
+		p.validateEntries(path+".entries", d.Entries)
+	}
+}
+
+func (p *parser) validateEntries(path string, es []DescriptorEntry) {
+	seen := map[string]int{}
+	for i, e := range es {
+		ep := fmt.Sprintf("%s[%d]", path, i)
+		switch {
+		case e.Key == "":
+			p.at(ep+".key", "is required")
+		case strings.ContainsAny(e.Key+e.Value, "/="):
+			p.at(ep, "key and value must not contain / or =")
+		default:
+			if j, dup := seen[e.Key+"="+e.Value]; dup {
+				p.at(ep, "duplicates %s[%d]", path, j)
+			}
+			seen[e.Key+"="+e.Value] = i
+		}
+		if !modes[e.Mode] {
+			p.at(ep+".mode", "must be enforce or shadow (got %q)", e.Mode)
+		}
+		if l := e.Limit; l != nil {
+			if l.Algorithm != "" && !algorithms[l.Algorithm] {
+				p.at(ep+".limit.algorithm", "must be fixed_window, sliding_window or token_bucket (got %q)", l.Algorithm)
+			}
+			p.validateBudget(ep+".limit", l.Algorithm, l.Requests, l.Rate, l.Burst)
+			if l.Algorithm != "token_bucket" && l.Window < Duration(time.Second) {
+				p.at(ep+".limit.window", "is required and at least 1s, e.g. 1m")
+			}
+		} else if len(e.Entries) == 0 {
+			p.at(ep, "has neither a limit nor nested entries")
+		}
+		p.validateEntries(ep+".entries", e.Entries)
 	}
 }
 

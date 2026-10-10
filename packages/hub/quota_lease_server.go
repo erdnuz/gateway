@@ -9,6 +9,7 @@ import (
 
 	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
+	"gateway/packages/decide"
 	"gateway/packages/ledger"
 
 	"google.golang.org/grpc/codes"
@@ -101,11 +102,13 @@ func (s *QuotaLeaseServer) ReturnLeases(ctx context.Context, in *types.ReturnLea
 	if err := s.ledger.Return(rctx, dedupe, returns); err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
-	var n int64
 	for _, r := range returns {
-		n += r.Tokens
+		if r.Tokens > 0 {
+			telemetry.TokensReturned.Add(float64(r.Tokens))
+		} else {
+			telemetry.DebtSettled.Add(float64(-r.Tokens))
+		}
 	}
-	telemetry.TokensReturned.Add(float64(n))
 	return &types.ReturnLeasesResponse{}, nil
 }
 
@@ -128,6 +131,9 @@ func (s *QuotaLeaseServer) resolveLease(ctx context.Context, req *types.QuotaLea
 func (s *QuotaLeaseServer) resolve(ctx context.Context, prefix, service, subject, limitID, tierID, org string) (lease, error) {
 	if !validKey(s.cfgStore, subject) {
 		return lease{}, status.Error(codes.InvalidArgument, "api_key does not match api_key_pattern")
+	}
+	if prefix == decide.Scope {
+		return s.resolveDescriptor(service, subject, limitID)
 	}
 	prefixCfg, svcCfg, ok := s.cfgStore.FindService(prefix, service)
 	if !ok {
@@ -193,6 +199,22 @@ func (s *QuotaLeaseServer) resolve(ctx context.Context, prefix, service, subject
 		}
 		l.item.Args.Parent = &ledger.Spec{Algo: ledger.FixedWindow, Limit: o.Quota, Window: window}
 	}
+	return l, nil
+}
+
+// resolveDescriptor finds a decision-service limit: domain and entry path
+// name it, the subject is the hash of the caller's descriptor values.
+func (s *QuotaLeaseServer) resolveDescriptor(domain, subject, limitID string) (lease, error) {
+	spec, ok := decide.Find(s.cfgStore.Snapshot(), domain, limitID)
+	if !ok {
+		telemetry.LeaseGrants.WithLabelValues("rejected").Inc()
+		return lease{}, status.Errorf(codes.NotFound, "no descriptor limit %q in domain %q", limitID, domain)
+	}
+	l := lease{limit: spec.Quota, item: ledger.BatchItem{
+		Ref:  ledger.Ref{Scope: decide.Scope, Service: domain, Limit: limitID, Subject: subject},
+		Spec: ledger.Spec{Algo: ledger.Algo(spec.Algorithm), Limit: spec.Quota, Window: spec.Window, Rate: spec.Rate},
+		Args: ledger.GrantArgs{Horizon: types.DefaultLeaseHorizon, MinGrant: types.DefaultLeaseMin},
+	}}
 	return l, nil
 }
 

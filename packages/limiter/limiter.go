@@ -53,6 +53,13 @@ type Decision struct {
 	// Fallback is set when the decision came from a safety limit because
 	// the primary limiter was unavailable.
 	Fallback bool
+	// Window is the hub window the request was charged to (0 when the
+	// limiter has none, e.g. a token bucket or a local limit).
+	Window int64
+
+	// retry is when the hub expects capacity again, for a denial while it
+	// says WAITING.
+	retry time.Time
 
 	// adj re-charges an admitted request (see Adjust); gen identifies the
 	// window it was admitted in.
@@ -63,6 +70,16 @@ type Decision struct {
 
 type adjuster interface {
 	adjust(gen, delta, maxDebt int64)
+}
+
+// RetryAt is when a denied request may succeed: when the hub expects
+// capacity (a token bucket refills long before it is full), or else the
+// reset.
+func (d Decision) RetryAt() time.Time {
+	if !d.retry.IsZero() {
+		return d.retry
+	}
+	return d.ResetAt
 }
 
 // Adjust changes the cost charged for an admitted request by delta: a

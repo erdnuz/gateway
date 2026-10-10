@@ -148,12 +148,12 @@ func TestLease_ExpiredLeaseIsNotSpent(t *testing.T) {
 	l := NewLease(&scriptedHub{grants: []int64{100}}, LeaseOptions{LeaseSize: 100})
 	allowN(t, l, req, 1)
 	c := l.counter(req)
-	c.expiresAt.Store(time.Now().Add(-time.Millisecond).UnixMilli())
+	c.cur.Load().expiresAt.Store(time.Now().Add(-time.Millisecond).UnixMilli())
 	if got := allowN(t, l, req, 1); got != 0 {
 		t.Fatal("spent a token from an expired lease")
 	}
-	if c.tokens.Load() != 0 {
-		t.Fatalf("expired lease kept %d tokens", c.tokens.Load())
+	if n := c.cur.Load().tokens.Load(); n != 0 {
+		t.Fatalf("expired lease kept %d tokens", n)
 	}
 }
 
@@ -171,7 +171,7 @@ func TestLease_RenewsBeforeExpiryAndMergesBalance(t *testing.T) {
 	hub := &scriptedHub{grants: []int64{100, 100}, ttl: 10}
 	l := NewLease(hub, LeaseOptions{LeaseSize: 100, LowWaterPct: 1, RenewBefore: 2 * time.Second})
 	allowN(t, l, req, 1)
-	l.counter(req).expiresAt.Store(time.Now().Add(1800 * time.Millisecond).UnixMilli())
+	l.counter(req).cur.Load().expiresAt.Store(time.Now().Add(1800 * time.Millisecond).UnixMilli())
 	allowN(t, l, req, 1)
 	eventually(t, func() bool { n, _ := l.Holding("p", "s", "k"); return n == 198 })
 }
@@ -197,7 +197,7 @@ func TestLease_WaitingStillSpendsHeldTokens(t *testing.T) {
 	r.Limit, r.Window = 100, time.Hour
 	allowN(t, l, r, 1)
 	c := l.counter(r)
-	held := c.tokens.Load()
+	held := c.cur.Load().tokens.Load()
 	c.retryAt.Store(time.Now().Add(time.Hour).UnixMilli())
 	calls := hub.calls.Load()
 	if got := allowN(t, l, r, int(held)+1); got != int(held) {

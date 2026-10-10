@@ -28,6 +28,8 @@ func startStack(t *testing.T, upstream string, analytics bool) Endpoints {
 		EdgeAddr:   "127.0.0.1:0",
 		HubAddr:    "127.0.0.1:0",
 		Out:        io.Discard,
+		// The decision service runs too; its gRPC port is picked at random.
+		LimiterAddr: "127.0.0.1:0",
 	}
 	if analytics {
 		opts.AnalyticsAddr = "127.0.0.1:0"
@@ -132,4 +134,41 @@ func TestDevStack_AnalyticsIngestsEvents(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("analytics recorded no events")
+}
+
+// The decision service answers from the same hub ledger: the built-in demo
+// domain allows each user 5 checks a minute.
+func TestDevStack_DecisionService(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer upstream.Close()
+	e := startStack(t, upstream.URL, false)
+	if e.Limiter == "" || e.LimiterGRPC == "" {
+		t.Fatalf("limiter endpoints missing: %+v", e)
+	}
+	check := func(user string) bool {
+		body := `{"domain":"demo","descriptors":[{"entries":[{"key":"user","value":"` + user + `"}]}]}`
+		resp, err := http.Post(e.Limiter+"/v1/check", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Allowed bool `json:"allowed"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("check: %d %v", resp.StatusCode, err)
+		}
+		return out.Allowed
+	}
+	for i := 0; i < 5; i++ {
+		if !check("alice") {
+			t.Fatalf("check %d denied", i)
+		}
+	}
+	if check("alice") {
+		t.Fatal("sixth check in a minute admitted")
+	}
+	if !check("bob") {
+		t.Fatal("bob shares alice's limit")
+	}
 }

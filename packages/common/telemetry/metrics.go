@@ -105,7 +105,12 @@ var (
 
 	TokensReturned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "gate_hub_tokens_returned_total",
-		Help: "Unspent tokens edges gave back (on drain or idle eviction); negative values settle post-hoc cost debt.",
+		Help: "Unspent tokens edges gave back on drain or idle eviction, so leaving edges strand no quota.",
+	})
+
+	DebtSettled = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_debt_settled_total",
+		Help: "Post-hoc cost debt edges settled with the ledger when they drained.",
 	})
 
 	LeaseActiveEdges = promauto.NewHistogram(prometheus.HistogramOpts{

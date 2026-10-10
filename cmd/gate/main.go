@@ -2,6 +2,7 @@
 //
 //	gate dev                 whole gateway in one process, no external services
 //	gate hub|edge|analytics  run one component (configured by environment)
+//	gate limiter             the rate limiter as a service, for Envoy and others
 //	gate echo                demo upstream that echoes requests
 //	gate config ...          validate, migrate or describe config files
 //	gate ctl ...             administer a running hub (keys, status, audit)
@@ -24,6 +25,7 @@ import (
 	"gateway/internal/app/devstack"
 	"gateway/internal/app/edgeapp"
 	"gateway/internal/app/hubapp"
+	"gateway/internal/app/limiterapp"
 	"gateway/packages/common/telemetry"
 	"gateway/packages/config"
 	"gateway/packages/hub"
@@ -42,6 +44,8 @@ Commands:
   hub                 run the control plane        (configured by CONFIG_FILE_PATH, HUB_*, REDIS_ADDR, NATS_* env)
   edge                run the gateway data plane   (configured by EDGE_*, HUB_*, REDIS_ADDR, NATS_* env)
   analytics           run analytics + dashboard    (configured by CLICKHOUSE_DSN, HUB_ADDR, NATS_* env)
+  limiter             run the decision service: Envoy's RateLimitService and a JSON check API
+                      over the same global quota (configured by LIMITER_*, HUB_* env)
   echo                run a demo upstream that echoes each request as JSON
   config ...          validate, migrate (v1 to v2) or print the schema of config files
   ctl ...             administer a running hub: keys, status, audit log, config rollout
@@ -85,6 +89,8 @@ func run(args []string) error {
 		return noFlags("edge", rest, func() error { return edgeapp.Run(ctx, edgeapp.FromEnv()) })
 	case "analytics":
 		return noFlags("analytics", rest, func() error { return analyticsapp.Run(ctx, analyticsapp.FromEnv()) })
+	case "limiter":
+		return noFlags("limiter", rest, func() error { return limiterapp.Run(ctx, limiterapp.FromEnv()) })
 	case "echo":
 		return runEcho(ctx, rest)
 	case "config":
@@ -141,6 +147,8 @@ func runDev(ctx context.Context, args []string) error {
 	fs.StringVar(&opts.HubAddr, "hub-addr", "127.0.0.1:8081", "hub API listen address")
 	fs.StringVar(&opts.AnalyticsAddr, "analytics-addr", "127.0.0.1:8091", `analytics listen address ("" disables analytics)`)
 	fs.StringVar(&opts.EchoAddr, "echo-addr", "127.0.0.1:9000", `built-in echo upstream address ("" disables it)`)
+	fs.StringVar(&opts.LimiterAddr, "limiter-addr", "127.0.0.1:8082", `decision service JSON API address ("" disables gate limiter)`)
+	fs.StringVar(&opts.LimiterGRPC, "limiter-grpc-addr", "127.0.0.1:8083", "decision service gRPC address (Envoy's RateLimitService)")
 	fs.StringVar(&opts.MetricsAddr, "metrics-addr", "127.0.0.1:9100", `Prometheus /metrics address ("" disables it)`)
 	keys := fs.String("keys", "", `API keys to issue as key=tier,key=tier (default: one per tier, e.g. "freekey")`)
 	fs.Usage = func() {

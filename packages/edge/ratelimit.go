@@ -274,7 +274,11 @@ func writeRateLimitHeaders(w http.ResponseWriter, d limiter.Decision, allowed bo
 		h.Set("RateLimit-Reset", strconv.FormatInt(reset, 10))
 	}
 	if !allowed {
-		h.Set("Retry-After", strconv.FormatInt(max(reset, 1), 10))
+		retry := reset
+		if at := d.RetryAt(); !at.IsZero() {
+			retry = int64(math.Ceil(time.Until(at).Seconds()))
+		}
+		h.Set("Retry-After", strconv.FormatInt(max(retry, 1), 10))
 	}
 }
 

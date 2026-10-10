@@ -26,6 +26,14 @@ func NewConfigManager(filePath string) (*ConfigManager, error) {
 	return cm, nil
 }
 
+// NewStaticConfigManager serves a fixed, already compiled config (tests,
+// simulations, embedded use). It has no file to reload from.
+func NewStaticConfigManager(cfg *types.GatewayConfig) *ConfigManager {
+	cm := &ConfigManager{}
+	cm.active.Store(cfg)
+	return cm
+}
+
 func MustNewConfigManager(filePath string) *ConfigManager {
 	cm, err := NewConfigManager(filePath)
 	if err != nil {

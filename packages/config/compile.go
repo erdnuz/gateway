@@ -26,6 +26,9 @@ var toInternalCacheKey = strings.NewReplacer(
 // edges. Services sharing a path group become one prefix.
 func Compile(f *File) *types.GatewayConfig {
 	out := &types.GatewayConfig{Runtime: compileRuntime(f.Runtime)}
+	for _, d := range f.Descriptors {
+		out.Descriptors = append(out.Descriptors, types.DescriptorDomain{Domain: d.Domain, Entries: compileEntries(d.Entries)})
+	}
 	byGroup := map[string]int{}
 	for _, s := range f.Services {
 		g := s.group()
@@ -40,6 +43,40 @@ func Compile(f *File) *types.GatewayConfig {
 			})
 		}
 		out.Prefixes[i].Services = append(out.Prefixes[i].Services, compileService(s))
+	}
+	return out
+}
+
+func compileEntries(es []DescriptorEntry) []types.DescriptorEntry {
+	var out []types.DescriptorEntry
+	for _, e := range es {
+		c := types.DescriptorEntry{Key: e.Key, Value: e.Value, Entries: compileEntries(e.Entries)}
+		if l := e.Limit; l != nil {
+			spec := &types.LimitSpec{ID: e.Key, Algorithm: internalAlgo(l.Algorithm), Quota: int64(l.Requests), Window: l.Window.D(), Shadow: e.Mode == "shadow"}
+			if spec.Algorithm == "token_bucket" {
+				spec.Quota, spec.Rate = int64(l.Burst), l.Rate.PerSecond()
+			}
+			c.Limit = spec
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func entriesFromInternal(es []types.DescriptorEntry) []DescriptorEntry {
+	var out []DescriptorEntry
+	for _, e := range es {
+		c := DescriptorEntry{Key: e.Key, Value: e.Value, Entries: entriesFromInternal(e.Entries)}
+		if l := e.Limit; l != nil {
+			c.Limit = &DescriptorLimit{Algorithm: l.Algorithm, Requests: uint32(l.Quota), Window: Duration(l.Window)}
+			if l.Algorithm == "token_bucket" {
+				c.Limit.Requests, c.Limit.Burst, c.Limit.Rate = 0, uint32(l.Quota), Rate(l.Rate)
+			}
+			if l.Shadow {
+				c.Mode = "shadow"
+			}
+		}
+		out = append(out, c)
 	}
 	return out
 }
@@ -260,6 +297,9 @@ func sortedTierNames(m map[string]Tier) []string {
 // to a version 2 File, omitting everything that equals a default.
 func FromInternal(cfg *types.GatewayConfig) *File {
 	f := &File{Version: Version, Runtime: runtimeFromInternal(cfg.Runtime)}
+	for _, d := range cfg.Descriptors {
+		f.Descriptors = append(f.Descriptors, DescriptorDomain{Domain: d.Domain, Entries: entriesFromInternal(d.Entries)})
+	}
 	for _, p := range cfg.Prefixes {
 		group := strings.Trim(p.Prefix, "/")
 		for _, svc := range p.Services {

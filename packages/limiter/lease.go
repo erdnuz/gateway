@@ -71,16 +71,12 @@ type Lease struct {
 	bootID       string
 }
 
+// leaseCounter is an edge's state for one quota.
 type leaseCounter struct {
-	// tokens is this edge's balance. It goes negative when post-hoc charges
-	// overdraw it (debt), which the next grant pays off first.
-	tokens    atomic.Int64
-	consumed  atomic.Int64 // cost admitted in the current window (fixed-window guard)
-	win       atomic.Int64 // hub window of the held tokens
-	parentWin atomic.Int64
-	gen       atomic.Int64 // bumped whenever the window changes
-	expiresAt atomic.Int64 // unix ms (edge clock): end of the held tokens' life
-	resetAt   atomic.Int64 // unix ms (edge clock): when the quota is whole again
+	// cur holds the tokens of the current window. A new window installs a
+	// new held, so a take always knows which window its token came from.
+	cur     atomic.Pointer[held]
+	resetAt atomic.Int64 // unix ms (edge clock): when the quota is whole again
 	// hubRemaining is the global quota left as of the last grant.
 	hubRemaining atomic.Int64
 	retryAt      atomic.Int64 // unix ms; non-zero while the hub says WAITING
@@ -96,6 +92,18 @@ type leaseCounter struct {
 
 	key string
 	req Request // identity fields only, for returns
+}
+
+// held is the tokens an edge holds for one window of one quota.
+type held struct {
+	c         *leaseCounter
+	win       int64 // the hub's window
+	parentWin int64
+	// tokens is the balance. It goes negative when post-hoc charges
+	// overdraw it (debt), which the next grant pays off first.
+	tokens    atomic.Int64
+	consumed  atomic.Int64 // cost admitted in this window (fixed-window guard)
+	expiresAt atomic.Int64 // unix ms (edge clock): end of the tokens' life
 }
 
 // NewLease returns a Lease limiter backed by client. Call Run to forget idle
@@ -141,16 +149,17 @@ func (l *Lease) Allow(ctx context.Context, req Request) (Decision, error) {
 			c.retryAt.CompareAndSwap(at, 0)
 		}
 	}
+	h := c.cur.Load()
 	// One edge can never legitimately admit more than a whole fixed-window
 	// quota in one window, whatever the hub grants (e.g. after a quota cut).
-	if fixedWindow(req) && c.consumed.Load()+req.Cost > req.Limit {
+	if fixedWindow(req) && h.consumed.Load()+req.Cost > req.Limit {
 		return d, nil
 	}
 
 	// On a miss, fetch a lease (one RPC per key however many callers miss
 	// together) and retry: peers may drain a refill before this caller gets
 	// to it, so only the hub ends the loop with a denial.
-	left := c.take(req.Cost, nowMs)
+	left := h.take(req.Cost, nowMs)
 	for i := 0; left < 0 && !waiting && i < missRetries; i++ {
 		granted, err := l.fetch(ctx, req, c)
 		if err != nil {
@@ -159,13 +168,20 @@ func (l *Lease) Allow(ctx context.Context, req Request) (Decision, error) {
 		if granted <= 0 {
 			break
 		}
-		left = c.take(req.Cost, time.Now().UnixMilli())
+		h = c.cur.Load()
+		if fixedWindow(req) && h.consumed.Load()+req.Cost > req.Limit {
+			break
+		}
+		left = h.take(req.Cost, time.Now().UnixMilli())
 	}
 	if left < 0 {
 		d.ResetAt = c.resetTime(req, now)
+		if at := c.retryAt.Load(); at > 0 {
+			d.retry = time.UnixMilli(at)
+		}
 		return d, nil
 	}
-	c.consumed.Add(req.Cost)
+	h.consumed.Add(req.Cost)
 	c.spent.Add(req.Cost)
 
 	// Renew in the background at the low-water mark of the last grant, or
@@ -173,16 +189,17 @@ func (l *Lease) Allow(ctx context.Context, req Request) (Decision, error) {
 	// (renewing one that ends with its window would only fetch tokens about
 	// to be dropped).
 	lowWater := int64(float64(max(c.lastGrant.Load(), 1)) * l.opts.LowWaterPct / 100)
-	exp, reset := c.expiresAt.Load(), c.resetAt.Load()
+	exp, reset := h.expiresAt.Load(), c.resetAt.Load()
 	endsEarly := reset <= 0 || exp < reset
 	if left <= lowWater || (endsEarly && exp > 0 && nowMs > exp-l.opts.RenewBefore.Milliseconds()) {
 		l.renew(req, c)
 	}
 
 	d.Allowed = true
+	d.Window = h.win
 	d.ResetAt = c.resetTime(req, now)
 	d.Remaining = max(0, min(req.Limit, c.hubRemaining.Load()+left))
-	d.adj, d.gen, d.maxDebt = c, c.gen.Load(), req.MaxDebt
+	d.adj, d.maxDebt = h, req.MaxDebt
 	if d.maxDebt <= 0 {
 		d.maxDebt = req.Cost
 	}
@@ -205,12 +222,12 @@ func (l *Lease) HoldingLimit(scope, service, limitID, key string) (tokens int64,
 	if !ok {
 		return 0, time.Time{}
 	}
-	c := v.(*leaseCounter)
-	exp := c.expiresAt.Load()
+	h := v.(*leaseCounter).cur.Load()
+	exp := h.expiresAt.Load()
 	if exp > 0 && time.Now().UnixMilli() >= exp {
-		return min(c.tokens.Load(), 0), time.UnixMilli(exp)
+		return min(h.tokens.Load(), 0), time.UnixMilli(exp)
 	}
-	return c.tokens.Load(), time.UnixMilli(exp)
+	return h.tokens.Load(), time.UnixMilli(exp)
 }
 
 // Run evicts idle keys until ctx is done, returning the tokens they still
@@ -248,8 +265,9 @@ func (l *Lease) giveBack(ctx context.Context, counters []*leaseCounter) error {
 	for _, c := range counters {
 		// Swap the balance out first, so a token is never both spent and
 		// returned. Expired tokens are worthless to the hub; debt is not.
-		n := c.tokens.Swap(0)
-		if exp := c.expiresAt.Load(); n > 0 && exp > 0 && now >= exp {
+		h := c.cur.Load()
+		n := h.tokens.Swap(0)
+		if exp := h.expiresAt.Load(); n > 0 && exp > 0 && now >= exp {
 			n = 0
 		}
 		if n == 0 {
@@ -257,7 +275,7 @@ func (l *Lease) giveBack(ctx context.Context, counters []*leaseCounter) error {
 		}
 		returns = append(returns, &types.LeaseReturn{
 			Prefix: c.req.Scope, ServiceId: c.req.Service, ApiKey: c.req.Key, LimitId: c.req.LimitID,
-			TierId: c.req.Tier, Org: c.req.Org, WindowId: c.win.Load(), ParentWindowId: c.parentWin.Load(), Tokens: n,
+			TierId: c.req.Tier, Org: c.req.Org, WindowId: h.win, ParentWindowId: h.parentWin, Tokens: n,
 		})
 	}
 	if len(returns) == 0 {
@@ -284,6 +302,7 @@ func (l *Lease) counter(req Request) *leaseCounter {
 	c := l.counters.get(stateKey(req), func() *leaseCounter {
 		c := &leaseCounter{key: stateKey(req)}
 		c.req = Request{Scope: req.Scope, Service: req.Service, LimitID: req.LimitID, Key: req.Key, Tier: req.Tier, Org: req.Org}
+		c.cur.Store(&held{c: c})
 		c.leaseSize.Store(l.opts.LeaseSize)
 		return c
 	})
@@ -306,17 +325,24 @@ func (c *leaseCounter) reset(req Request, nowMs int64) {
 	if req.Algo == "token_bucket" {
 		return // a bucket has no windows; it is simply full again
 	}
-	c.newWindow()
+	old := c.cur.Load()
+	c.install(old, old.win, old.parentWin)
 	c.hubRemaining.Store(0)
 }
 
-func (c *leaseCounter) newWindow() {
-	c.gen.Add(1)
-	c.consumed.Store(0)
+// install replaces old with a fresh window, carrying old's debt (never its
+// tokens). It returns the window now current.
+func (c *leaseCounter) install(old *held, win, parentWin int64) *held {
+	next := &held{c: c, win: win, parentWin: parentWin}
 	for {
-		cur := c.tokens.Load()
-		if cur <= 0 || c.tokens.CompareAndSwap(cur, 0) {
-			return
+		debt := min(old.tokens.Load(), 0)
+		next.tokens.Store(debt)
+		if c.cur.CompareAndSwap(old, next) {
+			return next
+		}
+		old = c.cur.Load()
+		if old.win > win {
+			return old // a newer window won the race
 		}
 	}
 }
@@ -330,41 +356,46 @@ func (c *leaseCounter) resetTime(req Request, now time.Time) time.Time {
 
 // take spends cost tokens and returns the balance left, or -1 when the edge
 // holds too few (or its lease has expired).
-func (c *leaseCounter) take(cost int64, nowMs int64) int64 {
-	if exp := c.expiresAt.Load(); exp > 0 && nowMs >= exp {
+func (h *held) take(cost int64, nowMs int64) int64 {
+	if exp := h.expiresAt.Load(); exp > 0 && nowMs >= exp {
 		for {
-			cur := c.tokens.Load()
-			if cur <= 0 || c.tokens.CompareAndSwap(cur, 0) {
+			cur := h.tokens.Load()
+			if cur <= 0 || h.tokens.CompareAndSwap(cur, 0) {
 				return -1
 			}
 		}
 	}
 	for {
-		cur := c.tokens.Load()
+		cur := h.tokens.Load()
 		if cur < cost {
 			return -1
 		}
-		if c.tokens.CompareAndSwap(cur, cur-cost) {
+		if h.tokens.CompareAndSwap(cur, cur-cost) {
 			return cur - cost
 		}
 	}
 }
 
-// adjust re-charges an admitted request. Within the window it was admitted
-// in, delta moves the balance either way; after the window rolls a refund is
-// dropped and an extra charge becomes debt. Debt never exceeds maxDebt.
-func (c *leaseCounter) adjust(gen, delta, maxDebt int64) {
-	if c.gen.Load() != gen && delta < 0 {
-		return
+// adjust re-charges a request admitted from h. While h is the current
+// window, delta moves its balance either way. Once the window has rolled, a
+// refund is dropped (the new window owes nothing) and an extra charge
+// becomes debt in the current window. Debt never exceeds maxDebt.
+func (h *held) adjust(_, delta, maxDebt int64) {
+	target := h
+	if cur := h.c.cur.Load(); cur != h {
+		if delta < 0 {
+			return
+		}
+		target = cur
 	}
-	c.consumed.Add(delta)
+	target.consumed.Add(delta)
 	for {
-		cur := c.tokens.Load()
+		cur := target.tokens.Load()
 		next := cur - delta
 		if delta > 0 && next < -maxDebt {
 			next = min(cur, -maxDebt)
 		}
-		if c.tokens.CompareAndSwap(cur, next) {
+		if target.tokens.CompareAndSwap(cur, next) {
 			return
 		}
 	}
@@ -452,18 +483,19 @@ func (l *Lease) fetch(ctx context.Context, req Request, c *leaseCounter) (int64,
 // added.
 func (l *Lease) accept(req Request, c *leaseCounter, sent time.Time, resp *types.QuotaLeaseResponse) int64 {
 	sentMs := sent.UnixMilli()
-	hubClock := resp.ExpiresInMs > 0 || resp.ResetInMs > 0
-	if hubClock {
+	h := c.cur.Load()
+	if resp.ExpiresInMs > 0 || resp.ResetInMs > 0 {
 		// A grant for an older window than the tokens held is a late reply
 		// from before a roll: its tokens are already dead.
-		if resp.WindowId < c.win.Load() {
+		if resp.WindowId < h.win {
 			return 0
 		}
-		if resp.WindowId > c.win.Load() {
-			c.win.Store(resp.WindowId)
-			c.newWindow()
+		if resp.WindowId > h.win {
+			h = c.install(h, resp.WindowId, resp.ParentWindowId)
+			if h.win != resp.WindowId {
+				return 0
+			}
 		}
-		c.parentWin.Store(resp.ParentWindowId)
 		if resp.ResetInMs > 0 {
 			c.resetAt.Store(sentMs + resp.ResetInMs)
 		}
@@ -499,8 +531,8 @@ func (l *Lease) accept(req Request, c *leaseCounter, sent time.Time, resp *types
 	}
 	// Extend the lease before adding tokens so a concurrent take cannot
 	// expire the new grant.
-	c.expiresAt.Store(exp)
-	c.tokens.Add(resp.GrantedTokens)
+	h.expiresAt.Store(exp)
+	h.tokens.Add(resp.GrantedTokens)
 	c.lastGrant.Store(resp.GrantedTokens)
 	return resp.GrantedTokens
 }

@@ -6,6 +6,25 @@ import "time"
 type GatewayConfig struct {
 	Prefixes []PrefixConfig `bson:"prefixes" json:"prefixes"`
 	Runtime  RuntimePolicy  `bson:"runtime" json:"runtime,omitempty"`
+	// Descriptors are limits served by the decision service (gate limiter)
+	// to Envoy and other callers, keyed by descriptor like Envoy's
+	// rate-limit service.
+	Descriptors []DescriptorDomain `json:"descriptors,omitempty"`
+}
+
+// DescriptorDomain is one Envoy rate-limit domain.
+type DescriptorDomain struct {
+	Domain  string            `json:"domain"`
+	Entries []DescriptorEntry `json:"entries"`
+}
+
+// DescriptorEntry matches one descriptor entry: a key, and a value unless
+// every value gets its own limit. Entries nest to match longer descriptors.
+type DescriptorEntry struct {
+	Key     string            `json:"key"`
+	Value   string            `json:"value,omitempty"`
+	Limit   *LimitSpec        `json:"limit,omitempty"`
+	Entries []DescriptorEntry `json:"entries,omitempty"`
 }
 
 func (cfg *GatewayConfig) Validate() error {

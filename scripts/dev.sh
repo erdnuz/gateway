@@ -90,6 +90,11 @@ case "${task}" in
     GO_DOCKER_ARGS="-v /var/run/docker.sock:/var/run/docker.sock -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal -e TESTCONTAINERS_RYUK_DISABLED=true --add-host host.docker.internal:host-gateway" \
       go_ test -tags integration -count=1 -timeout 25m ./testing/integration/...
     ;;
+  sim)
+    # Deterministic simulation: generated traffic and faults on a virtual
+    # clock against the real limiter and hub. ARGS=N sets the scenario count.
+    go_ test -count=1 -timeout 60m ./testing/sim/ -run Simulation -v -sim.seeds="${1:-1000}"
+    ;;
   loadtest)
     bash testing/loadtest/run.sh "${1:-run}"
     ;;
@@ -122,6 +127,7 @@ Usage: make <task>   (or: bash scripts/dev.sh <task>)
   build             build bin/gate
   test              go vet + unit tests with the race detector
   test-integration  integration suite (testcontainers)
+  sim [N]           N simulated scenarios (default 1000): traffic, clock skew and faults on a virtual clock
   loadtest [label]  end-to-end rate-limiter load test
   lint              golangci-lint (formatting, vet and more)
   certs             generate dev mTLS certs into deploy/certs

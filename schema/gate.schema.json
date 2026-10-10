@@ -1,8 +1,114 @@
 {
+  "$defs": {
+    "DescriptorEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "description": "Entries for the descriptor's next key/value pair.",
+          "items": {
+            "$ref": "#/$defs/DescriptorEntry"
+          },
+          "type": "array"
+        },
+        "key": {
+          "description": "Entry key, e.g. remote_address, generic_key or a header descriptor's key.",
+          "type": "string"
+        },
+        "limit": {
+          "additionalProperties": false,
+          "description": "The limit for descriptors that end at this entry.",
+          "properties": {
+            "algorithm": {
+              "description": "Default fixed_window.",
+              "enum": [
+                "fixed_window",
+                "sliding_window",
+                "token_bucket"
+              ],
+              "type": "string"
+            },
+            "burst": {
+              "description": "token_bucket: the bucket's size.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rate": {
+              "description": "token_bucket: refill rate, e.g. 50/s.",
+              "examples": [
+                "20/s",
+                "1200/m",
+                "5000/h"
+              ],
+              "pattern": "^[0-9]+(\\.[0-9]+)?/(s|m|h)$",
+              "type": "string"
+            },
+            "requests": {
+              "description": "Budget per window (in hits). Required except for token_bucket.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window": {
+              "description": "Window, e.g. 1s, 1m or 1h. Required except for token_bucket.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "mode": {
+          "description": "enforce (default) or shadow: report what the limit would deny without denying.",
+          "enum": [
+            "enforce",
+            "shadow"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "description": "Match only this value. Omit to give every value its own limit (e.g. one per client address).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    }
+  },
   "$id": "https://raw.githubusercontent.com/erdnuz/gateway/master/schema/gate.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "descriptors": {
+      "description": "Limits for gate limiter, the decision service: Envoy's rate-limit service API and a JSON check API, over the same global quota. Same shape as envoyproxy/ratelimit's config.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "description": "The domain in the caller's rate-limit requests (Envoy's ratelimit filter sets it).",
+            "type": "string"
+          },
+          "entries": {
+            "description": "Descriptor entries to match, top level first.",
+            "items": {
+              "$ref": "#/$defs/DescriptorEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "domain",
+          "entries"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "runtime": {
       "additionalProperties": false,
       "description": "Process tuning. Every field is optional; defaults suit most deployments.",
@@ -889,8 +995,7 @@
     }
   },
   "required": [
-    "version",
-    "services"
+    "version"
   ],
   "title": "Gate gateway configuration (version 2)",
   "type": "object"

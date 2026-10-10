@@ -12,8 +12,10 @@ const Version = 2
 // File is the root of a gateway config file.
 type File struct {
 	Version  int       `yaml:"version" desc:"Config format version. Must be 2."`
-	Services []Service `yaml:"services" desc:"Upstream services exposed through the gateway."`
-	Runtime  Runtime   `yaml:"runtime,omitempty" desc:"Process tuning. Every field is optional; defaults suit most deployments."`
+	Services []Service `yaml:"services,omitempty" desc:"Upstream services exposed through the gateway."`
+	// Descriptors are served by gate limiter, not the gateway.
+	Descriptors []DescriptorDomain `yaml:"descriptors,omitempty" desc:"Limits for gate limiter, the decision service: Envoy's rate-limit service API and a JSON check API, over the same global quota. Same shape as envoyproxy/ratelimit's config."`
+	Runtime     Runtime            `yaml:"runtime,omitempty" desc:"Process tuning. Every field is optional; defaults suit most deployments."`
 }
 
 // Service is one upstream exposed under a path prefix.
@@ -40,6 +42,30 @@ type Service struct {
 	Analytics *Analytics `yaml:"analytics,omitempty" desc:"Request event capture. Default: every request."`
 
 	OnUpstreamError *UpstreamError `yaml:"on_upstream_error,omitempty" desc:"Response when the upstream fails after retries. Default: a 502 problem (504 on timeout)."`
+}
+
+// DescriptorDomain is one Envoy rate-limit domain.
+type DescriptorDomain struct {
+	Domain  string            `yaml:"domain" desc:"The domain in the caller's rate-limit requests (Envoy's ratelimit filter sets it)."`
+	Entries []DescriptorEntry `yaml:"entries" desc:"Descriptor entries to match, top level first."`
+}
+
+// DescriptorEntry matches one entry of a descriptor.
+type DescriptorEntry struct {
+	Key     string            `yaml:"key" desc:"Entry key, e.g. remote_address, generic_key or a header descriptor's key."`
+	Value   string            `yaml:"value,omitempty" desc:"Match only this value. Omit to give every value its own limit (e.g. one per client address)."`
+	Limit   *DescriptorLimit  `yaml:"limit,omitempty" desc:"The limit for descriptors that end at this entry."`
+	Mode    string            `yaml:"mode,omitempty" desc:"enforce (default) or shadow: report what the limit would deny without denying." enum:"enforce,shadow"`
+	Entries []DescriptorEntry `yaml:"entries,omitempty" desc:"Entries for the descriptor's next key/value pair."`
+}
+
+// DescriptorLimit is a descriptor's limit.
+type DescriptorLimit struct {
+	Algorithm string   `yaml:"algorithm,omitempty" desc:"Default fixed_window." enum:"fixed_window,sliding_window,token_bucket"`
+	Requests  uint32   `yaml:"requests,omitempty" desc:"Budget per window (in hits). Required except for token_bucket."`
+	Window    Duration `yaml:"window,omitempty" desc:"Window, e.g. 1s, 1m or 1h. Required except for token_bucket."`
+	Rate      Rate     `yaml:"rate,omitempty" desc:"token_bucket: refill rate, e.g. 50/s."`
+	Burst     uint32   `yaml:"burst,omitempty" desc:"token_bucket: the bucket's size."`
 }
 
 // Match selects requests for a service.
