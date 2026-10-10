@@ -28,7 +28,7 @@ rm -rf "${RESULTS}" && mkdir -p "${RESULTS}"
   echo "- commit: $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (dirty)')"
   echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "- host: $(docker info --format '{{.NCPU}} cpu, {{.MemTotal}} bytes mem')"
-  echo "- each hub and Redis shard capped at 1 CPU; loadgen 2 CPU, 64 callers, 16 leases per RPC, 100k keys"
+  echo "- each hub and Redis shard capped at 1 CPU; loadgen 2 CPU, 64 callers, ${BATCH:-64} leases per RPC, 100k keys"
   echo
   echo "| topology | hubs | grants/s | RPCs/s | p50 ms | p99 ms | errors |"
   echo "|---|---|---|---|---|---|---|"
@@ -41,7 +41,7 @@ for n in ${SIZES:-1 2 3}; do
   export SHARDS="${n}"
   export REDIS_ADDRS="$(echo r1:6379,r2:6379,r3:6379 | cut -d, -f1-"${n}")"
   "${COMPOSE[@]}" up -d --wait --scale hub-server="${n}" hub-server || { "${COMPOSE[@]}" logs --tail 40; continue; }
-  "${COMPOSE[@]}" run --rm -T loadgen -scenario hubscale -out "/results/${LABEL}" -hubscale-label "${n} hubs + ${n} shards"
+  "${COMPOSE[@]}" run --rm -T loadgen -scenario hubscale -out "/results/${LABEL}" -hubscale-label "${n} hub(s) + ${n} shard(s)" -hubscale-batch "${BATCH:-64}"
 done
 "${COMPOSE[@]}" --profile tools down -v --remove-orphans >/dev/null 2>&1
 echo "results: ${RESULTS}"
