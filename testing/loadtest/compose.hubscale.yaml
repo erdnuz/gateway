@@ -1,0 +1,85 @@
+# Hub-scaling test: N hub replicas over an N-shard Redis Cluster, every
+# container capped at 1 CPU, driven by loadgen's hubscale scenario (batched
+# lease RPCs straight at the hubs). Driven by testing/loadtest/hubscale.sh.
+name: gate-hs
+
+x-redis: &redis
+  image: redis:7-alpine
+  cpus: 1.0
+  command: ["redis-server", "--cluster-enabled", "yes", "--cluster-config-file", "nodes.conf",
+            "--maxmemory-policy", "noeviction", "--save", "", "--appendonly", "no"]
+
+services:
+  r1: *redis
+  r2: *redis
+  r3: *redis
+
+  # Forms the cluster from the first $SHARDS nodes (all slots spread evenly).
+  cluster-init:
+    image: redis:7-alpine
+    depends_on: [r1, r2, r3]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        # redis-cli --cluster create needs three masters; form 1-3 by hand.
+        sleep 2
+        i=0
+        for h in $$(echo r1 r2 r3 | cut -d' ' -f1-$${SHARDS}); do
+          lo=$$((i * 16384 / SHARDS)); hi=$$(((i + 1) * 16384 / SHARDS - 1))
+          redis-cli -h $$h cluster addslotsrange $$lo $$hi
+          [ $$i -gt 0 ] && redis-cli -h r1 cluster meet $$(getent hosts $$h | awk '{print $$1}') 6379
+          i=$$((i + 1))
+        done
+        for t in $$(seq 1 60); do
+          redis-cli -h r1 cluster info | grep -q 'cluster_state:ok' && redis-cli -h r1 cluster info | grep -q "cluster_known_nodes:$${SHARDS}" && exit 0
+          sleep 1
+        done
+        echo "cluster did not converge"; exit 1
+    environment:
+      SHARDS: ${SHARDS:-1}
+
+  hub-server:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      target: gate
+    image: gate-hs
+    command: ["hub"]
+    cpus: 1.0
+    depends_on:
+      cluster-init:
+        condition: service_completed_successfully
+    environment:
+      PORT: "8080"
+      HUB_GRPC_PORT: "9090"
+      REDIS_ADDRS: ${REDIS_ADDRS:-r1:6379}
+      HUB_ENFORCE_REDIS_NOEVICTION: "false"
+      HUB_AUTH_TOKEN: hubscale-token
+      CONFIG_FILE_PATH: /config/gateway.yaml
+      HUB_TLS_CERT_FILE: /certs/hub/tls.crt
+      HUB_TLS_KEY_FILE: /certs/hub/tls.key
+      HUB_TLS_CA_FILE: /certs/ca/ca.crt
+      METRICS_ADDR: ""
+    volumes:
+      - ./gateway-config.hubscale.yaml:/config/gateway.yaml:ro
+      - ${LT_CERT_DIR:?set LT_CERT_DIR}/hub:/certs/hub:ro
+      - ${LT_CERT_DIR}/ca:/certs/ca:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  loadgen:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      target: tools
+    image: gate-hs-tools
+    profiles: ["tools"]
+    cpus: 2.0
+    entrypoint: ["loadgen"]
+    volumes:
+      - ./results:/results
+      - ${LT_CERT_DIR}/edge:/certs/edge:ro
+      - ${LT_CERT_DIR}/ca:/certs/ca:ro

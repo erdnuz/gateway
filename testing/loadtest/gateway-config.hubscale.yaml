@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=../../schema/gate.schema.json
+# Hub-scaling test: one service whose callers need no key lookup (the edge
+# asserts the tier), so every lease RPC is pure ledger work.
+version: 2
+services:
+  - name: lease
+    match: { path_prefix: /hs/lease }
+    upstream: http://upstream:9000
+    auth: { type: none }
+    limits:
+      window: 10s
+      default_tier: t
+      tiers:
+        t: { requests: 100000000 }
+    analytics: { enabled: false }

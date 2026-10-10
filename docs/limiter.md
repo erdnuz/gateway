@@ -85,6 +85,7 @@ http_filters:
       "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
       domain: ingress
       failure_mode_deny: false        # when the limiter is unreachable
+      timeout: 100ms                  # Envoy's default, 20ms, leaves no room for a cold lease fetch
       rate_limit_service:
         transport_api_version: V3
         grpc_service:
@@ -95,7 +96,8 @@ with a route-level `rate_limits` action producing the descriptors (for
 example `remote_address`). Gate answers with per-descriptor statuses,
 `OVER_LIMIT` when any enforced descriptor is over, and adds `RateLimit-Limit`,
 `RateLimit-Remaining`, `RateLimit-Reset` and (on denial) `Retry-After` for
-the binding descriptor. An unreachable ledger is a gRPC `UNAVAILABLE`, so
+the binding descriptor ([an integration test](../testing/integration/scenario_envoy_rls_test.go)
+runs a real Envoy against it). An unreachable ledger is a gRPC `UNAVAILABLE`, so
 Envoy's `failure_mode_deny` decides.
 
 For Istio, the same filter goes in an `EnvoyFilter` patching the

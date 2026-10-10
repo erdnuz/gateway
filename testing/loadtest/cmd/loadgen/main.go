@@ -111,6 +111,7 @@ func main() {
 		// The comparative benchmark (testing/bench, bench.go).
 		"bench-setup": scenarioBenchSetup,
 		"bench":       scenarioBench,
+		"hubscale":    scenarioHubScale,
 	}
 	fn, ok := run[scenario]
 	if !ok {
