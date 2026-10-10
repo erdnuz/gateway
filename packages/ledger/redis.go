@@ -27,6 +27,7 @@ local active_ms = tonumber(ARGV[7])
 local ttl = tonumber(ARGV[8])
 
 local avail, wid, reset, expires, tat, key = 0, 0, 0, 0, 0, KEYS[1]
+local prev, cur, f = 0, 0, 0
 if algo == 'token_bucket' then
   local T = 1000 / rate
   local tau = limit * T
@@ -42,10 +43,11 @@ else
   if tonumber(ARGV[11]) >= 0 then
     limit = tonumber(ARGV[11]) + tonumber(redis.call('GET', KEYS[1] .. ':alloc:' .. wid) or 0)
   end
-  local used = tonumber(redis.call('GET', key) or 0)
+  cur = tonumber(redis.call('GET', key) or 0)
+  local used = cur
   if algo == 'sliding_window' then
-    local prev = tonumber(redis.call('GET', KEYS[1] .. ':' .. (wid - 1)) or 0)
-    local f = (now - wid * win) / win
+    prev = tonumber(redis.call('GET', KEYS[1] .. ':' .. (wid - 1)) or 0)
+    f = (now - wid * win) / win
     used = used + math.ceil(prev * (1 - f))
   end
   avail = limit - used
@@ -83,6 +85,9 @@ if avail <= 0 then
   elseif algo == 'token_bucket' then
     local T = 1000 / rate
     retry = math.max(math.ceil(tat + T - limit * T - now), 1)
+  elseif algo == 'sliding_window' and prev > 0 and cur < limit then
+    local fneed = 1 - (limit - 1 - cur) / prev
+    retry = math.min(math.max(math.ceil((fneed - f) * win), 10), reset)
   else
     retry = math.min(math.max(math.floor(win / 10), 500), reset)
   end

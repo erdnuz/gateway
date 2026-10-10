@@ -229,8 +229,9 @@ func TestIntegration_THUB2ThunderingHerdSuppression(t *testing.T) {
 	if !wait.WaitingForCapacity {
 		t.Fatalf("expected waiting response, got grant=%d", wait.GrantedTokens)
 	}
-	if wait.RetryAfterMs != 1000 {
-		t.Fatalf("expected retry_after_ms=1000, got %d", wait.RetryAfterMs)
+	// A tenth of the 10s window, but never past the window's reset.
+	if wait.RetryAfterMs <= 0 || wait.RetryAfterMs > 1000 || wait.RetryAfterMs > wait.ResetInMs {
+		t.Fatalf("expected 0 < retry_after_ms <= min(1000, reset %d), got %d", wait.ResetInMs, wait.RetryAfterMs)
 	}
 
 	const edges = 20
@@ -333,8 +334,9 @@ func TestIntegration_TRES2ZombieLeaseReclaimedAfterTTL(t *testing.T) {
 		t.Fatalf("expected grant recovery after lease bookkeeping expiry, got %d", third.GrantedTokens)
 	}
 
-	// Defensive check: key should be present again after third grant.
-	keys, err := rdb.Keys(ctx, "lease-used:v1:auth-api:zombie:*").Result()
+	// Defensive check: the ledger's window counter exists again after the
+	// third grant (keys carry a Cluster hash tag per subject).
+	keys, err := rdb.Keys(ctx, "gate:{v1:auth-api:zombie}:tier:fixed_window:[0-9]*").Result()
 	if err != nil {
 		t.Fatalf("keys lookup failed: %v", err)
 	}

@@ -51,7 +51,8 @@ func (m *Mem) Grant(_ context.Context, ref Ref, spec Spec, args GrantArgs) (Gran
 	defer m.mu.Unlock()
 	now := m.now()
 
-	var avail, wid, reset, expires, tat int64
+	var avail, wid, reset, expires, tat, prev, cur int64
+	var f float64
 	var key string
 	switch in.algo {
 	case TokenBucket:
@@ -72,10 +73,11 @@ func (m *Mem) Grant(_ context.Context, ref Ref, spec Spec, args GrantArgs) (Gran
 		if in.allocBase >= 0 {
 			in.limit = in.allocBase + m.getInt(in.key+":alloc:"+strconv.FormatInt(wid, 10), 0)
 		}
-		used := m.getInt(key, 0)
+		cur = m.getInt(key, 0)
+		used := cur
 		if in.algo == SlidingWindow {
-			prev := m.getInt(winKey(in.key, wid-1), 0)
-			f := float64(now-wid*in.win) / float64(in.win)
+			prev = m.getInt(winKey(in.key, wid-1), 0)
+			f = float64(now-wid*in.win) / float64(in.win)
 			used += int64(math.Ceil(float64(float64(prev) * (1 - f))))
 		}
 		avail = in.limit - used
@@ -119,6 +121,11 @@ func (m *Mem) Grant(_ context.Context, ref Ref, spec Spec, args GrantArgs) (Gran
 		case in.algo == TokenBucket:
 			T := 1000 / in.rate
 			retry = max(int64(math.Ceil(float64(tat)+T-float64(float64(in.limit)*T)-float64(now))), 1)
+		case in.algo == SlidingWindow && prev > 0 && cur < in.limit:
+			// Capacity returns continuously as the previous window's
+			// weight decays: retry when one token has (at least 10 ms).
+			fneed := 1 - float64(in.limit-1-cur)/float64(prev)
+			retry = min(max(int64(math.Ceil(float64((fneed-f)*float64(in.win)))), 10), reset)
 		default:
 			retry = min(max(in.win/10, 500), reset)
 		}

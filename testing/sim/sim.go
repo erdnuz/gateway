@@ -192,7 +192,7 @@ func Run(s Scenario) *Result {
 		}(e)
 	}
 	wg.Wait()
-	res.end = time.Now().Add(s.HubSkew)
+	res.end = start.Add(s.Duration).Add(s.HubSkew) // traffic stops here; a last sleep may overshoot
 	// Let in-flight background renewals finish (virtual time only advances
 	// while the bubble's main goroutine is alive).
 	time.Sleep(10 * time.Second)

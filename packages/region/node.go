@@ -41,6 +41,7 @@ type Node struct {
 	mu    sync.Mutex
 	needs map[string]Need
 	turn  int
+	kick  chan struct{}
 }
 
 const borrowTimeout = time.Second
@@ -54,6 +55,13 @@ func (n *Node) Starved(need Need) {
 		n.needs = map[string]Need{}
 	}
 	n.needs[need.Ref.Key(need.Spec.Algo)] = need
+	if n.kick == nil {
+		n.kick = make(chan struct{}, 1)
+	}
+	select { // rebalance now rather than at the next tick
+	case n.kick <- struct{}{}:
+	default:
+	}
 }
 
 // Run rebalances until ctx ends.
@@ -62,6 +70,12 @@ func (n *Node) Run(ctx context.Context) {
 	if every <= 0 {
 		every = 250 * time.Millisecond
 	}
+	n.mu.Lock()
+	if n.kick == nil {
+		n.kick = make(chan struct{}, 1)
+	}
+	kick := n.kick
+	n.mu.Unlock()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -69,8 +83,9 @@ func (n *Node) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			n.Rebalance(ctx)
+		case <-kick:
 		}
+		n.Rebalance(ctx)
 	}
 }
 

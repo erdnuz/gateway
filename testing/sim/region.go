@@ -146,7 +146,7 @@ func RunRegions(s RegionScenario) *RegionResult {
 		}(i, name)
 	}
 	wg.Wait()
-	res.end = time.Now()
+	res.end = start.Add(s.Duration) // traffic stops here; a last sleep may overshoot
 	cancel()
 	time.Sleep(10 * time.Second) // let in-flight renewals and transfers finish
 	return res
