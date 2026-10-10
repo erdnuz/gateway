@@ -1,0 +1,79 @@
+{
+  "scenario": "windows",
+  "pass": true,
+  "checks": [
+    "PASS: window 179165547 admitted 1000 (want 800..1000)",
+    "PASS: window 179165548 admitted 1000 (want 800..1000)",
+    "PASS: window 179165549 admitted 1000 (want 800..1000)",
+    "PASS: window 179165550 admitted 1000 (want 800..1000)"
+  ],
+  "data": {
+    "offered_rps": 200,
+    "windows": [
+      {
+        "window": 179165547,
+        "sent": 1986,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          489,
+          511
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 986
+        }
+      },
+      {
+        "window": 179165548,
+        "sent": 2001,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          492,
+          508
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 1001
+        }
+      },
+      {
+        "window": 179165549,
+        "sent": 2000,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          491,
+          509
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 1000
+        }
+      },
+      {
+        "window": 179165550,
+        "sent": 2000,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          508,
+          492
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 1000
+        }
+      },
+      {
+        "window": 179165551,
+        "sent": 13,
+        "admitted": 13,
+        "admitted_per_edge": [
+          6,
+          7
+        ],
+        "statuses": {
+          "200": 13
+        }
+      }
+    ]
+  }
+}

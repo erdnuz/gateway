@@ -220,9 +220,12 @@ func (s Spec) validate() error {
 // target sizes a grant: the request, or for adaptive leasing the edge's
 // observed demand over the horizon, within [MinGrant, MaxGrant].
 func (a GrantArgs) target() int64 {
+	// The requested lease size is the floor; demand only scales a grant up.
+	// Small grants would not strand less (the endgame split and returns take
+	// care of that), they would only cost more hub calls.
 	want := a.Requested
 	if a.Horizon > 0 && a.ObservedRate > 0 {
-		want = int64(a.ObservedRate*a.Horizon.Seconds() + 0.999)
+		want = max(want, int64(a.ObservedRate*a.Horizon.Seconds()+0.999))
 	}
 	if a.MinGrant > 0 {
 		want = max(want, a.MinGrant)

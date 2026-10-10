@@ -1,0 +1,64 @@
+{
+  "scenario": "endgame",
+  "pass": true,
+  "checks": [
+    "PASS: window 179165448 admitted 1000 (want 996..1000)",
+    "PASS: window 179165449 admitted 1000 (want 996..1000)",
+    "PASS: window 179165450 admitted 1000 (want 996..1000)"
+  ],
+  "data": {
+    "windows": [
+      {
+        "window": 179165448,
+        "sent": 1990,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          769,
+          231
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 990
+        }
+      },
+      {
+        "window": 179165449,
+        "sent": 1998,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          761,
+          239
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 998
+        }
+      },
+      {
+        "window": 179165450,
+        "sent": 2002,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          788,
+          212
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 1002
+        }
+      },
+      {
+        "window": 179165451,
+        "sent": 10,
+        "admitted": 10,
+        "admitted_per_edge": [
+          8,
+          2
+        ],
+        "statuses": {
+          "200": 10
+        }
+      }
+    ]
+  }
+}

@@ -153,7 +153,7 @@ func TestEndgameSplitsTheRemainder(t *testing.T) {
 	clock := time.UnixMilli(1_760_000_000_000)
 	m := NewMem()
 	m.Now = func() time.Time { return clock }
-	spec := Spec{Algo: FixedWindow, Limit: 100, Window: time.Minute}
+	spec := Spec{Algo: FixedWindow, Limit: 1000, Window: time.Minute}
 	ref := Ref{Scope: "v1", Service: "s", Subject: "k"}
 	grant := func(edge string, want int64) int64 {
 		g, err := m.Grant(context.Background(), ref, spec, GrantArgs{Requested: want, EdgeID: edge})
@@ -162,13 +162,15 @@ func TestEndgameSplitsTheRemainder(t *testing.T) {
 		}
 		return g.Granted
 	}
-	// Four edges active; 100 left; each asks for 50: the first gets a
-	// quarter of what is left, not half the quota.
+	// Edges register once the quota is within 64 grants of running out.
+	// With 100 of 1000 left, four edges ask; then one asks for 50: it gets
+	// a quarter of what is left, not half of it.
+	grant("", 900)
 	for _, e := range []string{"a", "b", "c", "d"} {
-		grant(e, 1)
+		grant(e, 2)
 	}
-	if got := grant("a", 50); got != 24 {
-		t.Fatalf("endgame grant = %d, want ceil(96/4) = 24", got)
+	if got := grant("a", 50); got != 23 {
+		t.Fatalf("endgame grant = %d, want ceil(92/4) = 23", got)
 	}
 	// Quiet edges age out of the split.
 	clock = clock.Add(3 * time.Second)

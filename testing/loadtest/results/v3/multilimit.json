@@ -1,0 +1,50 @@
+{
+  "scenario": "multilimit",
+  "pass": true,
+  "checks": [
+    "PASS: window 179165458 admitted 300 (per-IP limit 300)",
+    "PASS: window 179165459 admitted 300 (per-IP limit 300)"
+  ],
+  "data": {
+    "windows": [
+      {
+        "window": 179165458,
+        "sent": 994,
+        "admitted": 300,
+        "admitted_per_edge": [
+          153,
+          147
+        ],
+        "statuses": {
+          "200": 300,
+          "429": 694
+        }
+      },
+      {
+        "window": 179165459,
+        "sent": 1001,
+        "admitted": 300,
+        "admitted_per_edge": [
+          154,
+          146
+        ],
+        "statuses": {
+          "200": 300,
+          "429": 701
+        }
+      },
+      {
+        "window": 179165460,
+        "sent": 5,
+        "admitted": 5,
+        "admitted_per_edge": [
+          2,
+          3
+        ],
+        "statuses": {
+          "200": 5
+        }
+      }
+    ]
+  }
+}

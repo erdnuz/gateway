@@ -1,0 +1,16 @@
+{
+  "scenario": "isolation",
+  "pass": true,
+  "checks": [
+    "PASS: svc2 admitted 50/50 after svc exhausted"
+  ],
+  "data": {
+    "svc2_statuses": {
+      "200": 50
+    },
+    "svc_statuses": {
+      "200": 1000,
+      "429": 100
+    }
+  }
+}

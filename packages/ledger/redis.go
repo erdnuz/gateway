@@ -69,8 +69,12 @@ if #KEYS > 1 then
   if preset < expires then expires = preset end
 end
 
+-- Near the endgame (less than 64 grants left), edges register and are
+-- counted so the rest can be split between them. Far from it, a grant
+-- skips the bookkeeping: every edge that keeps asking registers long
+-- before the split applies.
 local n = 1
-if edge ~= '' then
+if edge ~= '' and avail < 64 * target then
   local ekey = KEYS[1] .. ':edges'
   redis.call('ZADD', ekey, now, edge)
   redis.call('ZREMRANGEBYSCORE', ekey, '-inf', now - active_ms)
@@ -106,8 +110,9 @@ if algo == 'token_bucket' then
   redis.call('SET', key, string.format('%d', tat), 'PX', tat - now + 1000)
   reset = tat - now
 else
-  redis.call('INCRBY', key, grant)
-  redis.call('PEXPIRE', key, 2 * win + 1000)
+  if redis.call('INCRBY', key, grant) == grant then
+    redis.call('PEXPIRE', key, 2 * win + 1000)
+  end
 end
 if pkey then
   redis.call('INCRBY', pkey, grant)

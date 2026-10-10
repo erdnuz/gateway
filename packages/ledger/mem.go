@@ -98,7 +98,7 @@ func (m *Mem) Grant(_ context.Context, ref Ref, spec Spec, args GrantArgs) (Gran
 	}
 
 	n := int64(1)
-	if in.edge != "" {
+	if in.edge != "" && avail < 64*in.target { // only near the endgame, as in the Lua
 		set := m.edges[in.key]
 		if set == nil {
 			set = map[string]int64{}
