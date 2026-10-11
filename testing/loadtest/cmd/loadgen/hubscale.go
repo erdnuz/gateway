@@ -21,11 +21,11 @@ import (
 )
 
 var (
-	hsTarget  = flag.String("hubscale-target", "hub-server:9090", "hub gRPC service; every address it resolves to gets traffic")
-	hsLabel   = flag.String("hubscale-label", "run", "row label")
-	hsWorkers = flag.Int("hubscale-workers", 64, "concurrent lease callers")
-	hsBatch   = flag.Int("hubscale-batch", 16, "leases per RPC")
-	hsSecs    = flag.Duration("hubscale-duration", 20*time.Second, "measurement time")
+	hsTarget   = flag.String("hubscale-target", "hub-server:9090", "hub gRPC service; every address it resolves to gets traffic")
+	hsLabel    = flag.String("hubscale-label", "run", "row label")
+	hsWorkers  = flag.Int("hubscale-workers", 64, "concurrent lease callers")
+	hsBatch    = flag.Int("hubscale-batch", 16, "leases per RPC")
+	hsDuration = flag.Duration("hubscale-duration", 20*time.Second, "measurement time")
 )
 
 func scenarioHubScale(o options) *report {
@@ -49,7 +49,7 @@ func scenarioHubScale(o options) *report {
 	var grants, rpcs, errs atomic.Int64
 	var mu sync.Mutex
 	var lats []time.Duration
-	deadline := time.Now().Add(*hsSecs)
+	deadline := time.Now().Add(*hsDuration)
 	var wg sync.WaitGroup
 	for w := 0; w < *hsWorkers; w++ {
 		wg.Add(1)
@@ -92,7 +92,7 @@ func scenarioHubScale(o options) *report {
 		}
 		return float64(lats[int(p*float64(len(lats)-1))].Microseconds()) / 1000
 	}
-	secs := hsSecs.Seconds()
+	secs := hsDuration.Seconds()
 	row := fmt.Sprintf("| %s | %d | **%.0f** | %.0f | %.2f | **%.2f** | %d |\n",
 		*hsLabel, len(ips), float64(grants.Load())/secs, float64(rpcs.Load())/secs, q(0.5), q(0.99), errs.Load())
 	appendFile(filepath.Join(o.outDir, "report.md"), row)

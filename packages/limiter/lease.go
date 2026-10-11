@@ -242,7 +242,7 @@ func (l *Lease) Run(ctx context.Context) {
 			}
 			return false
 		})
-		l.giveBack(ctx, idle)
+		_ = l.giveBack(ctx, idle) // best effort: unreturned tokens expire with their window
 	})
 }
 

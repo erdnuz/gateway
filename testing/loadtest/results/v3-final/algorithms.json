@@ -1,0 +1,70 @@
+{
+  "scenario": "algorithms",
+  "pass": true,
+  "checks": [
+    "PASS: sliding: window 179169664 admitted 1000 \u003c= 1000",
+    "PASS: sliding: window 179169665 admitted 998 \u003c= 1000",
+    "PASS: sliding: window 179169666 admitted 999 \u003c= 1000",
+    "PASS: sliding: any 10s span admitted 1005 \u003c= 1.3Q",
+    "PASS: bucket admitted 1099 in 20s (want 900..1202)"
+  ],
+  "data": {
+    "bucket_admitted": 1099,
+    "bucket_max_per_second": 148,
+    "sliding_max_per_window_span": 1005,
+    "sliding_windows": [
+      {
+        "window": 179169664,
+        "sent": 1988,
+        "admitted": 1000,
+        "admitted_per_edge": [
+          512,
+          488
+        ],
+        "statuses": {
+          "200": 1000,
+          "429": 988
+        }
+      },
+      {
+        "window": 179169665,
+        "sent": 2002,
+        "admitted": 998,
+        "admitted_per_edge": [
+          345,
+          653
+        ],
+        "statuses": {
+          "200": 998,
+          "429": 1004
+        }
+      },
+      {
+        "window": 179169666,
+        "sent": 2000,
+        "admitted": 999,
+        "admitted_per_edge": [
+          476,
+          523
+        ],
+        "statuses": {
+          "200": 999,
+          "429": 1001
+        }
+      },
+      {
+        "window": 179169667,
+        "sent": 10,
+        "admitted": 5,
+        "admitted_per_edge": [
+          4,
+          1
+        ],
+        "statuses": {
+          "200": 5,
+          "429": 5
+        }
+      }
+    ]
+  }
+}

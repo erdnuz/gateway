@@ -235,13 +235,3 @@ func (a GrantArgs) target() int64 {
 	}
 	return max(want, 1)
 }
-
-// waitingRetry is the retry hint for an exhausted window: a tenth of the
-// period, at least 500 ms, and never past the reset.
-func waitingRetry(period, resetIn time.Duration) time.Duration {
-	retry := max(period/10, 500*time.Millisecond)
-	if resetIn > 0 {
-		retry = min(retry, resetIn)
-	}
-	return retry
-}

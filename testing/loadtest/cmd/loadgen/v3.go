@@ -295,7 +295,7 @@ func scenarioMultiLimit(o options) *report {
 	fmt.Fprintf(&r.markdown, "Ten keys (tier quota %d each) from one client address, %d rps total, with `also: per-ip %d per window`. Expect the per-IP limit to bind.\n\n", o.quota, rps, ipQuota)
 	windowTable(&r.markdown, ws)
 	for _, w := range fullWindows(ws, rps*int(o.period/time.Second)) {
-		r.check(w.Admitted <= ipQuota && w.Admitted >= ipQuota-2*int(len(o.edges)), "window %d admitted %d (per-IP limit %d)", w.Window, w.Admitted, ipQuota)
+		r.check(w.Admitted <= ipQuota && w.Admitted >= ipQuota-2*len(o.edges), "window %d admitted %d (per-IP limit %d)", w.Window, w.Admitted, ipQuota)
 	}
 	return r
 }
