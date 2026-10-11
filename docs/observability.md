@@ -38,12 +38,21 @@ bounded by config (service, tier). API keys are never labels.
 | `gate_request_duration_seconds{service}` | edge | request latency at the edge |
 | `gate_ratelimit_decisions_total{service,tier,result}` | edge | `allowed`, `denied`, `safety_allowed`, `safety_denied`, `unavailable`, `rejected` |
 | `gate_lease_rpc_seconds{result}` | edge | lease RPC latency: `granted`, `waiting`, `error` |
+| `gate_edge_lease_batch_size` | edge | lease requests per batched RPC (batching keeps hub calls proportional to edges, not keys) |
+| `gate_ratelimit_shadow_denials_total{service,limit}` | edge, limiter | requests a shadow limit would have denied (they were admitted) |
+| `gate_ratelimit_limit_denials_total{service,limit}` | edge | denials by an additional limit (per client IP, per service) rather than the tier |
+| `gate_ratelimit_cost_settlements_total{service,how}` | edge | post-hoc costs: `reported`, `estimated` (none reported), `refunded` |
 | `gate_key_resolutions_total{result}` | edge | tier-cache misses resolved through the hub |
 | `gate_upstream_duration_seconds{service}` | edge | upstream round trips, retries included |
 | `gate_cache_lookups_total{service,result}` | edge | response cache `hit` / `miss` |
 | `gate_control_events_total{kind}` | edge | config and tier changes applied |
 | `gate_hub_lease_requests_total{result}` | hub | `granted`, `waiting`, `rejected`, `error` |
 | `gate_hub_tokens_granted_total` | hub | tokens handed to edges |
+| `gate_hub_tokens_returned_total` | hub | unspent tokens edges gave back on drain or idle eviction |
+| `gate_hub_debt_settled_total` | hub | post-hoc cost debt settled by draining edges |
+| `gate_hub_lease_active_edges` | hub | edges sharing a quota at grant time (above 1, the endgame split applies) |
+| `gate_hub_region_transfers_total{peer,result}` | hub | borrow attempts: `credited`, `refused`, `unreachable`, `late`, `lost` |
+| `gate_hub_region_tokens_borrowed_total`, `gate_hub_region_tokens_lent_total` | hub | global-quota allocation moved between regions |
 | `gate_hub_edges_connected` | hub | open control-plane streams |
 | `gate_hub_control_events_total{kind}` | hub | changes delivered to this hub's edges |
 | `gate_hub_watchers_dropped_total` | hub | edges disconnected for falling behind |

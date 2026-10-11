@@ -33,12 +33,17 @@ type ControlPlane struct {
 	types.UnimplementedControlPlaneServer
 	cfg    ConfigRegistry
 	tiers  TierStore
-	rdb    *redis.Client // nil: deliver to local watchers only (tests)
-	origin string        // identifies this hub's own messages
+	rdb    redis.UniversalClient // nil: deliver to local watchers only (tests)
+	origin string                // identifies this hub's own messages
 
 	mu       sync.Mutex
 	watchers map[chan *types.ControlEvent]struct{}
+	onTier   func(prefix, apiKey string)
 }
+
+// OnTierChange registers f to run for every tier change any hub publishes
+// (for example to invalidate a tier cache). Call it before Run.
+func (c *ControlPlane) OnTierChange(f func(prefix, apiKey string)) { c.onTier = f }
 
 // controlMessage is the hub-to-hub form of a change.
 type controlMessage struct {
@@ -48,7 +53,7 @@ type controlMessage struct {
 	Tier       *types.TierChange               `json:"tier,omitempty"`
 }
 
-func NewControlPlane(cfg ConfigRegistry, tiers TierStore, rdb *redis.Client) *ControlPlane {
+func NewControlPlane(cfg ConfigRegistry, tiers TierStore, rdb redis.UniversalClient) *ControlPlane {
 	return &ControlPlane{cfg: cfg, tiers: tiers, rdb: rdb, origin: newBootID(), watchers: map[chan *types.ControlEvent]struct{}{}}
 }
 
@@ -149,6 +154,9 @@ func (c *ControlPlane) deliver(m controlMessage) {
 		ev = snap
 		telemetry.ControlPublished.WithLabelValues("config").Inc()
 	case m.Tier != nil:
+		if c.onTier != nil {
+			c.onTier(m.Tier.Prefix, m.Tier.ApiKey)
+		}
 		ev = &types.ControlEvent{Event: &types.ControlEvent_Tier{Tier: m.Tier}}
 		telemetry.ControlPublished.WithLabelValues("tier").Inc()
 	default:

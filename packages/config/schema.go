@@ -12,8 +12,10 @@ const Version = 2
 // File is the root of a gateway config file.
 type File struct {
 	Version  int       `yaml:"version" desc:"Config format version. Must be 2."`
-	Services []Service `yaml:"services" desc:"Upstream services exposed through the gateway."`
-	Runtime  Runtime   `yaml:"runtime,omitempty" desc:"Process tuning. Every field is optional; defaults suit most deployments."`
+	Services []Service `yaml:"services,omitempty" desc:"Upstream services exposed through the gateway."`
+	// Descriptors are served by gate limiter, not the gateway.
+	Descriptors []DescriptorDomain `yaml:"descriptors,omitempty" desc:"Limits for gate limiter, the decision service: Envoy's rate-limit service API and a JSON check API, over the same global quota. Same shape as envoyproxy/ratelimit's config."`
+	Runtime     Runtime            `yaml:"runtime,omitempty" desc:"Process tuning. Every field is optional; defaults suit most deployments."`
 }
 
 // Service is one upstream exposed under a path prefix.
@@ -40,6 +42,30 @@ type Service struct {
 	Analytics *Analytics `yaml:"analytics,omitempty" desc:"Request event capture. Default: every request."`
 
 	OnUpstreamError *UpstreamError `yaml:"on_upstream_error,omitempty" desc:"Response when the upstream fails after retries. Default: a 502 problem (504 on timeout)."`
+}
+
+// DescriptorDomain is one Envoy rate-limit domain.
+type DescriptorDomain struct {
+	Domain  string            `yaml:"domain" desc:"The domain in the caller's rate-limit requests (Envoy's ratelimit filter sets it)."`
+	Entries []DescriptorEntry `yaml:"entries" desc:"Descriptor entries to match, top level first."`
+}
+
+// DescriptorEntry matches one entry of a descriptor.
+type DescriptorEntry struct {
+	Key     string            `yaml:"key" desc:"Entry key, e.g. remote_address, generic_key or a header descriptor's key."`
+	Value   string            `yaml:"value,omitempty" desc:"Match only this value. Omit to give every value its own limit (e.g. one per client address)."`
+	Limit   *DescriptorLimit  `yaml:"limit,omitempty" desc:"The limit for descriptors that end at this entry."`
+	Mode    string            `yaml:"mode,omitempty" desc:"enforce (default) or shadow: report what the limit would deny without denying." enum:"enforce,shadow"`
+	Entries []DescriptorEntry `yaml:"entries,omitempty" desc:"Entries for the descriptor's next key/value pair."`
+}
+
+// DescriptorLimit is a descriptor's limit.
+type DescriptorLimit struct {
+	Algorithm string   `yaml:"algorithm,omitempty" desc:"Default fixed_window." enum:"fixed_window,sliding_window,token_bucket"`
+	Requests  uint32   `yaml:"requests,omitempty" desc:"Budget per window (in hits). Required except for token_bucket."`
+	Window    Duration `yaml:"window,omitempty" desc:"Window, e.g. 1s, 1m or 1h. Required except for token_bucket."`
+	Rate      Rate     `yaml:"rate,omitempty" desc:"token_bucket: refill rate, e.g. 50/s."`
+	Burst     uint32   `yaml:"burst,omitempty" desc:"token_bucket: the bucket's size."`
 }
 
 // Match selects requests for a service.
@@ -81,14 +107,66 @@ type Limits struct {
 	Tiers              map[string]Tier `yaml:"tiers" desc:"Tiers by name. Each API key is assigned one tier."`
 	DefaultTier        string          `yaml:"default_tier,omitempty" desc:"Tier used for a key whose tier cannot be looked up while the hub is unreachable (after any cached tier)."`
 	WhenHubUnavailable *Fallback       `yaml:"when_hub_unavailable,omitempty" desc:"Local limit applied while the hub cannot grant quota. Omit to reject with 503 instead."`
-	LeaseSize          int64           `yaml:"lease_size,omitempty" desc:"Tokens an edge takes from the hub per lease. Default runtime.edge.lease_size."`
+	LeaseSize          int64           `yaml:"lease_size,omitempty" desc:"Tokens an edge asks the hub for per lease (the first lease for a key, or every lease with leasing.mode fixed). Default runtime.edge.lease_size."`
 	MaxConcurrent      int             `yaml:"max_concurrent,omitempty" desc:"Requests one caller may have in flight on one edge. Default unlimited."`
+
+	Algorithm string       `yaml:"algorithm,omitempty" desc:"Default algorithm for the tiers. fixed_window (default) resets every window; sliding_window weights the previous window by its overlap, smoothing the burst at a reset; token_bucket refills continuously at a rate up to a burst." enum:"fixed_window,sliding_window,token_bucket"`
+	Mode      string       `yaml:"mode,omitempty" desc:"enforce (default), or shadow: evaluate the tier limits and report what they would deny (metrics and a Gate-Shadow-Denied header) without denying." enum:"enforce,shadow"`
+	Leasing   *Leasing     `yaml:"leasing,omitempty" desc:"How the hub sizes the grants it leases to edges. Default adaptive: each grant covers what the asking edge spends in 2s."`
+	Org       *OrgLimit    `yaml:"org,omitempty" desc:"A budget shared by every key with the same owner (API keys) or the same org claim (JWT), on top of each key's tier."`
+	Also      []ExtraLimit `yaml:"also,omitempty" desc:"Further limits every request must also fit: per key, per client IP, or across the whole service."`
+	Global    *Global      `yaml:"global,omitempty" desc:"Make the tier quotas global across regions (hubs started with HUB_REGION): each region enforces its share and borrows unused quota from the others, never exceeding the global quota. Fixed windows only."`
+	Cost      *Cost        `yaml:"cost,omitempty" desc:"Charge what each request actually cost, as the upstream reports it after the response (e.g. LLM tokens), instead of a fixed cost per method."`
 }
 
 // Tier is a quota level.
 type Tier struct {
-	Requests uint32           `yaml:"requests" desc:"Request budget per window (in cost units)."`
-	Cost     map[string]uint8 `yaml:"cost,omitempty" desc:"Cost per request by method (GET, POST, PUT, DELETE, or * for others). Default 1."`
+	Requests  uint32           `yaml:"requests,omitempty" desc:"Budget per window, in cost units. Required except for token_bucket."`
+	Cost      map[string]uint8 `yaml:"cost,omitempty" desc:"Cost per request by method (GET, POST, PUT, DELETE, or * for others). Default 1."`
+	Algorithm string           `yaml:"algorithm,omitempty" desc:"Overrides limits.algorithm for this tier." enum:"fixed_window,sliding_window,token_bucket"`
+	Rate      Rate             `yaml:"rate,omitempty" desc:"token_bucket: refill rate, e.g. 20/s or 1200/m."`
+	Burst     uint32           `yaml:"burst,omitempty" desc:"token_bucket: the most cost admitted at once (the bucket's size)."`
+}
+
+// Global splits quotas between regions.
+type Global struct {
+	Floors map[string]float64 `yaml:"floors" desc:"Each region's guaranteed share of every quota, 0 to 1 (e.g. {eu-west: 0.3, us-east: 0.3}). The rest of each key's quota belongs to its home region, chosen by hashing; shares move between regions with demand."`
+}
+
+// Leasing tunes grant sizing.
+type Leasing struct {
+	Mode    string   `yaml:"mode,omitempty" desc:"adaptive (default) sizes each grant to the asking edge's demand; fixed always grants lease_size." enum:"adaptive,fixed"`
+	Horizon Duration `yaml:"horizon,omitempty" desc:"adaptive: how long one grant should last the asking edge. Longer means fewer hub calls; shorter means less quota held per edge. Default 2s."`
+	Min     int64    `yaml:"min,omitempty" desc:"adaptive: smallest grant. Default 1."`
+	Max     int64    `yaml:"max,omitempty" desc:"adaptive: largest grant. Default unbounded (a quarter of the quota at most when one ask exceeds it)."`
+}
+
+// OrgLimit is a budget shared by one owner's keys.
+type OrgLimit struct {
+	Requests uint32   `yaml:"requests" desc:"Budget per window for all of one owner's keys together, in cost units."`
+	Window   Duration `yaml:"window,omitempty" desc:"Window of the org budget, e.g. 1h or 720h. Default limits.window."`
+	Claim    string   `yaml:"claim,omitempty" desc:"jwt auth: the claim naming the caller's org. API-key callers' org is their key's owner."`
+}
+
+// ExtraLimit is a limit applied in addition to the caller's tier.
+type ExtraLimit struct {
+	Name      string   `yaml:"name" desc:"Names the limit in metrics, errors and the ledger. Lowercase letters, digits and dashes."`
+	Per       string   `yaml:"per,omitempty" desc:"What the limit counts: key (default; each caller), client_ip (each client address), or service (all traffic together, e.g. to protect the upstream)." enum:"key,client_ip,service"`
+	Algorithm string   `yaml:"algorithm,omitempty" desc:"Default fixed_window." enum:"fixed_window,sliding_window,token_bucket"`
+	Requests  uint32   `yaml:"requests,omitempty" desc:"Budget per window. Required except for token_bucket."`
+	Window    Duration `yaml:"window,omitempty" desc:"Default limits.window."`
+	Rate      Rate     `yaml:"rate,omitempty" desc:"token_bucket: refill rate, e.g. 2000/s."`
+	Burst     uint32   `yaml:"burst,omitempty" desc:"token_bucket: the bucket's size."`
+	Mode      string   `yaml:"mode,omitempty" desc:"enforce (default) or shadow." enum:"enforce,shadow"`
+}
+
+// Cost charges post-hoc costs.
+type Cost struct {
+	ActualHeader   string `yaml:"actual_header" desc:"Response header (or trailer, for streamed bodies) carrying the request's actual cost, e.g. X-Usage-Total-Tokens."`
+	Estimate       int64  `yaml:"estimate,omitempty" desc:"Cost reserved before the request is forwarded. Default the tier's cost for the method."`
+	EstimateHeader string `yaml:"estimate_header,omitempty" desc:"Request header a client may use to state its own estimate, e.g. X-Max-Tokens."`
+	OnMissing      string `yaml:"on_missing,omitempty" desc:"When the upstream reports no cost: estimate (default; the reservation stands) or refund. A failed upstream is always refunded." enum:"estimate,refund"`
+	MaxDebt        int64  `yaml:"max_debt,omitempty" desc:"How far actual costs may overdraw one edge's share of the quota before it waits for the next grant. Default the estimate."`
 }
 
 // Fallback is the degraded-mode limit used without the hub.

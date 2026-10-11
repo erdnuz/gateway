@@ -162,7 +162,10 @@ func (p *parser) err() error {
 	return &Error{File: p.file, Problems: p.problems}
 }
 
-var durationType = reflect.TypeOf(Duration(0))
+var (
+	durationType = reflect.TypeOf(Duration(0))
+	rateType     = reflect.TypeOf(Rate(0))
+)
 
 // walk records node positions and reports keys the schema does not define.
 func (p *parser) walk(n *yaml.Node, t reflect.Type, path string) {

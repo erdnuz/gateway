@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"gateway/packages/common/types"
@@ -16,14 +17,17 @@ import (
 )
 
 // windowedHub grants up to quota tokens per epoch-aligned window, mimicking
-// the hub's accounting.
+// the hub's accounting on its own clock (skew ahead of the edges').
 type windowedHub struct {
-	mu     sync.Mutex
-	quota  int64
-	period time.Duration
-	used   map[int64]int64
-	calls  atomic.Int64
-	err    error
+	mu       sync.Mutex
+	quota    int64
+	period   time.Duration
+	skew     time.Duration
+	used     map[int64]int64
+	calls    atomic.Int64
+	err      error
+	returned []*types.LeaseReturn
+	reqs     []*types.QuotaLeaseRequest
 }
 
 func (h *windowedHub) RequestQuotaLease(_ context.Context, in *types.QuotaLeaseRequest) (*types.QuotaLeaseResponse, error) {
@@ -33,16 +37,30 @@ func (h *windowedHub) RequestQuotaLease(_ context.Context, in *types.QuotaLeaseR
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	wid := time.Now().Unix() / int64(h.period/time.Second)
+	h.reqs = append(h.reqs, in)
+	now := time.Now().Add(h.skew).UnixMilli()
+	pms := h.period.Milliseconds()
+	wid := now / pms
+	left := (wid+1)*pms - now
 	if h.used == nil {
 		h.used = map[int64]int64{}
 	}
 	grant := min(in.RequestedTokens, h.quota-h.used[wid])
 	if grant <= 0 {
-		return &types.QuotaLeaseResponse{WaitingForCapacity: true, RetryAfterMs: 50}, nil
+		return &types.QuotaLeaseResponse{WaitingForCapacity: true, RetryAfterMs: 50, WindowId: wid, ResetInMs: left}, nil
 	}
 	h.used[wid] += grant
-	return &types.QuotaLeaseResponse{GrantedTokens: grant, RemainingGlobal: h.quota - h.used[wid], LeaseTtlSeconds: int64(h.period / time.Second)}, nil
+	return &types.QuotaLeaseResponse{
+		GrantedTokens: grant, RemainingGlobal: h.quota - h.used[wid], LeaseTtlSeconds: int64(h.period / time.Second),
+		WindowId: wid, ExpiresInMs: left, ResetInMs: left,
+	}, nil
+}
+
+func (h *windowedHub) ReturnLeases(_ context.Context, in *types.ReturnLeasesRequest) (*types.ReturnLeasesResponse, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.returned = append(h.returned, in.Returns...)
+	return &types.ReturnLeasesResponse{}, nil
 }
 
 // scriptedHub returns the next scripted grant on each call (0 when exhausted).
@@ -130,12 +148,12 @@ func TestLease_ExpiredLeaseIsNotSpent(t *testing.T) {
 	l := NewLease(&scriptedHub{grants: []int64{100}}, LeaseOptions{LeaseSize: 100})
 	allowN(t, l, req, 1)
 	c := l.counter(req)
-	c.expiresAt.Store(time.Now().Add(-time.Millisecond).UnixMilli())
+	c.cur.Load().expiresAt.Store(time.Now().Add(-time.Millisecond).UnixMilli())
 	if got := allowN(t, l, req, 1); got != 0 {
 		t.Fatal("spent a token from an expired lease")
 	}
-	if c.tokens.Load() != 0 {
-		t.Fatalf("expired lease kept %d tokens", c.tokens.Load())
+	if n := c.cur.Load().tokens.Load(); n != 0 {
+		t.Fatalf("expired lease kept %d tokens", n)
 	}
 }
 
@@ -153,7 +171,7 @@ func TestLease_RenewsBeforeExpiryAndMergesBalance(t *testing.T) {
 	hub := &scriptedHub{grants: []int64{100, 100}, ttl: 10}
 	l := NewLease(hub, LeaseOptions{LeaseSize: 100, LowWaterPct: 1, RenewBefore: 2 * time.Second})
 	allowN(t, l, req, 1)
-	l.counter(req).expiresAt.Store(time.Now().Add(1800 * time.Millisecond).UnixMilli())
+	l.counter(req).cur.Load().expiresAt.Store(time.Now().Add(1800 * time.Millisecond).UnixMilli())
 	allowN(t, l, req, 1)
 	eventually(t, func() bool { n, _ := l.Holding("p", "s", "k"); return n == 198 })
 }
@@ -179,7 +197,7 @@ func TestLease_WaitingStillSpendsHeldTokens(t *testing.T) {
 	r.Limit, r.Window = 100, time.Hour
 	allowN(t, l, r, 1)
 	c := l.counter(r)
-	held := c.tokens.Load()
+	held := c.cur.Load().tokens.Load()
 	c.retryAt.Store(time.Now().Add(time.Hour).UnixMilli())
 	calls := hub.calls.Load()
 	if got := allowN(t, l, r, int(held)+1); got != int(held) {
@@ -192,30 +210,34 @@ func TestLease_WaitingStillSpendsHeldTokens(t *testing.T) {
 
 // Regression: a key that hit its quota once was denied forever.
 func TestLease_QuotaResetsEachWindow(t *testing.T) {
-	l := NewLease(&windowedHub{quota: 30, period: time.Second}, LeaseOptions{LeaseSize: 10})
-	r := req
-	r.Limit, r.Window = 30, time.Second
-	waitForWindowStart(time.Second)
-	if got := allowN(t, l, r, 50); got != 30 {
-		t.Fatalf("window 1 admitted %d, want 30", got)
-	}
-	waitForWindowStart(time.Second)
-	if got := allowN(t, l, r, 50); got != 30 {
-		t.Fatalf("window 2 admitted %d, want 30", got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		l := NewLease(&windowedHub{quota: 30, period: time.Second}, LeaseOptions{LeaseSize: 10})
+		r := req
+		r.Limit, r.Window = 30, time.Second
+		waitForWindowStart(time.Second)
+		if got := allowN(t, l, r, 50); got != 30 {
+			t.Fatalf("window 1 admitted %d, want 30", got)
+		}
+		waitForWindowStart(time.Second)
+		if got := allowN(t, l, r, 50); got != 30 {
+			t.Fatalf("window 2 admitted %d, want 30", got)
+		}
+	})
 }
 
 // Regression: tokens leased in window N must not be spent in N+1.
 func TestLease_DropsLeftoverTokensOnWindowRoll(t *testing.T) {
-	l := NewLease(&windowedHub{quota: 30, period: time.Second}, LeaseOptions{LeaseSize: 20})
-	r := req
-	r.Limit, r.Window = 30, time.Second
-	waitForWindowStart(time.Second)
-	allowN(t, l, r, 1) // leases 20, spends 1
-	waitForWindowStart(time.Second)
-	if got := allowN(t, l, r, 100); got != 30 {
-		t.Fatalf("next window admitted %d, want exactly 30", got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		l := NewLease(&windowedHub{quota: 30, period: time.Second}, LeaseOptions{LeaseSize: 20})
+		r := req
+		r.Limit, r.Window = 30, time.Second
+		waitForWindowStart(time.Second)
+		allowN(t, l, r, 1) // leases 20, spends 1
+		waitForWindowStart(time.Second)
+		if got := allowN(t, l, r, 100); got != 30 {
+			t.Fatalf("next window admitted %d, want exactly 30", got)
+		}
+	})
 }
 
 // Regression: counters were keyed by scope+key, charging one service's usage
@@ -323,16 +345,18 @@ func TestLease_EvictsIdleKeys(t *testing.T) {
 }
 
 func TestLocal_EnforcesLimitPerWindow(t *testing.T) {
-	l := NewLocal()
-	r := Request{Scope: "p", Service: "s", Key: "k", Limit: 5, Window: time.Second}
-	waitForWindowStart(time.Second)
-	if got := allowN(t, l, r, 50); got != 5 {
-		t.Fatalf("admitted %d, want 5", got)
-	}
-	waitForWindowStart(time.Second)
-	if got := allowN(t, l, r, 1); got != 1 {
-		t.Fatal("quota did not reset in the next window")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		l := NewLocal()
+		r := Request{Scope: "p", Service: "s", Key: "k", Limit: 5, Window: time.Second}
+		waitForWindowStart(time.Second)
+		if got := allowN(t, l, r, 50); got != 5 {
+			t.Fatalf("admitted %d, want 5", got)
+		}
+		waitForWindowStart(time.Second)
+		if got := allowN(t, l, r, 1); got != 1 {
+			t.Fatal("quota did not reset in the next window")
+		}
+	})
 }
 
 func benchAllow(b *testing.B, keys int) {

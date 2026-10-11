@@ -26,3 +26,9 @@ type TierStore interface {
 	SetTier(ctx context.Context, prefix, apiKey, tierID string) error
 	DeleteTier(ctx context.Context, prefix, apiKey string) error
 }
+
+// OwnerStore maps a key to its owner, whose keys share an org budget.
+type OwnerStore interface {
+	GetOwner(ctx context.Context, prefix, apiKey string) (string, error)
+	SetOwner(ctx context.Context, prefix, apiKey, owner string) error
+}

@@ -26,6 +26,9 @@ var toInternalCacheKey = strings.NewReplacer(
 // edges. Services sharing a path group become one prefix.
 func Compile(f *File) *types.GatewayConfig {
 	out := &types.GatewayConfig{Runtime: compileRuntime(f.Runtime)}
+	for _, d := range f.Descriptors {
+		out.Descriptors = append(out.Descriptors, types.DescriptorDomain{Domain: d.Domain, Entries: compileEntries(d.Entries)})
+	}
 	byGroup := map[string]int{}
 	for _, s := range f.Services {
 		g := s.group()
@@ -40,6 +43,40 @@ func Compile(f *File) *types.GatewayConfig {
 			})
 		}
 		out.Prefixes[i].Services = append(out.Prefixes[i].Services, compileService(s))
+	}
+	return out
+}
+
+func compileEntries(es []DescriptorEntry) []types.DescriptorEntry {
+	var out []types.DescriptorEntry
+	for _, e := range es {
+		c := types.DescriptorEntry{Key: e.Key, Value: e.Value, Entries: compileEntries(e.Entries)}
+		if l := e.Limit; l != nil {
+			spec := &types.LimitSpec{ID: e.Key, Algorithm: internalAlgo(l.Algorithm), Quota: int64(l.Requests), Window: l.Window.D(), Shadow: e.Mode == "shadow"}
+			if spec.Algorithm == "token_bucket" {
+				spec.Quota, spec.Rate = int64(l.Burst), l.Rate.PerSecond()
+			}
+			c.Limit = spec
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func entriesFromInternal(es []types.DescriptorEntry) []DescriptorEntry {
+	var out []DescriptorEntry
+	for _, e := range es {
+		c := DescriptorEntry{Key: e.Key, Value: e.Value, Entries: entriesFromInternal(e.Entries)}
+		if l := e.Limit; l != nil {
+			c.Limit = &DescriptorLimit{Algorithm: l.Algorithm, Requests: uint32(l.Quota), Window: Duration(l.Window)}
+			if l.Algorithm == "token_bucket" {
+				c.Limit.Requests, c.Limit.Burst, c.Limit.Rate = 0, uint32(l.Quota), Rate(l.Rate)
+			}
+			if l.Shadow {
+				c.Mode = "shadow"
+			}
+		}
+		out = append(out, c)
 	}
 	return out
 }
@@ -75,15 +112,16 @@ func compileService(s Service) types.ServiceConfig {
 	}
 
 	for _, name := range sortedTierNames(s.Limits.Tiers) {
-		svc.Tiers = append(svc.Tiers, compileTier(name, s.Limits.Tiers[name]))
+		svc.Tiers = append(svc.Tiers, compileTier(name, s.Limits.Tiers[name], s.Limits.Algorithm))
 	}
+	compileLimits(&svc, s.Limits)
 	hubPolicy := types.HubFailurePolicy{TierLookupStrategy: "fail-closed"}
 	if s.Limits.DefaultTier != "" {
 		hubPolicy.TierLookupStrategy = "stale-or-default"
 		hubPolicy.DefaultTier = s.Limits.DefaultTier
 	}
 	if fb := s.Limits.WhenHubUnavailable; fb != nil {
-		safety := compileTier(safetyTierID, Tier{Requests: fb.Allow})
+		safety := compileTier(safetyTierID, Tier{Requests: fb.Allow}, "")
 		svc.SafetyTier = &safety
 		hubPolicy.AllowOnRateServiceError = true
 	}
@@ -140,7 +178,48 @@ func compileService(s Service) types.ServiceConfig {
 	return svc
 }
 
-func compileTier(name string, t Tier) types.TierConfig {
+// compileLimits carries the v3 limit settings: algorithms, shadow mode,
+// leasing, the org budget, additional limits and post-hoc cost.
+func compileLimits(svc *types.ServiceConfig, l Limits) {
+	svc.Shadow = l.Mode == "shadow"
+	if p := l.Leasing; p != nil {
+		svc.Lease = types.LeasePolicy{Mode: p.Mode, Horizon: p.Horizon.D(), Min: p.Min, Max: p.Max}
+	}
+	if o := l.Org; o != nil {
+		svc.Org = &types.OrgLimit{Quota: int64(o.Requests), Window: o.Window.D(), Claim: o.Claim}
+	}
+	for _, a := range l.Also {
+		spec := types.LimitSpec{
+			ID:        a.Name,
+			Per:       orDefault(a.Per, types.PerKey),
+			Algorithm: internalAlgo(a.Algorithm),
+			Quota:     int64(a.Requests),
+			Window:    a.Window.D(),
+			Shadow:    a.Mode == "shadow",
+		}
+		if spec.Algorithm == "token_bucket" {
+			spec.Quota, spec.Rate = int64(a.Burst), a.Rate.PerSecond()
+		}
+		svc.Limits = append(svc.Limits, spec)
+	}
+	if g := l.Global; g != nil {
+		svc.Global = &types.GlobalLimit{Floors: g.Floors}
+	}
+	if c := l.Cost; c != nil {
+		svc.Cost = &types.CostPolicy{Estimate: c.Estimate, EstimateHeader: c.EstimateHeader, ActualHeader: c.ActualHeader, OnMissing: c.OnMissing, MaxDebt: c.MaxDebt}
+	}
+}
+
+// internalAlgo stores the default algorithm as "", so configs that do not
+// use the others are unchanged on the wire.
+func internalAlgo(a string) string {
+	if a == "fixed_window" {
+		return ""
+	}
+	return a
+}
+
+func compileTier(name string, t Tier, defaultAlgo string) types.TierConfig {
 	cost := func(method string) uint8 {
 		if c, ok := t.Cost[method]; ok {
 			return c
@@ -150,7 +229,7 @@ func compileTier(name string, t Tier) types.TierConfig {
 		}
 		return 1
 	}
-	return types.TierConfig{
+	tc := types.TierConfig{
 		TierID:     name,
 		Quota:      t.Requests,
 		GetCost:    cost(http.MethodGet),
@@ -158,7 +237,12 @@ func compileTier(name string, t Tier) types.TierConfig {
 		PutCost:    cost(http.MethodPut),
 		DeleteCost: cost(http.MethodDelete),
 		OtherCost:  cost("*"),
+		Algorithm:  internalAlgo(orDefault(t.Algorithm, defaultAlgo)),
 	}
+	if tc.Algorithm == "token_bucket" {
+		tc.Quota, tc.Rate = t.Burst, t.Rate.PerSecond()
+	}
+	return tc
 }
 
 func compileRuntime(r Runtime) types.RuntimePolicy {
@@ -216,6 +300,9 @@ func sortedTierNames(m map[string]Tier) []string {
 // to a version 2 File, omitting everything that equals a default.
 func FromInternal(cfg *types.GatewayConfig) *File {
 	f := &File{Version: Version, Runtime: runtimeFromInternal(cfg.Runtime)}
+	for _, d := range cfg.Descriptors {
+		f.Descriptors = append(f.Descriptors, DescriptorDomain{Domain: d.Domain, Entries: entriesFromInternal(d.Entries)})
+	}
 	for _, p := range cfg.Prefixes {
 		group := strings.Trim(p.Prefix, "/")
 		for _, svc := range p.Services {
@@ -257,6 +344,7 @@ func serviceFromInternal(group string, p types.PrefixConfig, svc types.ServiceCo
 	for _, t := range svc.Tiers {
 		s.Limits.Tiers[t.TierID] = tierFromInternal(t)
 	}
+	limitsFromInternal(&s.Limits, svc)
 	hp := svc.Failure.EffectiveHubPolicy()
 	if hp.TierLookupStrategy != "fail-closed" && hp.DefaultTier != "" {
 		s.Limits.DefaultTier = hp.DefaultTier
@@ -301,8 +389,42 @@ func serviceFromInternal(group string, p types.PrefixConfig, svc types.ServiceCo
 	return s
 }
 
+func limitsFromInternal(l *Limits, svc types.ServiceConfig) {
+	if svc.Shadow {
+		l.Mode = "shadow"
+	}
+	if p := svc.Lease; p != (types.LeasePolicy{}) {
+		l.Leasing = &Leasing{Mode: p.Mode, Horizon: Duration(p.Horizon), Min: p.Min, Max: p.Max}
+	}
+	if o := svc.Org; o != nil {
+		l.Org = &OrgLimit{Requests: uint32(o.Quota), Window: Duration(o.Window), Claim: o.Claim}
+	}
+	for _, spec := range svc.Limits {
+		a := ExtraLimit{Name: spec.ID, Algorithm: spec.Algorithm, Requests: uint32(spec.Quota), Window: Duration(spec.Window)}
+		if spec.Per != types.PerKey {
+			a.Per = spec.Per
+		}
+		if spec.Algorithm == "token_bucket" {
+			a.Requests, a.Burst, a.Rate = 0, uint32(spec.Quota), Rate(spec.Rate)
+		}
+		if spec.Shadow {
+			a.Mode = "shadow"
+		}
+		l.Also = append(l.Also, a)
+	}
+	if g := svc.Global; g != nil {
+		l.Global = &Global{Floors: g.Floors}
+	}
+	if c := svc.Cost; c != nil {
+		l.Cost = &Cost{Estimate: c.Estimate, EstimateHeader: c.EstimateHeader, ActualHeader: c.ActualHeader, OnMissing: c.OnMissing, MaxDebt: c.MaxDebt}
+	}
+}
+
 func tierFromInternal(t types.TierConfig) Tier {
-	out := Tier{Requests: t.Quota}
+	out := Tier{Requests: t.Quota, Algorithm: t.Algorithm}
+	if t.Algorithm == "token_bucket" {
+		out.Requests, out.Burst, out.Rate = 0, t.Quota, Rate(t.Rate)
+	}
 	add := func(m string, c uint8) {
 		if c > 1 {
 			if out.Cost == nil {

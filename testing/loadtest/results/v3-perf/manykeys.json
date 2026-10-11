@@ -1,0 +1,15 @@
+{
+  "scenario": "manykeys",
+  "pass": true,
+  "checks": [
+    "PASS: every request admitted (10000)",
+    "PASS: concurrent leases were batched (mean batch 28.3)"
+  ],
+  "data": {
+    "admitted": 10000,
+    "lease_items": 10000,
+    "lease_rpcs": 353,
+    "mean_batch": 28.328611898016998,
+    "requests": 10000
+  }
+}

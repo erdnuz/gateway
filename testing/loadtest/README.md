@@ -17,7 +17,9 @@ Requires Docker only; dev certificates are generated on first run
 
 Config: [gateway-config.loadtest.yaml](gateway-config.loadtest.yaml) — prefix
 `lt`, 10 s quota window, `pro` tier Q=1000, `bulk` tier effectively unlimited,
-safety tier S=50, lease quantum 100.
+safety tier S=50, first lease 100 (then adaptive). Each edge returns the hub
+window that charged a request in `Gate-Window`, so window checks are exact:
+`<= Q`, not `<= Q + tolerance`.
 
 | scenario | checks |
 | --- | --- |
@@ -30,6 +32,13 @@ safety tier S=50, lease quantum 100.
 | `hotkey` | one key at concurrency 256; no spurious denials or errors |
 | `outage` | hub stopped: edges keep serving under the safety tier, ≤ S per edge per window |
 | `outage-recovery` | hub restarted: normal quota resumes |
+| `endgame` | 2× quota, 80% to one edge and 20% to the other: every window still reaches `Q − 4` (the hub splits the last of the quota between active edges) |
+| `algorithms` | a sliding window admits ≤ Q per window and ≤ 1.3Q in any window-length span; a token bucket admits its burst plus its rate |
+| `multilimit` | ten keys from one client address with an `also: per-ip` limit of 300: the per-IP limit binds |
+| `llm` | post-hoc cost: tokens charged per window stay within Q + edges × max_debt, and the quota is spent on actual, not estimated, cost |
+| `manykeys` | 5000 cold keys on each edge at once: every request admitted, lease requests batched |
+| `rls` | two `gate limiter` replicas answer one descriptor from one global quota: ≤ Q per window |
+| `drain` | both edges lease 400 of 1000; edge 1 is stopped gracefully mid-window; edge 2 still uses nearly the whole quota because edge 1 returned its lease |
 
 The loadgen exits non-zero when a scenario's invariant fails; `run.sh` lists
 passes and failures at the end of the report.

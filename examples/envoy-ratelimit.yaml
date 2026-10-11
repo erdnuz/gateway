@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=../schema/gate.schema.json
+# Limits for gate limiter, the decision service. Envoy's ratelimit filter (or
+# Istio, Contour, Emissary...) sends descriptors; gate limiter answers from the
+# same leased global quota the gateway uses, exactly, however many Envoys and
+# limiter replicas there are. The shape follows envoyproxy/ratelimit.
+version: 2
+descriptors:
+  - domain: ingress
+    entries:
+      # One limit per client address.
+      - key: remote_address
+        limit: { requests: 100, window: 1s }
+
+      # A fixed descriptor value, smoothed with a token bucket, with a
+      # per-user limit nested under it (tried out in shadow mode first).
+      - key: generic_key
+        value: checkout
+        limit: { algorithm: token_bucket, rate: 50/s, burst: 100 }
+        entries:
+          - key: user_id
+            limit: { requests: 1000, window: 1m }
+            mode: shadow
+
+  # A queue consumer's budget, checked over the JSON API:
+  #   POST /v1/check {"domain": "jobs", "descriptors": [{"entries": [{"key": "tenant", "value": "acme"}]}], "max_wait_ms": 2000}
+  - domain: jobs
+    entries:
+      - key: tenant
+        limit: { algorithm: sliding_window, requests: 600, window: 1m }

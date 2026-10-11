@@ -26,6 +26,7 @@ import (
 	"gateway/internal/app/analyticsapp"
 	"gateway/internal/app/edgeapp"
 	"gateway/internal/app/hubapp"
+	"gateway/internal/app/limiterapp"
 	"gateway/packages/common/telemetry"
 	"gateway/packages/common/types"
 	"gateway/packages/hub"
@@ -46,6 +47,8 @@ type Options struct {
 	AnalyticsAddr string            // analytics API + dashboard; empty disables analytics
 	MetricsAddr   string            // Prometheus /metrics for every component; empty disables it
 	EchoAddr      string            // built-in echo upstream; empty disables it
+	LimiterAddr   string            // decision service JSON API; empty disables gate limiter
+	LimiterGRPC   string            // decision service gRPC (Envoy's RateLimitService)
 	Keys          map[string]string // API key → tier; nil seeds one key per tier
 	Out           io.Writer         // banner output
 	OnReady       func(Endpoints)   // called once everything serves traffic
@@ -54,6 +57,8 @@ type Options struct {
 // Endpoints describes a running dev stack.
 type Endpoints struct {
 	Edge, Hub, Analytics string // base URLs; Analytics is empty when disabled
+	Limiter              string // decision service JSON API base URL; empty when disabled
+	LimiterGRPC          string // decision service gRPC address
 	HubToken             string
 	Keys                 map[string]string
 }
@@ -156,6 +161,25 @@ func Run(ctx context.Context, opts Options) error {
 		analyticsURL = "http://" + a.Addr()
 	}
 
+	var limiterURL, limiterGRPC string
+	if opts.LimiterAddr != "" {
+		l, err := limiterapp.Start(ctx, limiterapp.Config{
+			HTTPAddr:    opts.LimiterAddr,
+			GRPCAddr:    orDefault(opts.LimiterGRPC, "127.0.0.1:0"),
+			ID:          "dev-limiter",
+			HubGRPCAddr: h.GRPCAddr(),
+			Secret:      token,
+		})
+		if err != nil {
+			return fmt.Errorf("limiter: %w", err)
+		}
+		shutdowns = append(shutdowns, l.Shutdown)
+		limiterURL, limiterGRPC = "http://"+l.HTTPAddr(), l.GRPCAddr()
+		if err := waitReady(ctx, limiterURL+"/readyz", 10*time.Second); err != nil {
+			return fmt.Errorf("limiter: %w", err)
+		}
+	}
+
 	edgeURL := "http://" + e.Addr()
 	if err := waitReady(ctx, edgeURL+"/readyz", 10*time.Second); err != nil {
 		return fmt.Errorf("edge: %w", err)
@@ -171,8 +195,11 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	printBanner(opts, edgeURL, hubURL, analyticsURL, token, prefix, service, keys)
+	if limiterURL != "" {
+		printLimiter(opts.Out, limiterURL, limiterGRPC, cfgManager.Snapshot())
+	}
 	if opts.OnReady != nil {
-		opts.OnReady(Endpoints{Edge: edgeURL, Hub: hubURL, Analytics: analyticsURL, HubToken: token, Keys: keys})
+		opts.OnReady(Endpoints{Edge: edgeURL, Hub: hubURL, Analytics: analyticsURL, Limiter: limiterURL, LimiterGRPC: limiterGRPC, HubToken: token, Keys: keys})
 	}
 	<-ctx.Done()
 	fmt.Fprintln(opts.Out, "\nstopping gate dev")
@@ -282,6 +309,26 @@ func printBanner(opts Options, edgeURL, hubURL, analyticsURL, token, prefix, ser
 		fmt.Fprintf(w, "\nTry it:\n  curl -i -H \"X-API-Key: %s\" %s/%s/%s/hello\n", names[0], edgeURL, prefix, service)
 	}
 	fmt.Fprintln(w, "\nPress Ctrl+C to stop.")
+}
+
+// printLimiter shows how to ask the decision service for a decision.
+func printLimiter(w io.Writer, url, grpcAddr string, cfg *types.GatewayConfig) {
+	fmt.Fprintln(w, "\ngate limiter (decision service)")
+	fmt.Fprintf(w, "  JSON API    %s/v1/check\n", url)
+	fmt.Fprintf(w, "  Envoy RLS   %s   (envoy.service.ratelimit.v3)\n", grpcAddr)
+	if cfg == nil || len(cfg.Descriptors) == 0 || len(cfg.Descriptors[0].Entries) == 0 {
+		return
+	}
+	d := cfg.Descriptors[0]
+	body := fmt.Sprintf(`{"domain":%q,"descriptors":[{"entries":[{"key":%q,"value":"alice"}]}]}`, d.Domain, d.Entries[0].Key)
+	fmt.Fprintf(w, "\nTry it:\n  curl -s %s/v1/check -d '%s'\n", url, body)
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 func randomToken() string {

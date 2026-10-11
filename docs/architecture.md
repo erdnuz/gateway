@@ -60,14 +60,18 @@ round trip:
    The edge spends what it holds and then denies locally, and asks again only
    after a jittered retry, so a hot key cannot stampede the hub.
 
-The hub's ledger is exact, so the limit holds however many edges serve a key.
-Lease size is the knob between hub load and fairness:
+The hub's ledger is exact, so the limit holds however many edges serve a key,
+and its clock defines windows, so edge clock skew cannot move a token into
+the wrong window. Grants are sized to each edge's demand:
 
-- **Hub load** is about `requests / lease size`: 10,000 rps at a lease of 100 is
-  about 100 lease RPCs per second, whether those requests hit 2 edges or 50.
-- **Stranded tokens**: near the end of a window, idle edges may hold tokens a
-  busy edge cannot use. At most `(edges − 1) × lease size` per key per window.
-  Edges can never admit more than the limit.
+- **Hub load** is about `requests / grant size`, and a grant covers about two
+  seconds of the asking edge's demand: busy keys cost few RPCs, and RPCs for
+  different keys share batches, so the hub's call rate grows with edges, not
+  keys.
+- **Stranded tokens**: near the end of a window the hub splits what is left
+  between the edges active on the key, so about one token per active edge goes
+  unused; a draining edge returns what it holds. Edges can never admit more
+  than the limit.
 
 Concurrent misses for one key share a single RPC (singleflight). A hub
 outage costs one RPC per 500 ms backoff, not one per request.
@@ -126,7 +130,8 @@ request ID.
 | Hub connection lost | Edges keep serving with their current config and cached tiers, and reconnect with backoff to any hub | the watch stream resynchronises from a snapshot on reconnect |
 | Edge's Redis response cache down (if used) | `/readyz` fails after 3 probes and the load balancer drains that edge | one edge's local dependency affects only that edge |
 | NATS down | Analytics events are dropped from a bounded buffer | requests never wait on observability |
-| Edge crash | Its unspent tokens are lost for the rest of the window | bounded by one lease per active key |
+| Edge crash | Its unspent tokens are lost for the rest of the window (a graceful stop returns them) | bounded by one grant per active key |
+| Region partition | Each region keeps its allocation of global quotas and stops borrowing | regions together never exceed the quota |
 
 ## Scaling each tier
 
@@ -135,8 +140,15 @@ request ID.
   evicted after a minute.
 - **Hubs** do work that grows with lease RPCs and key lookups, not requests.
   Each grant is one atomic Redis script, so the ledger stays correct with
-  any number of hub replicas. Redis is the remaining shared component, and
-  ledger keys are per key and window, so it shards cleanly.
+  any number of hub replicas; edges spread lease RPCs over all of them. The
+  ledger runs on one Redis or a Redis Cluster: every key a grant touches
+  shares a hash tag, so a grant is one script on one shard.
+- **Regions** each run their own hubs and ledger. Global quotas are split
+  into per-region allocations that move with demand by debit-first transfers,
+  with no cross-region call on the lease path
+  ([multi-region](design/multi-region.md)).
+- **gate limiter** replicas serve the same quotas to Envoy and JSON callers,
+  and scale like edges.
 - **Analytics** consumers join a NATS queue group, so ingestion scales by adding
   consumers. ClickHouse handles the aggregate queries.
 
@@ -144,7 +156,10 @@ request ID.
 
 | Package | Role |
 | --- | --- |
-| [`packages/limiter`](../packages/limiter) | `Limiter` interface; `Lease` (global quota via hub leases) and `Local` (per-edge safety limit) |
+| [`packages/ledger`](../packages/ledger) | the quota ledger: grant, return and transfer scripts and their in-memory twin |
+| [`packages/limiter`](../packages/limiter) | `Limiter` interface; `Lease` (global quota via hub leases), `Reserve`, `Batcher`, and `Local` (per-edge safety limit) |
+| [`packages/decide`](../packages/decide), [`packages/rls`](../packages/rls) | the decision service: descriptors, JSON API, Envoy's RateLimitService |
+| [`packages/region`](../packages/region) | splitting global quotas between regions |
 | [`packages/edge`](../packages/edge) | data plane: the middleware chain above, config and tier caches |
 | [`packages/hub`](../packages/hub) | control plane: lease ledger (gRPC), tiers, config reloads |
 | [`packages/analytics`](../packages/analytics) | event ingestion, storage, dashboard |

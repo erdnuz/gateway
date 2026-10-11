@@ -1,0 +1,16 @@
+{
+  "scenario": "drain",
+  "pass": true,
+  "checks": [
+    "PASS: window admitted 1000 \u003e= 950: the drained edge's lease was returned",
+    "PASS: window admitted 1000 \u003c= quota 1000"
+  ],
+  "data": {
+    "admitted": 1000,
+    "statuses": {
+      "200": 998,
+      "429": 9077
+    },
+    "window": 59721824
+  }
+}

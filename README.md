@@ -4,39 +4,48 @@
 [![Load test](https://github.com/erdnuz/gateway/actions/workflows/loadtest.yml/badge.svg)](https://github.com/erdnuz/gateway/actions/workflows/loadtest.yml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/erdnuz/gateway)](go.mod)
 
-Gate is an API gateway with **distributed rate limiting by quota leasing**.
-Edges enforce per-key quotas locally from token leases granted by a central
-hub, so limits hold globally across many edges without a network round trip
-per request.
+Gate is a **distributed rate limiter** and the API gateway built around it.
+Limits hold exactly and globally — across any number of gateway edges,
+Envoy proxies, hub replicas, ledger shards and regions — without a network
+round trip per request: edges spend quota leased from a central ledger, in
+memory, and the ledger only sees one call per lease.
 
 ```mermaid
 flowchart LR
     C[Clients] --> LB[Load balancer]
-    LB --> E1[Edge] & E2[Edge] & E3[Edge]
-    E1 & E2 & E3 --> U[Upstream replicas]
-    E1 & E2 & E3 -. "one mTLS gRPC stream each:<br/>leases · key lookups · config & tier pushes" .-> H[Hubs]
-    H --- R[(Redis: quota ledger, keys,<br/>hub-to-hub changes)]
-    E1 & E2 & E3 -. "NATS: request events" .-> A[Analytics] --- CH[(ClickHouse)]
+    LB --> E1[Gate edge] & E2[Gate edge]
+    EV[Envoy / Istio] -- RateLimitService --> L[gate limiter]
+    W[queue workers] -- /v1/check --> L
+    E1 & E2 & L -. "batched leases over mTLS gRPC" .-> H[Hubs]
+    H --- R[(Ledger: Redis Cluster,<br/>hash-tagged per quota)]
+    H <-. "debit-first transfers" .-> H2[Hubs in another region]
+    E1 & E2 -. "NATS: request events" .-> A[Analytics] --- CH[(ClickHouse)]
 ```
 
 - **Edges** (data plane) authenticate callers, enforce quotas, cache and
   proxy. They share nothing on the request path, so capacity grows linearly
   with edges.
+- **gate limiter** serves the same limits to Envoy (its rate-limit service
+  API) and to anything else (a JSON check API), statelessly.
 - **Hubs** (control plane) own config, keys and the quota ledger. They are
-  stateless over Redis, so they replicate too, and their work grows with
-  leases, not requests.
+  stateless over Redis (a single instance or a Cluster), so they replicate
+  too, and their work grows with leases, not requests. Several regions each
+  run their own and split global quotas between them.
 - **Analytics** ingests request events and serves a query API and dashboard.
 
-See [docs/architecture.md](docs/architecture.md) for where state lives, how
-each tier scales, and what happens when a component fails.
+See [docs/architecture.md](docs/architecture.md) for where state lives and
+[the design note](docs/design/distributed-rate-limiting.md) for how the
+limiting works.
 
 | | |
 | --- | --- |
-| Rate limiting | global per-key quotas by leasing; per-tier costs by method; epoch-aligned windows; a per-edge safety limit while the hub is down; per-caller concurrency caps |
-| Callers | hub-issued API keys (stored hashed; lifecycle API and CLI); JWT with JWKS and tier claims; anonymous, limited per client IP |
-| Upstreams | replica pools (round robin, least requests); per-replica circuit breaking; retries that move between replicas; timeouts and body limits; protocol upgrades and streaming (`httputil.ReverseProxy`) |
-| Control plane | one gRPC stream per edge; changes reach every edge within milliseconds, across replicated hubs; scoped admin tokens; an audit log |
-| Operations | Prometheus metrics with a provisioned Grafana dashboard; OpenTelemetry tracing; structured logs with request IDs; RFC 9457 errors; one binary; `gate dev` with no infrastructure |
+| Algorithms | fixed window, sliding window, token bucket (GCRA); per-method costs; costs settled after the response (LLM tokens per minute) |
+| Limits | per-key tiers; org budgets pooling an owner's keys; extra limits per key, client IP or whole service; shadow (dry-run) mode |
+| Accuracy | the ledger's clock defines windows, so no window ever exceeds its quota whatever the clock skew; adaptive grants and an endgame split leave about one token per active edge unused; leases returned on shutdown |
+| Scale | batched lease RPCs; hubs balanced client-side; Redis Cluster ledger; multi-region global quotas with debit-first rebalancing |
+| Integrations | Envoy/Istio `RateLimitService` and a JSON check/reserve/settle API (`gate limiter`); envoyproxy/ratelimit-style descriptors |
+| Verification | ledger conformance (Lua vs Go), a deterministic simulation of edges, hubs and regions under faults on a virtual clock, testcontainers integration tests, load tests with exact per-window checks, a comparative benchmark |
+| Gateway | hub-issued API keys, JWT with JWKS, anonymous per-IP callers; replica pools, circuit breaking, retries; caching; CORS; Prometheus, Grafana, OpenTelemetry; RFC 9457 errors; one binary; `gate dev` with no infrastructure |
 
 ## Quick start
 
@@ -115,9 +124,10 @@ and `make clean` also removes its volumes.
 One binary runs every component:
 
 ```text
-gate dev                 hub + edge + analytics in one process, no external services
+gate dev                 hub + edge + analytics + limiter in one process, no external services
 gate hub                 control plane          (configured by environment)
 gate edge                gateway data plane     (configured by environment)
+gate limiter             the rate limiter as a service: Envoy RLS + JSON API
 gate analytics           analytics + dashboard  (configured by environment)
 gate echo                demo upstream that echoes each request as JSON
 gate config validate F   check a config file and list every problem with its line
@@ -162,11 +172,48 @@ windows, isolation between services, propagation to every edge, and
 behaviour during a hub outage. See the
 [before/after results](testing/loadtest/results/COMPARISON.md).
 
+## The limiter without the gateway
+
+`gate limiter` answers Envoy's `envoy.service.ratelimit.v3.RateLimitService`
+and a JSON API from the same global quota, so Envoy, Istio and non-HTTP
+workloads get exact global limits too. Descriptors use envoyproxy/ratelimit's
+config shape:
+
+```yaml
+descriptors:
+  - domain: ingress
+    entries:
+      - key: remote_address
+        limit: { requests: 100, window: 1s }
+```
+
+```bash
+curl -s localhost:8082/v1/check -d '{"domain":"demo","descriptors":[{"entries":[{"key":"user","value":"alice"}]}]}'
+```
+
+See [docs/limiter.md](docs/limiter.md).
+
+## Evidence
+
+- `make sim` runs generated scenarios — 1–6 edges, three algorithms, clock
+  skew up to ±500 ms, drains, post-hoc costs, and RPC faults (latency, drops,
+  lost replies, duplicates, hub outages) — on a virtual clock against the
+  real edge and hub code, and checks that no window ever exceeds its quota.
+  The multi-region variant adds partitions between regions.
+  ([verification](docs/design/verification.md))
+- `make loadtest` checks exact per-window admission (`<= Q`, using the
+  `Gate-Window` header), carry-over, endgame splitting, lease return on
+  drain, batching, the algorithms, multiple limits, post-hoc cost and the
+  decision service on a Docker stack.
+- `testing/bench/run.sh` compares Gate with a central Redis counter and
+  with Envoy plus envoyproxy/ratelimit ([benchmarks](docs/benchmarks.md)).
+
 ## Development
 
 ```bash
 make test               # go vet + unit tests with the race detector
 make test-integration   # testcontainers suite (Redis, NATS)
+make sim                # deterministic simulation (ARGS=N scenarios)
 make loadtest           # end-to-end rate-limiter load test
 make help               # everything else
 ```
@@ -180,19 +227,24 @@ otherwise.
 | --- | --- |
 | `cmd/gate` | the single binary |
 | `internal/app` | per-component wiring (`hubapp`, `edgeapp`, `analyticsapp`) and the in-process dev stack |
-| `packages/limiter` | the `Limiter` interface: `Lease` (global quota from hub leases) and `Local` (per-edge safety limit) |
+| `packages/ledger` | the quota ledger: grant, return and transfer scripts (Lua) and their in-memory twin |
+| `packages/limiter` | the edge side: `Lease` (global quota from hub leases), `Reserve` (multiple limits, settlement), `Batcher`, `Local` (per-edge safety limit) |
+| `packages/decide`, `packages/rls` | the decision service: descriptor matching, the JSON API, Envoy's RateLimitService |
+| `packages/region` | splitting global quotas between regions |
 | `packages/edge`, `packages/hub`, `packages/analytics` | component logic |
 | `packages/config` | config file format: parsing, validation, migration, JSON Schema |
 | `packages/common` | shared runtime types, RFC 9457 problems and request IDs (`httpx`), env helpers, readiness |
 | `api/proto` | hub ↔ edge lease protocol |
 | `deploy` | Dockerfile, compose stack, dev certificate generator |
 | `examples`, `schema` | gateway config examples and their JSON Schema |
-| `testing` | integration scenarios and the load-test harness |
+| `testing` | integration scenarios, the simulation (`sim`), the load test and the benchmark |
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) and [distributed rate limiting](docs/design/distributed-rate-limiting.md)
-- Decisions: [leases](docs/adr/0001-leases-over-central-counting.md), [one gRPC control plane](docs/adr/0002-one-grpc-control-plane.md), [edges share nothing](docs/adr/0003-edges-share-nothing.md), [config v2](docs/adr/0004-config-v2.md)
+- [Algorithms](docs/design/algorithms.md), [multi-region quotas](docs/design/multi-region.md), [verification](docs/design/verification.md), [benchmarks](docs/benchmarks.md)
+- [gate limiter](docs/limiter.md): Envoy and the JSON API
+- Decisions: [leases](docs/adr/0001-leases-over-central-counting.md), [one gRPC control plane](docs/adr/0002-one-grpc-control-plane.md), [edges share nothing](docs/adr/0003-edges-share-nothing.md), [config v2](docs/adr/0004-config-v2.md), [ledger clock](docs/adr/0005-ledger-clock-and-interface.md), [adaptive leases](docs/adr/0006-adaptive-leases-and-endgame.md), [batching](docs/adr/0007-batched-unary-over-streams.md), [multiple limits](docs/adr/0008-multi-limit-and-org-budgets.md), [post-hoc cost](docs/adr/0009-reservations-and-debt.md), [decision service](docs/adr/0010-decision-service.md), [Redis Cluster](docs/adr/0011-redis-cluster-hash-tags.md), [regions](docs/adr/0012-multi-region-debit-first.md)
 - [Hub admin API (OpenAPI)](api/openapi/hub.yaml)
 - [Observability](docs/observability.md): metrics, the Grafana dashboard, tracing
 - [Configuration](docs/configuration.md)

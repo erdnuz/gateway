@@ -54,7 +54,7 @@ func newCORSPolicy(origins map[string]struct{}, allowedHeaders, allowedMethods [
 }
 
 type HubServer struct {
-	rdb               *redis.Client
+	rdb               redis.UniversalClient
 	cfgManager        ConfigRegistry
 	tierManager       TierStore
 	authToken         string        // admin: every endpoint
@@ -83,7 +83,7 @@ type configUpdateReport struct {
 
 // NewHubServer builds the hub's admin HTTP API. Config and tier changes made
 // through it are pushed to edges by control.
-func NewHubServer(rdb *redis.Client, cfg ConfigRegistry, tierStore TierStore, control *ControlPlane, authToken string) *HubServer {
+func NewHubServer(rdb redis.UniversalClient, cfg ConfigRegistry, tierStore TierStore, control *ControlPlane, authToken string) *HubServer {
 	server := &HubServer{
 		rdb:         rdb,
 		cfgManager:  cfg,
@@ -463,7 +463,7 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 			return
 		}
 
-		if err := s.assign(ctx, prefix, hash, req.TierID); err != nil {
+		if err := s.assign(ctx, prefix, hash, req.TierID, nil); err != nil {
 			s.writeInternalError(w, r, "handleTiers.SetTier", err)
 			return
 		}
@@ -471,7 +471,7 @@ func (s *HubServer) handleTiers(w http.ResponseWriter, r *http.Request, ctx cont
 		w.WriteHeader(http.StatusOK)
 
 	case http.MethodDelete:
-		if err := s.assign(ctx, prefix, hash, ""); err != nil {
+		if err := s.assign(ctx, prefix, hash, "", nil); err != nil {
 			s.writeInternalError(w, r, "handleTiers.DeleteTier", err)
 			return
 		}

@@ -90,6 +90,19 @@ case "${task}" in
     GO_DOCKER_ARGS="-v /var/run/docker.sock:/var/run/docker.sock -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal -e TESTCONTAINERS_RYUK_DISABLED=true --add-host host.docker.internal:host-gateway" \
       go_ test -tags integration -count=1 -timeout 25m ./testing/integration/...
     ;;
+  sim)
+    # Deterministic simulation: generated traffic and faults on a virtual
+    # clock against the real limiter and hub. ARGS=N sets the scenario count.
+    go_ test -count=1 -timeout 60m ./testing/sim/ -run Simulation -v -sim.seeds="${1:-1000}"
+    ;;
+  tla)
+    # Model-checks the TLA+ specs in docs/spec with TLC (pinned tla2tools).
+    docker run --rm -v "$(pwd -W 2>/dev/null || pwd)/docs/spec":/spec -v gate-tla:/tla -w /spec eclipse-temurin:21-jre sh -c '
+      [ -f /tla/tla2tools.jar ] || wget -q -O /tla/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar || exit 1
+      for m in LeaseProtocol RegionTransfer; do f=$m; [ $m = RegionTransfer ] && f=MCRegionTransfer;
+        echo "== $m"; java -XX:+UseParallelGC -cp /tla/tla2tools.jar tlc2.TLC -workers auto -cleanup -config $m.cfg $f.tla | tail -12 || exit 1
+      done'
+    ;;
   loadtest)
     bash testing/loadtest/run.sh "${1:-run}"
     ;;
@@ -122,6 +135,8 @@ Usage: make <task>   (or: bash scripts/dev.sh <task>)
   build             build bin/gate
   test              go vet + unit tests with the race detector
   test-integration  integration suite (testcontainers)
+  tla               model-check the TLA+ specs (docs/spec) with TLC
+  sim [N]           N simulated scenarios (default 1000): traffic, clock skew and faults on a virtual clock
   loadtest [label]  end-to-end rate-limiter load test
   lint              golangci-lint (formatting, vet and more)
   certs             generate dev mTLS certs into deploy/certs

@@ -1,0 +1,73 @@
+{
+  "scenario": "llm",
+  "pass": true,
+  "checks": [
+    "PASS: window 179165461 used 4998 tokens \u003c= 5400",
+    "PASS: window 179165461 used 4998 tokens: the quota is spent on actual, not estimated, cost (\u003e= 3500)",
+    "PASS: window 179165462 used 4946 tokens \u003c= 5400",
+    "PASS: window 179165462 used 4946 tokens: the quota is spent on actual, not estimated, cost (\u003e= 3500)",
+    "PASS: window 179165463 used 5040 tokens \u003c= 5400",
+    "PASS: window 179165463 used 5040 tokens: the quota is spent on actual, not estimated, cost (\u003e= 3500)"
+  ],
+  "data": {
+    "tokens_per_window": {
+      "179165461": 4998,
+      "179165462": 4946,
+      "179165463": 5040,
+      "179165464": 89
+    },
+    "windows": [
+      {
+        "window": 179165461,
+        "sent": 398,
+        "admitted": 96,
+        "admitted_per_edge": [
+          48,
+          48
+        ],
+        "statuses": {
+          "200": 96,
+          "429": 302
+        }
+      },
+      {
+        "window": 179165462,
+        "sent": 400,
+        "admitted": 99,
+        "admitted_per_edge": [
+          51,
+          48
+        ],
+        "statuses": {
+          "200": 99,
+          "429": 301
+        }
+      },
+      {
+        "window": 179165463,
+        "sent": 400,
+        "admitted": 94,
+        "admitted_per_edge": [
+          45,
+          49
+        ],
+        "statuses": {
+          "200": 94,
+          "429": 306
+        }
+      },
+      {
+        "window": 179165464,
+        "sent": 2,
+        "admitted": 2,
+        "admitted_per_edge": [
+          1,
+          1
+        ],
+        "statuses": {
+          "200": 2
+        }
+      }
+    ]
+  }
+}

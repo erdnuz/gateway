@@ -8,8 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +46,12 @@ type Config struct {
 	RedisAddr  string
 	CacheBytes int64
 
+	// Limiter is lease (default): quota leased from the hub. redis-counter
+	// counts every request in LimiterRedis instead, the central-counter
+	// baseline the benchmark compares against.
+	Limiter      string
+	LimiterRedis string
+
 	LeaseSize        int64   // 0: runtime.edge.rate_lease_size
 	LeaseLowWaterPct float64 // 0: runtime.edge.rate_low_water_pct
 
@@ -69,6 +78,8 @@ func FromEnv() Config {
 		TLSCAFile:           strings.TrimSpace(config.String("EDGE_TLS_CA_FILE", "")),
 		RedisAddr:           strings.TrimSpace(config.String("REDIS_ADDR", "")),
 		CacheBytes:          config.Int64("EDGE_CACHE_BYTES", defaultCacheBytes),
+		Limiter:             strings.TrimSpace(config.String("EDGE_LIMITER", "lease")),
+		LimiterRedis:        strings.TrimSpace(config.String("EDGE_LIMITER_REDIS", "")),
 		LeaseSize:           config.Int64("EDGE_LEASE_SIZE", 0),
 		LeaseLowWaterPct:    float64(config.Int("EDGE_LEASE_LOW_WATER_PERCENT", 0)),
 		AnalyticsEnabled:    config.Bool("GATE_ANALYTICS_ENABLED", true),
@@ -106,6 +117,7 @@ type Edge struct {
 	httpServer *http.Server
 	ln         net.Listener
 	hub        *edge.HubClient
+	lease      *limiter.Lease
 	closers    []func()
 }
 
@@ -150,7 +162,24 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 
 	// Quota state lives in this process only: edges share nothing but the
 	// hub, so they scale out without coordinating with each other.
-	lease := limiter.NewLease(hub, limiter.LeaseOptions{LeaseSize: cfg.LeaseSize, LowWaterPct: cfg.LeaseLowWaterPct})
+	// Concurrent lease requests share batched RPCs, and the hub splits the
+	// last of a quota between the edges it knows are spending it.
+	edgeID := cfg.EdgeID
+	if edgeID == "" {
+		edgeID = defaultEdgeID()
+	}
+	lease := limiter.NewLease(limiter.NewBatcher(hub), limiter.LeaseOptions{LeaseSize: cfg.LeaseSize, LowWaterPct: cfg.LeaseLowWaterPct, EdgeID: edgeID})
+	e.lease = lease
+	var lim limiter.Limiter = lease
+	if cfg.Limiter == "redis-counter" {
+		if cfg.LimiterRedis == "" {
+			return nil, errors.New("EDGE_LIMITER=redis-counter needs EDGE_LIMITER_REDIS")
+		}
+		crdb := redis.NewClient(&redis.Options{Addr: cfg.LimiterRedis, PoolSize: 256})
+		e.closers = append(e.closers, func() { _ = crdb.Close() })
+		lim = limiter.NewRedisCounter(crdb)
+		slog.Warn("EDGE_LIMITER=redis-counter: every request is counted in Redis (benchmark baseline)")
+	}
 
 	responses := edge.NewMemoryResponses(cfg.CacheBytes)
 	if cfg.RedisAddr != "" {
@@ -170,10 +199,10 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 	server := edge.NewServer(edge.Deps{
 		Config:    edge.NewConfigManager(bootstrap),
 		Tiers:     edge.NewTierCache(hub.ResolveKey),
-		Limiter:   lease,
+		Limiter:   lim,
 		Analytics: sink,
 		Responses: responses,
-	}, edge.Options{EdgeID: cfg.EdgeID, AdminToken: cfg.AdminToken})
+	}, edge.Options{EdgeID: edgeID, AdminToken: cfg.AdminToken})
 	server.StartBackgroundWorkers(ctx)
 	server.StartReadinessProbe(ctx)
 	if bootstrap == nil {
@@ -204,10 +233,28 @@ func Start(ctx context.Context, cfg Config) (*Edge, error) {
 }
 
 // Shutdown stops accepting requests and waits for in-flight ones.
+//
+// Once no request can be admitted any more, the edge gives its unspent
+// tokens back to the hub, so leaving mid-window strands no quota.
 func (e *Edge) Shutdown(ctx context.Context) error {
 	err := e.httpServer.Shutdown(ctx)
+	if e.lease != nil {
+		if derr := e.lease.Drain(ctx); derr != nil {
+			slog.Warn("returning leases on shutdown failed; they expire with their window", "err", derr)
+		}
+	}
 	e.close()
 	return err
+}
+
+// defaultEdgeID names an edge that was not given EDGE_ID: its hostname (a
+// container ID under Docker) plus a random suffix, unique per process.
+func defaultEdgeID() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "edge"
+	}
+	return host + "-" + strconv.FormatUint(rand.Uint64()%1e6, 36)
 }
 
 func (e *Edge) close() {

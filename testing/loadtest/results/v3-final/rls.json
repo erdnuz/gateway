@@ -1,0 +1,16 @@
+{
+  "scenario": "rls",
+  "pass": true,
+  "checks": [
+    "PASS: window 179169678 admitted 500 (quota 500)",
+    "PASS: window 179169679 admitted 500 (quota 500)"
+  ],
+  "data": {
+    "admitted_per_window": {
+      "179169677": 500,
+      "179169678": 500,
+      "179169679": 500,
+      "179169680": 5
+    }
+  }
+}

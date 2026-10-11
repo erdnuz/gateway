@@ -1,0 +1,139 @@
+# Comparative benchmark: the same upstream, load generator and limits
+# (500 requests per second per API key), enforced four ways. run.sh starts
+# one system at a time and scales its data plane (edge or envoy) to 1, 2, 4.
+#
+#   gate          Gate edges, quota leased from the hub (this project)
+#   counter       Gate edges with EDGE_LIMITER=redis-counter: one Redis
+#                 INCR per request, the textbook central counter
+#   envoy-ref     Envoy + envoyproxy/ratelimit (the reference RLS) + Redis
+#   envoy-gate    Envoy + gate limiter (Gate's decision service)
+name: gate-bench
+
+x-gate: &gate
+  build:
+    context: ../..
+    dockerfile: deploy/Dockerfile
+    target: gate
+  image: gate-bench
+
+x-tls: &tls
+  - ${BENCH_CERT_DIR:?set BENCH_CERT_DIR}/edge:/certs/edge:ro
+  - ${BENCH_CERT_DIR}/ca:/certs/ca:ro
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory-policy", "noeviction", "--save", ""]
+    cpus: 1.0
+
+  hub-server:
+    <<: *gate
+    command: ["hub"]
+    cpus: 1.0
+    depends_on: [redis]
+    environment:
+      PORT: "8080"
+      HUB_GRPC_PORT: "9090"
+      REDIS_ADDR: redis:6379
+      HUB_AUTH_TOKEN: bench-token
+      CONFIG_FILE_PATH: /config/gateway.yaml
+      HUB_TLS_CERT_FILE: /certs/hub/tls.crt
+      HUB_TLS_KEY_FILE: /certs/hub/tls.key
+      HUB_TLS_CA_FILE: /certs/ca/ca.crt
+    volumes:
+      - ./gateway-config.bench.yaml:/config/gateway.yaml:ro
+      - ${BENCH_CERT_DIR}/hub:/certs/hub:ro
+      - ${BENCH_CERT_DIR}/ca:/certs/ca:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  edge:
+    <<: *gate
+    profiles: ["gate", "counter"]
+    command: ["edge"]
+    cpus: 1.0
+    depends_on:
+      hub-server:
+        condition: service_healthy
+    environment:
+      PORT: ":8080"
+      HUB_GRPC_ADDR: hub-server:9090
+      HUB_GRPC_SERVER_NAME: hub-server
+      GATE_ANALYTICS_ENABLED: "false"
+      EDGE_LIMITER: ${EDGE_LIMITER:-lease}
+      EDGE_LIMITER_REDIS: redis:6379
+      EDGE_TLS_CERT_FILE: /certs/edge/tls.crt
+      EDGE_TLS_KEY_FILE: /certs/edge/tls.key
+      EDGE_TLS_CA_FILE: /certs/ca/ca.crt
+    volumes: *tls
+
+  limiter:
+    <<: *gate
+    profiles: ["envoy-gate"]
+    command: ["limiter"]
+    cpus: 1.0
+    depends_on:
+      hub-server:
+        condition: service_healthy
+    environment:
+      PORT: ":8080"
+      LIMITER_GRPC_PORT: ":8081"
+      HUB_GRPC_ADDR: hub-server:9090
+      HUB_GRPC_SERVER_NAME: hub-server
+      LIMITER_TLS_CERT_FILE: /certs/edge/tls.crt
+      LIMITER_TLS_KEY_FILE: /certs/edge/tls.key
+      LIMITER_TLS_CA_FILE: /certs/ca/ca.crt
+    volumes: *tls
+
+  ratelimit:
+    image: envoyproxy/ratelimit:master
+    profiles: ["envoy-ref"]
+    command: ["/bin/ratelimit"]
+    cpus: 1.0
+    depends_on: [redis]
+    environment:
+      USE_STATSD: "false"
+      LOG_LEVEL: warn
+      REDIS_SOCKET_TYPE: tcp
+      REDIS_URL: redis:6379
+      # Fair settings: pipelining, and a local cache of over-limit keys so
+      # denials cost no Redis call.
+      REDIS_PIPELINE_WINDOW: 150us
+      REDIS_PIPELINE_LIMIT: "8"
+      LOCAL_CACHE_SIZE_IN_BYTES: "1048576"
+      RUNTIME_ROOT: /data
+      RUNTIME_SUBDIRECTORY: ratelimit
+      RUNTIME_WATCH_ROOT: "false"
+      GRPC_PORT: "8081"
+    volumes:
+      - ./ratelimit:/data/ratelimit:ro
+
+  envoy:
+    image: envoyproxy/envoy:v1.34-latest
+    profiles: ["envoy-ref", "envoy-gate"]
+    cpus: 1.0
+    command: ["envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "warn", "--concurrency", "1"]
+    volumes:
+      - ./envoy/${ENVOY_CONFIG:-envoy-ref.yaml}:/etc/envoy/envoy.yaml:ro
+
+  upstream:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+      target: tools
+    image: gate-bench-tools
+    command: ["upstream"]
+    cpus: 1.0
+
+  loadgen:
+    image: gate-bench-tools
+    profiles: ["tools"]
+    cpus: 2.0
+    entrypoint: ["loadgen"]
+    environment:
+      HUB_AUTH_TOKEN: bench-token
+    volumes:
+      - ./results:/results

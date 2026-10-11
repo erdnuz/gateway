@@ -48,12 +48,14 @@ func (s *captureSink) last() *types.AnalyticsEntry {
 	return &s.entries[len(s.entries)-1]
 }
 
-// hubStub grants leases from a fixed quota per key, or fails with err.
+// hubStub grants leases from a fixed quota per key (and per named limit,
+// from limits), or fails with err.
 type hubStub struct {
-	mu    sync.Mutex
-	quota int64
-	used  map[string]int64
-	err   error
+	mu     sync.Mutex
+	quota  int64
+	limits map[string]int64
+	used   map[string]int64
+	err    error
 }
 
 func (h *hubStub) RequestQuotaLease(_ context.Context, in *types.QuotaLeaseRequest) (*types.QuotaLeaseResponse, error) {
@@ -65,12 +67,16 @@ func (h *hubStub) RequestQuotaLease(_ context.Context, in *types.QuotaLeaseReque
 	if h.used == nil {
 		h.used = map[string]int64{}
 	}
-	grant := min(in.RequestedTokens, h.quota-h.used[in.ApiKey])
+	quota, k := h.quota, in.LimitId+"/"+in.ApiKey
+	if q, ok := h.limits[in.LimitId]; ok {
+		quota = q
+	}
+	grant := min(in.RequestedTokens, quota-h.used[k])
 	if grant <= 0 {
 		return &types.QuotaLeaseResponse{WaitingForCapacity: true, RetryAfterMs: 1000}, nil
 	}
-	h.used[in.ApiKey] += grant
-	return &types.QuotaLeaseResponse{GrantedTokens: grant, RemainingGlobal: h.quota - h.used[in.ApiKey], LeaseTtlSeconds: 3600}, nil
+	h.used[k] += grant
+	return &types.QuotaLeaseResponse{GrantedTokens: grant, RemainingGlobal: quota - h.used[k], LeaseTtlSeconds: 3600}, nil
 }
 
 type fixture struct {

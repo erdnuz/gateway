@@ -23,10 +23,10 @@ func withHubTierTimeout(ctx context.Context) (context.Context, context.CancelFun
 }
 
 type TierManager struct {
-	rdb *redis.Client
+	rdb redis.UniversalClient
 }
 
-func NewTierManager(rdb *redis.Client) *TierManager {
+func NewTierManager(rdb redis.UniversalClient) *TierManager {
 	return &TierManager{rdb: rdb}
 }
 
@@ -60,4 +60,28 @@ func (tm *TierManager) DeleteTier(ctx context.Context, prefixID, apiKey string) 
 	redisCtx, cancel := withHubTierTimeout(ctx)
 	defer cancel()
 	return tm.rdb.Del(redisCtx, tm.getCacheKey(prefixID, apiKey)).Err()
+}
+
+const redisOwnerKeyPrefix = "hub:owner:"
+
+// SetOwner records a key's owner ("" removes it).
+func (tm *TierManager) SetOwner(ctx context.Context, prefixID, apiKey, owner string) error {
+	redisCtx, cancel := withHubTierTimeout(ctx)
+	defer cancel()
+	key := redisOwnerKeyPrefix + strings.TrimSpace(prefixID) + ":" + strings.TrimSpace(apiKey)
+	if owner == "" {
+		return tm.rdb.Del(redisCtx, key).Err()
+	}
+	return tm.rdb.Set(redisCtx, key, owner, 0).Err()
+}
+
+// GetOwner returns a key's owner ("" when it has none).
+func (tm *TierManager) GetOwner(ctx context.Context, prefixID, apiKey string) (string, error) {
+	redisCtx, cancel := withHubTierTimeout(ctx)
+	defer cancel()
+	val, err := tm.rdb.Get(redisCtx, redisOwnerKeyPrefix+strings.TrimSpace(prefixID)+":"+strings.TrimSpace(apiKey)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	return val, err
 }

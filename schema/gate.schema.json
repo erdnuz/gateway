@@ -1,8 +1,114 @@
 {
+  "$defs": {
+    "DescriptorEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "description": "Entries for the descriptor's next key/value pair.",
+          "items": {
+            "$ref": "#/$defs/DescriptorEntry"
+          },
+          "type": "array"
+        },
+        "key": {
+          "description": "Entry key, e.g. remote_address, generic_key or a header descriptor's key.",
+          "type": "string"
+        },
+        "limit": {
+          "additionalProperties": false,
+          "description": "The limit for descriptors that end at this entry.",
+          "properties": {
+            "algorithm": {
+              "description": "Default fixed_window.",
+              "enum": [
+                "fixed_window",
+                "sliding_window",
+                "token_bucket"
+              ],
+              "type": "string"
+            },
+            "burst": {
+              "description": "token_bucket: the bucket's size.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rate": {
+              "description": "token_bucket: refill rate, e.g. 50/s.",
+              "examples": [
+                "20/s",
+                "1200/m",
+                "5000/h"
+              ],
+              "pattern": "^[0-9]+(\\.[0-9]+)?/(s|m|h)$",
+              "type": "string"
+            },
+            "requests": {
+              "description": "Budget per window (in hits). Required except for token_bucket.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window": {
+              "description": "Window, e.g. 1s, 1m or 1h. Required except for token_bucket.",
+              "examples": [
+                "500ms",
+                "30s",
+                "5m",
+                "1h"
+              ],
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "mode": {
+          "description": "enforce (default) or shadow: report what the limit would deny without denying.",
+          "enum": [
+            "enforce",
+            "shadow"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "description": "Match only this value. Omit to give every value its own limit (e.g. one per client address).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    }
+  },
   "$id": "https://raw.githubusercontent.com/erdnuz/gateway/master/schema/gate.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "descriptors": {
+      "description": "Limits for gate limiter, the decision service: Envoy's rate-limit service API and a JSON check API, over the same global quota. Same shape as envoyproxy/ratelimit's config.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "domain": {
+            "description": "The domain in the caller's rate-limit requests (Envoy's ratelimit filter sets it).",
+            "type": "string"
+          },
+          "entries": {
+            "description": "Descriptor entries to match, top level first.",
+            "items": {
+              "$ref": "#/$defs/DescriptorEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "domain",
+          "entries"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "runtime": {
       "additionalProperties": false,
       "description": "Process tuning. Every field is optional; defaults suit most deployments.",
@@ -445,22 +551,242 @@
             "additionalProperties": false,
             "description": "API keys, tiers and rate limits. Every request must carry a key with a tier.",
             "properties": {
+              "algorithm": {
+                "description": "Default algorithm for the tiers. fixed_window (default) resets every window; sliding_window weights the previous window by its overlap, smoothing the burst at a reset; token_bucket refills continuously at a rate up to a burst.",
+                "enum": [
+                  "fixed_window",
+                  "sliding_window",
+                  "token_bucket"
+                ],
+                "type": "string"
+              },
+              "also": {
+                "description": "Further limits every request must also fit: per key, per client IP, or across the whole service.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "algorithm": {
+                      "description": "Default fixed_window.",
+                      "enum": [
+                        "fixed_window",
+                        "sliding_window",
+                        "token_bucket"
+                      ],
+                      "type": "string"
+                    },
+                    "burst": {
+                      "description": "token_bucket: the bucket's size.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "mode": {
+                      "description": "enforce (default) or shadow.",
+                      "enum": [
+                        "enforce",
+                        "shadow"
+                      ],
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Names the limit in metrics, errors and the ledger. Lowercase letters, digits and dashes.",
+                      "type": "string"
+                    },
+                    "per": {
+                      "description": "What the limit counts: key (default; each caller), client_ip (each client address), or service (all traffic together, e.g. to protect the upstream).",
+                      "enum": [
+                        "key",
+                        "client_ip",
+                        "service"
+                      ],
+                      "type": "string"
+                    },
+                    "rate": {
+                      "description": "token_bucket: refill rate, e.g. 2000/s.",
+                      "examples": [
+                        "20/s",
+                        "1200/m",
+                        "5000/h"
+                      ],
+                      "pattern": "^[0-9]+(\\.[0-9]+)?/(s|m|h)$",
+                      "type": "string"
+                    },
+                    "requests": {
+                      "description": "Budget per window. Required except for token_bucket.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "window": {
+                      "description": "Default limits.window.",
+                      "examples": [
+                        "500ms",
+                        "30s",
+                        "5m",
+                        "1h"
+                      ],
+                      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "cost": {
+                "additionalProperties": false,
+                "description": "Charge what each request actually cost, as the upstream reports it after the response (e.g. LLM tokens), instead of a fixed cost per method.",
+                "properties": {
+                  "actual_header": {
+                    "description": "Response header (or trailer, for streamed bodies) carrying the request's actual cost, e.g. X-Usage-Total-Tokens.",
+                    "type": "string"
+                  },
+                  "estimate": {
+                    "description": "Cost reserved before the request is forwarded. Default the tier's cost for the method.",
+                    "type": "integer"
+                  },
+                  "estimate_header": {
+                    "description": "Request header a client may use to state its own estimate, e.g. X-Max-Tokens.",
+                    "type": "string"
+                  },
+                  "max_debt": {
+                    "description": "How far actual costs may overdraw one edge's share of the quota before it waits for the next grant. Default the estimate.",
+                    "type": "integer"
+                  },
+                  "on_missing": {
+                    "description": "When the upstream reports no cost: estimate (default; the reservation stands) or refund. A failed upstream is always refunded.",
+                    "enum": [
+                      "estimate",
+                      "refund"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "actual_header"
+                ],
+                "type": "object"
+              },
               "default_tier": {
                 "description": "Tier used for a key whose tier cannot be looked up while the hub is unreachable (after any cached tier).",
                 "type": "string"
               },
+              "global": {
+                "additionalProperties": false,
+                "description": "Make the tier quotas global across regions (hubs started with HUB_REGION): each region enforces its share and borrows unused quota from the others, never exceeding the global quota. Fixed windows only.",
+                "properties": {
+                  "floors": {
+                    "additionalProperties": {
+                      "type": "number"
+                    },
+                    "description": "Each region's guaranteed share of every quota, 0 to 1 (e.g. {eu-west: 0.3, us-east: 0.3}). The rest of each key's quota belongs to its home region, chosen by hashing; shares move between regions with demand.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "floors"
+                ],
+                "type": "object"
+              },
               "lease_size": {
-                "description": "Tokens an edge takes from the hub per lease. Default runtime.edge.lease_size.",
+                "description": "Tokens an edge asks the hub for per lease (the first lease for a key, or every lease with leasing.mode fixed). Default runtime.edge.lease_size.",
                 "type": "integer"
+              },
+              "leasing": {
+                "additionalProperties": false,
+                "description": "How the hub sizes the grants it leases to edges. Default adaptive: each grant covers what the asking edge spends in 2s.",
+                "properties": {
+                  "horizon": {
+                    "description": "adaptive: how long one grant should last the asking edge. Longer means fewer hub calls; shorter means less quota held per edge. Default 2s.",
+                    "examples": [
+                      "500ms",
+                      "30s",
+                      "5m",
+                      "1h"
+                    ],
+                    "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                    "type": "string"
+                  },
+                  "max": {
+                    "description": "adaptive: largest grant. Default unbounded (a quarter of the quota at most when one ask exceeds it).",
+                    "type": "integer"
+                  },
+                  "min": {
+                    "description": "adaptive: smallest grant. Default 1.",
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "description": "adaptive (default) sizes each grant to the asking edge's demand; fixed always grants lease_size.",
+                    "enum": [
+                      "adaptive",
+                      "fixed"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "type": "object"
               },
               "max_concurrent": {
                 "description": "Requests one caller may have in flight on one edge. Default unlimited.",
                 "type": "integer"
               },
+              "mode": {
+                "description": "enforce (default), or shadow: evaluate the tier limits and report what they would deny (metrics and a Gate-Shadow-Denied header) without denying.",
+                "enum": [
+                  "enforce",
+                  "shadow"
+                ],
+                "type": "string"
+              },
+              "org": {
+                "additionalProperties": false,
+                "description": "A budget shared by every key with the same owner (API keys) or the same org claim (JWT), on top of each key's tier.",
+                "properties": {
+                  "claim": {
+                    "description": "jwt auth: the claim naming the caller's org. API-key callers' org is their key's owner.",
+                    "type": "string"
+                  },
+                  "requests": {
+                    "description": "Budget per window for all of one owner's keys together, in cost units.",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "window": {
+                    "description": "Window of the org budget, e.g. 1h or 720h. Default limits.window.",
+                    "examples": [
+                      "500ms",
+                      "30s",
+                      "5m",
+                      "1h"
+                    ],
+                    "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "requests"
+                ],
+                "type": "object"
+              },
               "tiers": {
                 "additionalProperties": {
                   "additionalProperties": false,
                   "properties": {
+                    "algorithm": {
+                      "description": "Overrides limits.algorithm for this tier.",
+                      "enum": [
+                        "fixed_window",
+                        "sliding_window",
+                        "token_bucket"
+                      ],
+                      "type": "string"
+                    },
+                    "burst": {
+                      "description": "token_bucket: the most cost admitted at once (the bucket's size).",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
                     "cost": {
                       "additionalProperties": {
                         "minimum": 0,
@@ -469,15 +795,22 @@
                       "description": "Cost per request by method (GET, POST, PUT, DELETE, or * for others). Default 1.",
                       "type": "object"
                     },
+                    "rate": {
+                      "description": "token_bucket: refill rate, e.g. 20/s or 1200/m.",
+                      "examples": [
+                        "20/s",
+                        "1200/m",
+                        "5000/h"
+                      ],
+                      "pattern": "^[0-9]+(\\.[0-9]+)?/(s|m|h)$",
+                      "type": "string"
+                    },
                     "requests": {
-                      "description": "Request budget per window (in cost units).",
+                      "description": "Budget per window, in cost units. Required except for token_bucket.",
                       "minimum": 0,
                       "type": "integer"
                     }
                   },
-                  "required": [
-                    "requests"
-                  ],
                   "type": "object"
                 },
                 "description": "Tiers by name. Each API key is assigned one tier.",
@@ -679,8 +1012,7 @@
     }
   },
   "required": [
-    "version",
-    "services"
+    "version"
   ],
   "title": "Gate gateway configuration (version 2)",
   "type": "object"

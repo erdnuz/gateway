@@ -40,7 +40,7 @@ log "build + start stack"
   echo
   echo "- commit: $(git rev-parse --short HEAD)$(git diff --quiet || echo ' (dirty)')"
   echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "- topology: hub(2 cpu) + hub Redis + 2 edges(2 cpu each, in-memory caches) + upstream; loadgen 4 cpu"
+  echo "- topology: hub(2 cpu) + hub Redis + 2 edges(2 cpu each, in-memory caches) + 2 gate limiter replicas(1 cpu each) + upstream; loadgen 4 cpu"
   echo "- host: $(docker info --format '{{.NCPU}} cpu, {{.MemTotal}} bytes mem, {{.OperatingSystem}}')"
 } >"${RESULTS}/report.md"
 
@@ -50,7 +50,7 @@ want() { [ -z "${ONLY:-}" ] || [[ " ${ONLY} " == *" $1 "* ]]; }
 
 lg() {
   local scenario="$1"; shift
-  case "${scenario}" in setup) ;; outage-warm|outage-check) want outage || return 0 ;; *) want "${scenario}" || return 0 ;; esac
+  case "${scenario}" in setup) ;; outage-warm|outage-check) want outage || return 0 ;; drain-warm) want drain || return 0 ;; *) want "${scenario}" || return 0 ;; esac
   log "scenario ${scenario}"
   "${COMPOSE[@]}" run --rm -T loadgen -scenario "${scenario}" -out "/results/${LABEL}" "$@"
   local rc=$?
@@ -99,6 +99,24 @@ reqs="$(sed -n 's/.*"total_requests": \([0-9]*\).*/\1/p' "${RESULTS}/throughput.
 fi
 
 lg hotkey
+lg endgame
+lg algorithms
+lg multilimit
+lg llm
+lg manykeys
+lg rls
+
+# Lease return on drain: both edges lease, edge 1 shuts down gracefully
+# (returning its tokens), edge 2 then uses the rest of the window.
+if want drain; then
+  "${COMPOSE[@]}" run --rm -T loadgen -scenario drain-warm -out "/results/${LABEL}" || FAIL+=("drain-warm")
+  log "stopping edge-1 (graceful)"
+  "${COMPOSE[@]}" stop -t 10 edge-1
+  lg drain -edges http://edge-1:8080,http://edge-2:8080
+  log "starting edge-1"
+  "${COMPOSE[@]}" start edge-1
+  "${COMPOSE[@]}" up -d --wait >/dev/null 2>&1
+fi
 
 if want outage; then
   lg outage-warm

@@ -82,6 +82,58 @@ var (
 		Help: "Quota tokens granted to edges. Compare with gate_requests_total to see leasing amortise hub work.",
 	})
 
+	ShadowDenials = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_ratelimit_shadow_denials_total",
+		Help: "Requests a shadow (dry-run) limit would have denied; they were admitted.",
+	}, []string{"service", "limit"})
+
+	LimitDenials = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_ratelimit_limit_denials_total",
+		Help: "Requests denied by an additional limit (per client IP, per service, ...) rather than the caller's tier.",
+	}, []string{"service", "limit"})
+
+	CostSettled = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_ratelimit_cost_settlements_total",
+		Help: "Post-hoc cost settlements: reported (the upstream's figure), estimated (none reported; the estimate stands) or refunded.",
+	}, []string{"service", "how"})
+
+	LeaseBatchSize = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "gate_edge_lease_batch_size",
+		Help:    "Lease requests per batched RPC; batching keeps hub RPCs proportional to edges, not keys.",
+		Buckets: []float64{1, 2, 4, 8, 16, 32, 64, 128, 256},
+	})
+
+	RegionTransfers = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gate_hub_region_transfers_total",
+		Help: "Attempts to borrow allocation from a peer region: credited, refused (nothing to spare), unreachable, late (window ended), lost.",
+	}, []string{"peer", "result"})
+
+	RegionTokensBorrowed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_region_tokens_borrowed_total",
+		Help: "Global-quota allocation this region borrowed from its peers.",
+	})
+
+	RegionTokensLent = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_region_tokens_lent_total",
+		Help: "Global-quota allocation this region lent to its peers.",
+	})
+
+	TokensReturned = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_tokens_returned_total",
+		Help: "Unspent tokens edges gave back on drain or idle eviction, so leaving edges strand no quota.",
+	})
+
+	DebtSettled = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "gate_hub_debt_settled_total",
+		Help: "Post-hoc cost debt edges settled with the ledger when they drained.",
+	})
+
+	LeaseActiveEdges = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "gate_hub_lease_active_edges",
+		Help:    "Edges sharing a quota when a grant is made; above 1, the endgame split divides what is left between them.",
+		Buckets: []float64{1, 2, 3, 4, 6, 8, 12, 16, 32},
+	})
+
 	ControlPublished = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gate_hub_control_events_total",
 		Help: "Config and tier changes delivered to this hub's watchers, by kind.",
