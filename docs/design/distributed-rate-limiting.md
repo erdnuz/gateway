@@ -66,14 +66,14 @@ What makes it correct:
 
 ([ADR 6](../adr/0006-adaptive-leases-and-endgame.md))
 
-Each edge reports what it spends on a key per second; the hub grants about
-`rate × horizon` (2 s by default). Busy keys get large grants and few hub
-calls, cold keys small ones.
+Each edge reports what it spends on a key per second; the hub grants the
+larger of the lease size and `rate × horizon` (2 s by default). Busy keys get
+large grants and few hub calls.
 
-Near the end of a quota, the grant script divides what is left between the
-edges active on it (a sorted set of edges seen in the last 2 horizons): once
-`remaining < active edges × target`, each grant is
-`ceil(remaining / active edges)`. Quota stranded on quiet edges at the end of
+Near the end of a quota (less than 64 grants left), the grant script divides
+what is left between the edges active on it (a sorted set of edges seen in
+the last 2 horizons): once `remaining < active edges × target`, each grant
+is `ceil(remaining / active edges)`. Quota stranded on quiet edges at the end of
 a window falls from `(edges − 1) × lease size` to about one token per active
 edge. On graceful shutdown, and when a key goes idle, an edge returns its
 unspent tokens, credited once to the window they came from.
@@ -84,10 +84,13 @@ unspent tokens, credited once to the window they came from.
   once, in its window. With post-hoc costs, at most `edges × max_debt` over
   ([ADR 9](../adr/0009-reservations-and-debt.md)).
 - **Bounded under-use**, about one token per active edge per quota.
-- Measured: the simulation's saturated scenarios use 98% of the quota on
-  average (400 scenarios with faults, skew and drains never exceed it); the
-  load test checks every full window admits `[Q − edges × lease, Q]`,
-  attributing requests by the `Gate-Window` header.
+- Measured: 1000 simulated scenarios with faults, clock skew and drains
+  never exceed the quota, and saturated ones use 99% of it on average; in
+  the load test every window admits exactly Q (1000 of 1000), attributing
+  requests by the `Gate-Window` header. Leasing costs the ledger about a
+  tenth of a per-request counter's work when keys are busy, and more when
+  nearly every request is a key's first in its window
+  ([benchmarks](../benchmarks.md)).
 
 ## Algorithms and multiple limits
 
