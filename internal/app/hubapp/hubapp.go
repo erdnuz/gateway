@@ -172,12 +172,16 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 		}
 	}()
 	tierStore := hub.NewTierManager(h.rdb)
-	control := hub.NewControlPlane(cfgManager, tierStore, h.rdb)
+	// Leases and key resolution read tiers from memory; every tier change
+	// reaches every hub over the control channel and invalidates it.
+	tierCache := hub.NewCachedTiers(tierStore, 30*time.Second)
+	control := hub.NewControlPlane(cfgManager, tierCache, h.rdb)
+	control.OnTierChange(tierCache.Invalidate)
 	go control.Run(ctx)
 	telemetry.RegisterWatchers(control.Watchers)
 	telemetry.ServeMetrics(ctx, cfg.MetricsAddr)
 
-	server := hub.NewHubServer(h.rdb, cfgManager, tierStore, control, cfg.AuthToken)
+	server := hub.NewHubServer(h.rdb, cfgManager, tierCache, control, cfg.AuthToken)
 	server.SetReadToken(cfg.ReadToken)
 	server.SetCORSAllowedOrigins(cfg.EdgeOrigins)
 	server.SetCORSPreflightPolicy(policy.CORSAllowedHeaders, policy.CORSAllowedMethods, policy.CORSPreflightMaxAge)
@@ -190,7 +194,7 @@ func Start(ctx context.Context, cfg Config) (*Hub, error) {
 	if h.grpcServer, err = newGRPCServer(cfg); err != nil {
 		return nil, err
 	}
-	leases := hub.NewQuotaLeaseServer(ledger.NewRedis(h.rdb), cfgManager, tierStore)
+	leases := hub.NewQuotaLeaseServer(ledger.NewRedis(h.rdb), cfgManager, tierCache)
 	types.RegisterQuotaLeaseServiceServer(h.grpcServer, leases)
 	if cfg.Region != "" {
 		node, err := startRegion(ctx, cfg, ledger.NewRedis(h.rdb))

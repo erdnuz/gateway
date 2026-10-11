@@ -77,9 +77,10 @@ local n = 1
 if edge ~= '' and avail < 64 * target then
   local ekey = KEYS[1] .. ':edges'
   redis.call('ZADD', ekey, now, edge)
-  redis.call('ZREMRANGEBYSCORE', ekey, '-inf', now - active_ms)
   redis.call('PEXPIRE', ekey, active_ms)
-  n = redis.call('ZCARD', ekey)
+  -- Count edges seen within the active window; stale members go with the
+  -- key when the quota goes quiet.
+  n = redis.call('ZCOUNT', ekey, '(' .. (now - active_ms), '+inf')
 end
 
 if avail <= 0 then

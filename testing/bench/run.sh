@@ -43,13 +43,15 @@ redis_calls() {
   echo "- date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "- host: $(docker info --format '{{.NCPU}} cpu, {{.MemTotal}} bytes mem, {{.OperatingSystem}}')"
   echo "- every data-plane replica, rate-limit service, hub and Redis is capped at 1 CPU; the load generator at 2"
-  echo "- accuracy: one key offered 2x its 500/s quota for 10 s (most / mean admitted per full second)"
-  echo "- latency: 2000 rps open loop over 1000 keys for 20 s; Redis commands per request over both phases"
+  echo "- every key's limit: 500 per second (1 s windows)"
+  echo "- accuracy: one key offered 2x its quota for 10 s (most / mean admitted per full second)"
+  echo "- cold: 1200 rps open loop over 1000 keys for 20 s (about 1 request per key per second: leasing's worst case)"
+  echo "- busy: 1200 rps open loop over 20 keys for 20 s (60 requests per key per second)"
   echo
-  echo "| system | replicas | admitted per s (max / mean) | quota | rps | p50 ms | p99 ms | p99.9 ms | errors | Redis cmds / req |"
+  echo "| system | replicas | phase | admitted per s (max / mean) | rps | p50 ms | p99 ms | p99.9 ms | errors | Redis cmds / req |"
   echo "|---|---|---|---|---|---|---|---|---|---|"
 } >"${RESULTS}/report.md"
-echo "system,replicas,accuracy_max_per_s,accuracy_mean_per_s,quota_per_s,rps,p50_ms,p99_ms,p999_ms,errors,redis_cmds_per_req" >"${RESULTS}/results.csv"
+echo "system,replicas,phase,rps,p50_ms,p99_ms,p999_ms,errors,redis_cmds_per_req" >"${RESULTS}/results.csv"
 
 "${COMPOSE[@]}" --profile tools --profile gate build || exit 1
 
@@ -66,14 +68,17 @@ for sys in ${SYSTEMS}; do
     "${COMPOSE[@]}" --profile "${profile}" up -d --wait --scale "${svc}=${n}" || { "${COMPOSE[@]}" --profile "${profile}" logs --tail 40; continue; }
     sleep 3
     "${COMPOSE[@]}" run --rm -T loadgen -scenario bench-setup -hub http://hub-server:8080 -prefix b >/dev/null || true
-    before="$(redis_calls)"
-    "${COMPOSE[@]}" run --rm -T loadgen -scenario bench -bench-target "${target}" -bench-path "${path}" \
-      -bench-label "${sys}-x${n}" -out "/results/${LABEL}" -bench-calls-before "${before}"
-    after="$(redis_calls)"
-    # The loadgen wrote a CSV row with a placeholder for Redis commands.
-    reqs="$(cat "${RESULTS}/${sys}-x${n}.requests" 2>/dev/null || echo 1)"
-    per="$(awk -v a="$((after - before))" -v r="${reqs}" 'BEGIN{printf "%.3f", a/(r>0?r:1)}')"
-    sed -i "s/REDIS_PER_REQ_${sys}-x${n}/${per}/" "${RESULTS}/results.csv" "${RESULTS}/report.md"
+    for phase in warm accuracy cold busy; do
+      before="$(redis_calls)"
+      "${COMPOSE[@]}" run --rm -T loadgen -scenario bench -bench-target "${target}" -bench-path "${path}" \
+        -bench-label "${sys}-x${n}" -bench-phase "${phase}" -out "/results/${LABEL}"
+      after="$(redis_calls)"
+      [ "${phase}" = warm ] && continue
+      id="${sys}-x${n}-${phase}"
+      reqs="$(cat "${RESULTS}/${id}.requests" 2>/dev/null || echo 1)"
+      per="$(awk -v a="$((after - before))" -v r="${reqs}" 'BEGIN{printf "%.3f", a/(r>0?r:1)}')"
+      sed -i "s/REDIS_PER_REQ_${id}/${per}/" "${RESULTS}/results.csv" "${RESULTS}/report.md"
+    done
   done
 done
 "${COMPOSE[@]}" --profile '*' down -v --remove-orphans >/dev/null 2>&1

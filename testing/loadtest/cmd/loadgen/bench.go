@@ -18,16 +18,17 @@ import (
 )
 
 var (
-	benchTarget = flag.String("bench-target", "edge:8080", "data plane service (host:port); every address it resolves to gets traffic")
-	benchPath   = flag.String("bench-path", "/b/bench/ping", "request path")
-	benchLabel  = flag.String("bench-label", "run", "row label")
-	_           = flag.Int64("bench-calls-before", 0, "unused; kept for run.sh")
+	benchTarget  = flag.String("bench-target", "edge:8080", "data plane service (host:port); every address it resolves to gets traffic")
+	benchPath    = flag.String("bench-path", "/b/bench/ping", "request path")
+	benchLabel   = flag.String("bench-label", "run", "row label")
+	benchPhase   = flag.String("bench-phase", "accuracy", "warm, accuracy, cold or busy")
+	benchRPSFlag = flag.Int("bench-rps", 1200, "open-loop rate for the cold and busy phases")
+	_            = flag.Int64("bench-calls-before", 0, "unused; kept for run.sh")
 )
 
 const (
 	benchQuota    = 500  // per key per second
 	benchKeys     = 1000 // keys for the latency phase
-	benchRPS      = 2000 // latency phase, open loop
 	benchAccuracy = 10 * time.Second
 	benchLatency  = 20 * time.Second
 )
@@ -91,58 +92,76 @@ func benchLoop(targets []string, keyFn func(i int) string, rps int, d time.Durat
 	return out
 }
 
+// scenarioBench runs one phase against the data plane and appends one row:
+//
+//	accuracy  one key at twice its quota: admitted per one-second window
+//	cold      1000 keys, about one request per key per second (leasing's
+//	          worst case: nearly every request needs a fresh grant)
+//	busy      20 keys at 60 requests per second each (the shape leasing
+//	          is built for)
+//
+// run.sh counts Redis commands around each phase.
 func scenarioBench(o options) *report {
 	targets := benchTargets()
-	// Warm every replica's connections and leases.
-	benchLoop(targets, func(i int) string { return fmt.Sprintf("bench%d", i%benchKeys) }, 500, 2*time.Second)
-
-	// Accuracy: one key at twice its quota, per one-second window.
-	acc := benchLoop(targets, func(int) string { return "benchhot" }, 2*benchQuota, benchAccuracy)
-	per := map[int64]int{}
-	for _, s := range acc {
-		if admitted(s) {
-			w := s.win
-			if w == 0 {
-				w = s.sentAt.Unix()
+	label, phase := *benchLabel, *benchPhase
+	var samples []sample
+	cell := "-"
+	switch phase {
+	case "warm":
+		benchLoop(targets, func(i int) string { return fmt.Sprintf("bench%d", i%benchKeys) }, 500, 2*time.Second)
+		return nil
+	case "accuracy":
+		samples = benchLoop(targets, func(int) string { return "benchhot" }, 2*benchQuota, benchAccuracy)
+		per := map[int64]int{}
+		for _, s := range samples {
+			if admitted(s) {
+				w := s.win
+				if w == 0 {
+					w = s.sentAt.Unix()
+				}
+				per[w]++
 			}
-			per[w]++
 		}
+		var counts []int
+		for _, w := range sortedWindows(per) {
+			counts = append(counts, per[w])
+		}
+		if len(counts) > 2 {
+			counts = counts[1 : len(counts)-1] // partial windows at either end
+		}
+		maxN, sum := 0, 0
+		for _, n := range counts {
+			maxN, sum = max(maxN, n), sum+n
+		}
+		if len(counts) > 0 {
+			cell = fmt.Sprintf("**%d** / %.0f", maxN, float64(sum)/float64(len(counts)))
+		}
+	case "cold":
+		samples = benchLoop(targets, func(i int) string { return fmt.Sprintf("bench%d", (i*7919)%benchKeys) }, *benchRPSFlag, benchLatency)
+	case "busy":
+		samples = benchLoop(targets, func(i int) string { return fmt.Sprintf("bench%d", i%20) }, *benchRPSFlag, benchLatency)
+	default:
+		log.Fatalf("unknown bench phase %q", phase)
 	}
-	var counts []int
-	for _, w := range sortedWindows(per) {
-		counts = append(counts, per[w])
-	}
-	if len(counts) > 2 {
-		counts = counts[1 : len(counts)-1] // partial windows at either end
-	}
-	maxN, sum := 0, 0
-	for _, n := range counts {
-		maxN, sum = max(maxN, n), sum+n
-	}
-	mean := 0.0
-	if len(counts) > 0 {
-		mean = float64(sum) / float64(len(counts))
-	}
-
-	// Latency: quota never binding, many keys, a fixed open-loop rate.
-	lat := benchLoop(targets, func(i int) string { return fmt.Sprintf("bench%d", (i*7919)%benchKeys) }, benchRPS, benchLatency)
-	ls := latencies(lat, nil)
+	ls := latencies(samples, nil)
 	errs := 0
-	for _, s := range lat {
+	for _, s := range samples {
 		if s.status == 0 || s.status >= 500 {
 			errs++
 		}
 	}
-	rps := float64(len(lat)) / benchLatency.Seconds()
-
-	label := *benchLabel
-	row := fmt.Sprintf("| %s | %d | **%d** / %.0f | %d | %.0f | %.2f | **%.2f** | %.2f | %d | REDIS_PER_REQ_%s |\n",
-		label, len(targets), maxN, mean, benchQuota, rps, ls.P50, ls.P99, ls.P999, errs, label)
+	secs := benchLatency.Seconds()
+	if phase == "accuracy" {
+		secs = benchAccuracy.Seconds()
+	}
+	id := label + "-" + phase
+	row := fmt.Sprintf("| %s | %d | %s | %s | %.0f | %.2f | **%.2f** | %.2f | %d | REDIS_PER_REQ_%s |\n",
+		label, len(targets), phase, cell, float64(len(samples))/secs, ls.P50, ls.P99, ls.P999, errs, id)
 	appendFile(filepath.Join(o.outDir, "report.md"), row)
 	fmt.Print(row)
-	appendFile(filepath.Join(o.outDir, "results.csv"), fmt.Sprintf("%s,%d,%d,%.1f,%d,%.0f,%.3f,%.3f,%.3f,%d,REDIS_PER_REQ_%s\n",
-		strings.SplitN(label, "-x", 2)[0], len(targets), maxN, mean, benchQuota, rps, ls.P50, ls.P99, ls.P999, errs, label))
-	_ = os.WriteFile(filepath.Join(o.outDir, label+".requests"), []byte(fmt.Sprint(len(acc)+len(lat))), 0o644)
+	appendFile(filepath.Join(o.outDir, "results.csv"), fmt.Sprintf("%s,%d,%s,%.0f,%.3f,%.3f,%.3f,%d,REDIS_PER_REQ_%s\n",
+		strings.SplitN(label, "-x", 2)[0], len(targets), phase, float64(len(samples))/secs, ls.P50, ls.P99, ls.P999, errs, id))
+	_ = os.WriteFile(filepath.Join(o.outDir, id+".requests"), []byte(fmt.Sprint(len(samples))), 0o644)
 	return nil
 }
 

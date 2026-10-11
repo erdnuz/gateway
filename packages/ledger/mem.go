@@ -105,12 +105,14 @@ func (m *Mem) Grant(_ context.Context, ref Ref, spec Spec, args GrantArgs) (Gran
 			m.edges[in.key] = set
 		}
 		set[in.edge] = now
+		n = 0
 		for e, at := range set {
-			if at <= now-in.activeMs {
-				delete(set, e)
+			if at > now-in.activeMs {
+				n++
+			} else if len(set) > 64 {
+				delete(set, e) // bound memory; stale edges are not counted anyway
 			}
 		}
-		n = int64(len(set))
 	}
 
 	if avail <= 0 {
