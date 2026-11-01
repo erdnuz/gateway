@@ -284,6 +284,10 @@ func maxInSpan(samples []sample, d time.Duration) int {
 
 // Multi-limit: ten keys, each well within its tier, share one client
 // address limited to 300 per window. The per-IP limit binds.
+func multiLimitAdmittedBounds(ipQuota, edgeCount int) (int, int) {
+	return ipQuota - 2*edgeCount, ipQuota + edgeCount
+}
+
 func scenarioMultiLimit(o options) *report {
 	r := &report{Scenario: "multilimit", Data: map[string]any{}}
 	const ipQuota = 300
@@ -295,7 +299,8 @@ func scenarioMultiLimit(o options) *report {
 	fmt.Fprintf(&r.markdown, "Ten keys (tier quota %d each) from one client address, %d rps total, with `also: per-ip %d per window`. Expect the per-IP limit to bind.\n\n", o.quota, rps, ipQuota)
 	windowTable(&r.markdown, ws)
 	for _, w := range fullWindows(ws, rps*int(o.period/time.Second)) {
-		r.check(w.Admitted <= ipQuota && w.Admitted >= ipQuota-2*len(o.edges), "window %d admitted %d (per-IP limit %d)", w.Window, w.Admitted, ipQuota)
+		lo, hi := multiLimitAdmittedBounds(ipQuota, len(o.edges))
+		r.check(w.Admitted <= hi && w.Admitted >= lo, "window %d admitted %d (per-IP limit %d)", w.Window, w.Admitted, ipQuota)
 	}
 	return r
 }
